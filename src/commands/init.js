@@ -15,7 +15,7 @@ module.exports = function (program) {
     .option('--yes', 'Skip prompts, use defaults')
     .option('--dir <path>', 'Project directory', process.cwd())
     .action(async (opts) => {
-      console.log(chalk.cyan('\n  Contexa AI-Native Zero Trust Security\n'));
+      console.log('');
 
       // 1. Detect project
       const spinner = ora('Detecting Spring project...').start();
@@ -49,48 +49,46 @@ module.exports = function (program) {
       const answers = opts.yes ? defaults : await inquirer.prompt([
         {
           type: 'list', name: 'securityMode',
-          message: 'Security integration mode:',
+          message: 'Your project type (New project / Legacy system):',
           choices: [
-            { name: 'FULL      - Contexa manages entire authentication  (default)', value: 'full' },
-            { name: 'SANDBOX   - Legacy auth preserved, Contexa adds Zero Trust',   value: 'sandbox' },
+            { name: 'New project     - Contexa handles login + security  (default)', value: 'full' },
+            { name: 'Legacy system  - Keep your login, add AI security',             value: 'sandbox' },
           ],
         },
         {
-          type: 'list', name: 'mode', message: 'Initial analysis mode:',
+          type: 'list', name: 'mode', message: 'Enable AI security immediately:',
           choices: [
-            { name: 'Shadow    - analyze only, no blocking  (default)', value: 'shadow' },
-            { name: 'Enforce   - block threats immediately',            value: 'enforce' },
+            { name: 'No, observe   - monitor and log only  (default)', value: 'shadow' },
+            { name: 'Yes, enforce  - detect and block immediately',    value: 'enforce' },
           ],
         },
         {
-          type: 'checkbox', name: 'llmProviders', message: 'LLM providers (space to select, enter to confirm):',
+          type: 'checkbox', name: 'llmProviders', message: 'AI / LLM Model (space to select, enter to confirm):',
           choices: [
-            { name: 'Ollama     (local, privacy-safe)  (default)',  value: 'ollama',    checked: true },
-            { name: 'OpenAI     (gpt-4o-mini)',                     value: 'openai' },
-            { name: 'Anthropic  (Claude Sonnet)',                   value: 'anthropic' },
+            { name: 'Ollama     - runs locally, no data leaves your server  (default)',  value: 'ollama',    checked: true },
+            { name: 'OpenAI     - cloud API, fast (requires API key)',                   value: 'openai' },
+            { name: 'Anthropic  - cloud API, advanced (requires API key)',               value: 'anthropic' },
           ],
-          validate: a => a.length > 0 ? true : 'Select at least one provider',
+          validate: a => a.length > 0 ? true : 'Select at least one',
         },
         {
-          type: 'list', name: 'infra', message: 'Infrastructure mode:',
+          type: 'list', name: 'infra', message: 'Infrastructure setup (Docker):',
           choices: [
-            { name: 'Standalone   (PostgreSQL + Ollama + In Memory)  (default)',  value: 'standalone' },
-            { name: 'Distributed  (PostgreSQL + Ollama + Redis + Kafka)',         value: 'distributed' },
-            { name: 'Skip         (I will configure infrastructure manually)',   value: 'skip' },
+            { name: 'Standard      - PostgreSQL + Ollama + In Memory  (default)',  value: 'standalone' },
+            { name: 'Distributed   - PostgreSQL + Ollama + Redis + Kafka',         value: 'distributed' },
+            { name: 'Skip          - I will set up infrastructure myself',         value: 'skip' },
           ],
-        },
-        {
-          type: 'confirm', name: 'injectDep',
-          message: a => `Add dependency to ${project.buildTool === 'maven' ? 'pom.xml' : 'build.gradle'}? (default: Yes)`,
-          default: true,
         },
         {
           type: 'confirm', name: 'startDocker',
-          message: 'Start Docker containers now?',
+          message: 'Start Docker containers now? (default: Yes)',
           default: true,
           when: a => a.infra !== 'skip' && project.hasDocker,
         },
       ]);
+
+      // Always inject dependency
+      answers.injectDep = true;
 
       console.log('');
 
