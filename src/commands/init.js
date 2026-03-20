@@ -117,7 +117,7 @@ module.exports = function (program) {
         if (answers.startDocker && project.hasDocker) {
           const s4 = ora('Starting Docker containers...').start();
           try {
-            execSync('docker compose up -d', { cwd: opts.dir, stdio: 'ignore' });
+            execSync('docker compose up -d', { cwd: opts.dir, stdio: 'inherit' });
             s4.succeed('Docker containers started');
 
             // 7. Pull Ollama models
