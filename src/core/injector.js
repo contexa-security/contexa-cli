@@ -327,6 +327,7 @@ CREATE TABLE users (
 );
 CREATE INDEX idx_users_email ON users (email);
 CREATE INDEX idx_users_department ON users (department);
+CREATE INDEX idx_users_enabled ON users (enabled);
 
 CREATE TABLE app_group (
     group_id    BIGSERIAL PRIMARY KEY,
@@ -412,11 +413,11 @@ CREATE TABLE policy (
     priority             INTEGER NOT NULL,
     friendly_description VARCHAR(2048),
     ai_model             VARCHAR(255),
-    approval_status      VARCHAR(50),
+    approval_status      VARCHAR(50) CHECK (approval_status IN ('PENDING','APPROVED','REJECTED','NOT_REQUIRED')),
     approved_at          TIMESTAMP(6),
     approved_by          VARCHAR(255),
     confidence_score     DOUBLE PRECISION,
-    source               VARCHAR(50),
+    source               VARCHAR(50) CHECK (source IN ('MANUAL','AI_GENERATED','AI_EVOLVED','IMPORTED')),
     updated_at           TIMESTAMP(6),
     created_at           TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_active            BOOLEAN DEFAULT TRUE NOT NULL
@@ -427,7 +428,7 @@ CREATE TABLE policy_target (
     policy_id         BIGINT NOT NULL REFERENCES policy ON DELETE CASCADE,
     target_type       VARCHAR(255) NOT NULL,
     target_identifier VARCHAR(255) NOT NULL,
-    http_method       VARCHAR(10)
+    http_method       VARCHAR(255)
 );
 
 CREATE TABLE policy_rule (
@@ -445,13 +446,10 @@ CREATE TABLE policy_condition (
 );
 
 CREATE TABLE role_hierarchy_config (
-    id               BIGSERIAL PRIMARY KEY,
+    hierarchy_id     BIGSERIAL PRIMARY KEY,
     description      VARCHAR(500),
-    hierarchy_string TEXT NOT NULL,
-    is_active        BOOLEAN DEFAULT FALSE NOT NULL,
-    created_at       TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMP(6),
-    created_by       VARCHAR(100)
+    hierarchy_string TEXT NOT NULL UNIQUE,
+    is_active        BOOLEAN DEFAULT FALSE NOT NULL
 );
 
 CREATE TABLE audit_log (
@@ -466,9 +464,7 @@ CREATE TABLE audit_log (
     details             TEXT,
     outcome             VARCHAR(255),
     resource_uri        VARCHAR(1024),
-    parameters          VARCHAR(255),
     session_id          VARCHAR(255),
-    status              VARCHAR(255),
     correlation_id      VARCHAR(64),
     event_category      VARCHAR(50),
     event_source        VARCHAR(50),
@@ -507,14 +503,14 @@ CREATE TABLE condition_template (
     parameter_count       INTEGER DEFAULT 0 NOT NULL,
     description           VARCHAR(1024),
     required_target_type  VARCHAR(1024),
-    created_at            TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at            TIMESTAMP(6),
     is_auto_generated     BOOLEAN,
     is_universal          BOOLEAN,
     source_method         VARCHAR(255),
     template_type         VARCHAR(255),
     updated_at            TIMESTAMP(6),
     approval_required     BOOLEAN,
-    classification        VARCHAR(255),
+    classification        VARCHAR(255) CHECK (classification IN ('UNIVERSAL','CONTEXT_DEPENDENT','CUSTOM_COMPLEX')),
     complexity_score      INTEGER,
     context_dependent     BOOLEAN
 );
@@ -522,7 +518,7 @@ CREATE TABLE condition_template (
 CREATE TABLE wizard_session (
     session_id    VARCHAR(36) NOT NULL PRIMARY KEY,
     context_data  TEXT NOT NULL,
-    owner_user_id VARCHAR(100) NOT NULL,
+    owner_user_id VARCHAR(255) NOT NULL,
     created_at    TIMESTAMP(6) NOT NULL,
     expires_at    TIMESTAMP(6) NOT NULL
 );
@@ -536,7 +532,7 @@ CREATE TABLE function_catalog (
     id                  BIGSERIAL PRIMARY KEY,
     description         VARCHAR(1024),
     friendly_name       VARCHAR(255) NOT NULL,
-    status              VARCHAR(50) NOT NULL,
+    status              VARCHAR(50) NOT NULL CHECK (status IN ('UNCONFIRMED','ACTIVE','INACTIVE')),
     function_group_id   BIGINT REFERENCES function_group,
     managed_resource_id BIGINT NOT NULL UNIQUE REFERENCES managed_resource
 );
@@ -578,7 +574,7 @@ CREATE TABLE soar_incidents (
     created_at   TIMESTAMP(6) NOT NULL,
     history      TEXT,
     severity     VARCHAR(255),
-    status       VARCHAR(255) NOT NULL,
+    status       VARCHAR(255) NOT NULL CHECK (status IN ('NEW','TRIAGE','INVESTIGATION','PLANNING','PENDING_APPROVAL','EXECUTION','REPORTING','COMPLETED','AUTO_CLOSED','FAILED','CLOSED_BY_ADMIN')),
     title        VARCHAR(255) NOT NULL,
     updated_at   TIMESTAMP(6) NOT NULL,
     description  TEXT,
@@ -599,61 +595,101 @@ CREATE TABLE soar_approval_policies (
 );
 
 CREATE TABLE soar_approval_requests (
-    id                   BIGSERIAL PRIMARY KEY,
-    action_name          VARCHAR(255) NOT NULL,
-    created_at           TIMESTAMP(6) NOT NULL,
-    description          TEXT,
-    organization_id      VARCHAR(120),
-    parameters           TEXT,
-    playbook_instance_id VARCHAR(255) NOT NULL,
-    required_approvers   INTEGER,
-    required_roles       TEXT,
-    reviewer_comment     TEXT,
-    reviewer_id          VARCHAR(255),
-    status               VARCHAR(255) NOT NULL,
-    updated_at           TIMESTAMP(6) NOT NULL,
-    request_id           VARCHAR(255) NOT NULL UNIQUE,
-    action_type          VARCHAR(255),
-    approval_comment     TEXT,
-    approval_timeout     INTEGER,
-    approval_type        VARCHAR(255),
-    approved_at          TIMESTAMP(6),
-    approved_by          VARCHAR(255),
-    incident_id          VARCHAR(255),
-    requested_by         VARCHAR(255),
-    risk_level           VARCHAR(255),
-    session_id           VARCHAR(255),
-    tool_name            VARCHAR(255)
+    id                        BIGSERIAL PRIMARY KEY,
+    action_name               VARCHAR(255) NOT NULL,
+    created_at                TIMESTAMP(6) NOT NULL,
+    description               TEXT,
+    organization_id           VARCHAR(255),
+    parameters                TEXT,
+    playbook_instance_id      VARCHAR(255) NOT NULL,
+    required_approvers        INTEGER,
+    required_roles            TEXT,
+    reviewer_comment          TEXT,
+    reviewer_id               VARCHAR(255),
+    status                    VARCHAR(255) NOT NULL,
+    updated_at                TIMESTAMP(6) NOT NULL,
+    request_id                VARCHAR(255) NOT NULL UNIQUE,
+    action_type               VARCHAR(255),
+    approval_comment          TEXT,
+    approval_timeout          INTEGER,
+    approval_type             VARCHAR(255),
+    approved_at               TIMESTAMP(6),
+    approved_by               VARCHAR(255),
+    incident_id               VARCHAR(255),
+    requested_by              VARCHAR(255),
+    risk_level                VARCHAR(255),
+    session_id                VARCHAR(255),
+    tool_name                 VARCHAR(255),
+    approved_count            INTEGER,
+    rejected_count            INTEGER,
+    remaining_approvals       INTEGER,
+    quorum_satisfied          BOOLEAN DEFAULT FALSE,
+    current_step_number       INTEGER,
+    total_steps               INTEGER,
+    reopened_from_request_id  VARCHAR(255),
+    break_glass_requested     BOOLEAN DEFAULT FALSE,
+    break_glass_reason        TEXT
 );
 
 CREATE TABLE soar_approval_steps (
-    id            BIGSERIAL PRIMARY KEY,
-    request_id    BIGINT REFERENCES soar_approval_requests,
-    step_order    INTEGER NOT NULL,
-    required_role VARCHAR(255),
-    status        VARCHAR(255) NOT NULL,
-    assigned_to   VARCHAR(255),
-    completed_at  TIMESTAMP(6),
-    created_at    TIMESTAMP(6) NOT NULL
+    id                  BIGSERIAL PRIMARY KEY,
+    request_id          VARCHAR(100) NOT NULL,
+    step_number         INTEGER NOT NULL,
+    step_name           VARCHAR(150) NOT NULL,
+    status              VARCHAR(30) NOT NULL,
+    required_approvers  INTEGER NOT NULL,
+    approved_count      INTEGER NOT NULL,
+    rejected_count      INTEGER NOT NULL,
+    remaining_approvals INTEGER NOT NULL,
+    required_roles      TEXT,
+    opened_at           TIMESTAMP(6),
+    completed_at        TIMESTAMP(6),
+    created_at          TIMESTAMP(6) NOT NULL,
+    updated_at          TIMESTAMP(6) NOT NULL,
+    CONSTRAINT uk_soar_approval_step_request_number UNIQUE (request_id, step_number)
 );
+
+CREATE INDEX idx_soar_approval_step_request_id ON soar_approval_steps (request_id);
+CREATE INDEX idx_soar_approval_step_status ON soar_approval_steps (status);
 
 CREATE TABLE soar_approval_assignments (
-    id           BIGSERIAL PRIMARY KEY,
-    step_id      BIGINT REFERENCES soar_approval_steps,
-    assignee_id  VARCHAR(255) NOT NULL,
-    assigned_at  TIMESTAMP(6) NOT NULL,
-    status       VARCHAR(255) NOT NULL,
-    responded_at TIMESTAMP(6)
+    id                BIGSERIAL PRIMARY KEY,
+    request_id        VARCHAR(100) NOT NULL,
+    step_number       INTEGER NOT NULL,
+    assignee_id       VARCHAR(100),
+    assignee_role     VARCHAR(100),
+    status            VARCHAR(30) NOT NULL,
+    assigned_by       VARCHAR(100),
+    assigned_at       TIMESTAMP(6),
+    responded_at      TIMESTAMP(6),
+    response_decision VARCHAR(30),
+    response_comment  TEXT,
+    created_at        TIMESTAMP(6) NOT NULL,
+    updated_at        TIMESTAMP(6) NOT NULL
 );
 
+CREATE INDEX idx_soar_approval_assignment_request_id ON soar_approval_assignments (request_id);
+CREATE INDEX idx_soar_approval_assignment_status ON soar_approval_assignments (status);
+CREATE INDEX idx_soar_approval_assignment_step ON soar_approval_assignments (request_id, step_number);
+
 CREATE TABLE soar_approval_votes (
-    id         BIGSERIAL PRIMARY KEY,
-    request_id BIGINT REFERENCES soar_approval_requests,
-    voter_id   VARCHAR(255) NOT NULL,
-    decision   VARCHAR(255) NOT NULL,
-    comment    TEXT,
-    voted_at   TIMESTAMP(6) NOT NULL
+    id            BIGSERIAL PRIMARY KEY,
+    request_id    VARCHAR(100) NOT NULL,
+    approver_id   VARCHAR(100) NOT NULL,
+    approver_name VARCHAR(150),
+    approver_role VARCHAR(100) NOT NULL,
+    decision      VARCHAR(20) NOT NULL,
+    comment       TEXT,
+    step_number   INTEGER NOT NULL,
+    created_at    TIMESTAMP(6) NOT NULL,
+    updated_at    TIMESTAMP(6) NOT NULL,
+    CONSTRAINT uk_soar_approval_vote_request_approver_step UNIQUE (request_id, approver_id, step_number)
 );
+
+CREATE INDEX idx_soar_approval_vote_request_id ON soar_approval_votes (request_id);
+CREATE INDEX idx_soar_approval_vote_decision ON soar_approval_votes (decision);
+CREATE INDEX idx_soar_approval_vote_created_at ON soar_approval_votes (created_at);
+CREATE INDEX idx_soar_approval_vote_request_step ON soar_approval_votes (request_id, step_number);
 
 CREATE TABLE approval_notifications (
     id                BIGSERIAL PRIMARY KEY,
@@ -678,6 +714,7 @@ CREATE TABLE approval_notifications (
 CREATE INDEX idx_notification_request_id ON approval_notifications (request_id);
 CREATE INDEX idx_notification_user_id ON approval_notifications (user_id);
 CREATE INDEX idx_notification_is_read ON approval_notifications (is_read);
+CREATE INDEX idx_notification_created_at ON approval_notifications (created_at);
 
 CREATE TABLE threat_indicators (
     indicator_id         VARCHAR(255) NOT NULL PRIMARY KEY,
@@ -699,13 +736,13 @@ CREATE TABLE threat_indicators (
     mitre_tactic         VARCHAR(255),
     mitre_technique      VARCHAR(255),
     nist_csf_category    VARCHAR(255),
-    severity             VARCHAR(50) NOT NULL,
+    severity             VARCHAR(255) NOT NULL CHECK (severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
     source               VARCHAR(255),
-    status               VARCHAR(50),
+    status               VARCHAR(255) CHECK (status IN ('ACTIVE','INACTIVE','EXPIRED','FALSE_POSITIVE','UNDER_REVIEW')),
     threat_actor         VARCHAR(255),
     threat_actor_id      VARCHAR(255),
     threat_score         DOUBLE PRECISION,
-    indicator_type       VARCHAR(50) NOT NULL,
+    indicator_type       VARCHAR(255) NOT NULL CHECK (indicator_type IN ('IP_ADDRESS','DOMAIN','URL','FILE_HASH','FILE_PATH','REGISTRY_KEY','PROCESS_NAME','EMAIL_ADDRESS','USER_AGENT','CERTIFICATE','MUTEX','YARA_RULE','BEHAVIORAL','UNKNOWN','PATTERN','USER_ACCOUNT','COMPLIANCE','EVENT')),
     updated_at           TIMESTAMP(6),
     indicator_value      VARCHAR(255) NOT NULL
 );
@@ -741,7 +778,7 @@ CREATE TABLE blocked_user (
     resolved_by          VARCHAR(255),
     risk_score           DOUBLE PRECISION,
     source_ip            VARCHAR(45),
-    status               VARCHAR(50) NOT NULL,
+    status               VARCHAR(50) NOT NULL CHECK (status IN ('BLOCKED','UNBLOCK_REQUESTED','RESOLVED','TIMEOUT_RESPONDED','MFA_FAILED')),
     user_agent           VARCHAR(512),
     user_id              VARCHAR(100) NOT NULL,
     username             VARCHAR(100),
@@ -881,7 +918,6 @@ CREATE TABLE mcp_client_states (
     health_status          VARCHAR(30) NOT NULL DEFAULT 'UNKNOWN',
     health_message         VARCHAR(500),
     last_health_checked_at TIMESTAMP(6),
-    created_at             TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at             TIMESTAMP(6) NOT NULL
 );
 
@@ -893,7 +929,6 @@ CREATE TABLE mcp_surface_states (
     enabled              BOOLEAN NOT NULL DEFAULT TRUE,
     version              VARCHAR(64) NOT NULL,
     last_refreshed_at    TIMESTAMP(6),
-    created_at           TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at           TIMESTAMP(6) NOT NULL
 );
 
@@ -909,9 +944,9 @@ CREATE TABLE tool_execution_contexts (
     tool_arguments       TEXT,
     tool_definitions     TEXT,
     prompt_content       TEXT NOT NULL,
-    execution_class      VARCHAR(255),
-    arguments_hash       VARCHAR(64),
-    required_scope       VARCHAR(100),
+    execution_class      VARCHAR(30),
+    arguments_hash       VARCHAR(128),
+    required_scope       VARCHAR(500),
     available_tools      TEXT,
     chat_options         TEXT,
     chat_response        TEXT,
@@ -940,7 +975,7 @@ CREATE TABLE tenant_lifecycle_events (
     tenant_id   VARCHAR(120) NOT NULL,
     event_type  VARCHAR(80) NOT NULL,
     actor_id    VARCHAR(120),
-    payload     TEXT,
+    payload_json TEXT,
     created_at  TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_lifecycle_event_tenant_created ON tenant_lifecycle_events (tenant_id, created_at);
@@ -978,6 +1013,7 @@ CREATE TABLE tenant_subscriptions (
     updated_at               TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_sub_plan ON tenant_subscriptions (plan_code);
+CREATE INDEX idx_tenant_sub_contract_end ON tenant_subscriptions (contract_end_at);
 
 CREATE TABLE tenant_environments (
     id              BIGSERIAL PRIMARY KEY,
@@ -1028,7 +1064,7 @@ CREATE TABLE tenant_provisioning_tasks (
     task_type     VARCHAR(120) NOT NULL,
     status        VARCHAR(40) NOT NULL DEFAULT 'PENDING',
     reference_key VARCHAR(160),
-    payload       TEXT,
+    payload_json  TEXT,
     scheduled_at  TIMESTAMP(6),
     started_at    TIMESTAMP(6),
     completed_at  TIMESTAMP(6),
@@ -1038,6 +1074,7 @@ CREATE TABLE tenant_provisioning_tasks (
     updated_at    TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_prov_status ON tenant_provisioning_tasks (tenant_id, task_type, status);
+CREATE INDEX idx_tenant_prov_ref ON tenant_provisioning_tasks (tenant_id, reference_key);
 
 CREATE TABLE tenant_purge_requests (
     id                   BIGSERIAL PRIMARY KEY,
@@ -1046,7 +1083,7 @@ CREATE TABLE tenant_purge_requests (
     reference_key        VARCHAR(160) NOT NULL,
     status               VARCHAR(40) NOT NULL,
     approval_state       VARCHAR(60) NOT NULL,
-    data_domains         TEXT,
+    data_domains_json    TEXT,
     requested_by         VARCHAR(120) NOT NULL,
     request_reason       VARCHAR(1000),
     approved_by          VARCHAR(120),
@@ -1057,11 +1094,12 @@ CREATE TABLE tenant_purge_requests (
     executed_at          TIMESTAMP(6),
     scheduled_at         TIMESTAMP(6) NOT NULL,
     execution_summary    VARCHAR(1000),
-    metadata             TEXT,
+    metadata_json        TEXT,
     created_at           TIMESTAMP(6) NOT NULL,
     updated_at           TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_purge_status ON tenant_purge_requests (tenant_id, status, scheduled_at);
+CREATE INDEX idx_tenant_purge_prov ON tenant_purge_requests (tenant_id, provisioning_task_id);
 
 CREATE TABLE tenant_backup_policies (
     id                              BIGSERIAL PRIMARY KEY,
@@ -1093,7 +1131,7 @@ CREATE TABLE tenant_restore_drills (
     started_at         TIMESTAMP(6) NOT NULL,
     completed_at       TIMESTAMP(6) NOT NULL,
     notes              VARCHAR(1000),
-    metadata           TEXT,
+    metadata_json      TEXT,
     created_at         TIMESTAMP(6) NOT NULL,
     updated_at         TIMESTAMP(6) NOT NULL
 );
@@ -1106,7 +1144,6 @@ CREATE TABLE tenant_quotas (
     limit_value BIGINT NOT NULL,
     policy_type VARCHAR(40) NOT NULL DEFAULT 'HARD_LIMIT',
     grace_until TIMESTAMP(6),
-    created_at  TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_quota ON tenant_quotas (tenant_id, quota_key);
@@ -1120,10 +1157,11 @@ CREATE TABLE tenant_quota_violations (
     limit_value     BIGINT NOT NULL,
     message         VARCHAR(500) NOT NULL,
     billing_period  VARCHAR(20) NOT NULL,
-    metadata        TEXT,
+    metadata_json   TEXT,
     occurred_at     TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_violation_time ON tenant_quota_violations (tenant_id, occurred_at);
+CREATE INDEX idx_tenant_violation_key ON tenant_quota_violations (tenant_id, quota_key, billing_period);
 
 CREATE TABLE tenant_isolation_states (
     id                BIGSERIAL PRIMARY KEY,
@@ -1154,10 +1192,11 @@ CREATE TABLE tenant_isolation_events (
     limit_value     BIGINT NOT NULL,
     window_seconds  INTEGER NOT NULL,
     message         VARCHAR(500) NOT NULL,
-    metadata        TEXT,
+    metadata_json   TEXT,
     occurred_at     TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_tenant_iso_event_time ON tenant_isolation_events (tenant_id, occurred_at);
+CREATE INDEX idx_tenant_iso_event_scope ON tenant_isolation_events (tenant_id, scope_type, scope_key, workload_type, decision);
 
 CREATE TABLE tenant_workload_leases (
     id            BIGSERIAL PRIMARY KEY,
@@ -1166,12 +1205,13 @@ CREATE TABLE tenant_workload_leases (
     owner_id      VARCHAR(160) NOT NULL,
     resource_key  VARCHAR(200),
     status        VARCHAR(40) NOT NULL,
-    metadata      TEXT,
+    metadata_json TEXT,
     acquired_at   TIMESTAMP(6) NOT NULL,
     expires_at    TIMESTAMP(6) NOT NULL,
     released_at   TIMESTAMP(6)
 );
 CREATE INDEX idx_tenant_lease_active ON tenant_workload_leases (tenant_id, workload_type, status, expires_at);
+CREATE INDEX idx_tenant_lease_acquired ON tenant_workload_leases (tenant_id, workload_type, acquired_at);
 
 CREATE TABLE protected_app_groups (
     id                BIGSERIAL PRIMARY KEY,
@@ -1186,6 +1226,7 @@ CREATE TABLE protected_app_groups (
     updated_at        TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_app_group_tenant_status ON protected_app_groups (tenant_id, status);
+CREATE INDEX idx_app_group_tenant_heartbeat ON protected_app_groups (tenant_id, last_heartbeat_at);
 
 CREATE TABLE protected_app_endpoints (
     id           BIGSERIAL PRIMARY KEY,
@@ -1198,6 +1239,7 @@ CREATE TABLE protected_app_endpoints (
     created_at   TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_app_endpoint_group ON protected_app_endpoints (app_group_id);
+CREATE INDEX idx_app_endpoint_tenant ON protected_app_endpoints (tenant_id, status);
 
 CREATE TABLE protected_app_bindings (
     id           BIGSERIAL PRIMARY KEY,
@@ -1216,9 +1258,10 @@ CREATE TABLE protected_app_heartbeats (
     client_id     VARCHAR(160),
     occurred_at   TIMESTAMP(6) NOT NULL,
     source_module VARCHAR(120) NOT NULL,
-    metadata      TEXT
+    metadata_json TEXT
 );
 CREATE INDEX idx_app_heartbeat_group ON protected_app_heartbeats (tenant_id, app_group_id, occurred_at);
+CREATE INDEX idx_app_heartbeat_client ON protected_app_heartbeats (tenant_id, client_id, occurred_at);
 
 CREATE TABLE billing_contracts (
     id                     BIGSERIAL PRIMARY KEY,
@@ -1270,6 +1313,7 @@ CREATE TABLE billing_line_items (
     created_at  TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_billing_line_invoice ON billing_line_items (invoice_id);
+CREATE INDEX idx_billing_line_meter ON billing_line_items (meter_key);
 
 CREATE TABLE billing_adjustments (
     id              BIGSERIAL PRIMARY KEY,
@@ -1287,11 +1331,13 @@ CREATE TABLE billing_adjustments (
     voided_at       TIMESTAMP(6),
     voided_by       VARCHAR(120),
     void_reason     VARCHAR(255),
-    metadata        TEXT,
+    metadata_json   TEXT,
     created_at      TIMESTAMP(6) NOT NULL,
     updated_at      TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_billing_adj_tenant ON billing_adjustments (tenant_id, billing_period);
+CREATE INDEX idx_billing_adj_status ON billing_adjustments (status);
+CREATE INDEX idx_billing_adj_invoice ON billing_adjustments (invoice_id);
 
 CREATE TABLE invoice_export_batches (
     id              BIGSERIAL PRIMARY KEY,
@@ -1304,10 +1350,11 @@ CREATE TABLE invoice_export_batches (
     requested_by    VARCHAR(120),
     file_name       VARCHAR(220) NOT NULL,
     checksum_sha256 VARCHAR(128),
-    metadata        TEXT,
+    metadata_json   TEXT,
     exported_at     TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX idx_invoice_export_tenant ON invoice_export_batches (tenant_id, billing_period);
+CREATE INDEX idx_invoice_export_type ON invoice_export_batches (export_type, export_format);
 
 CREATE TABLE usage_meter_events (
     id             BIGSERIAL PRIMARY KEY,
@@ -1319,9 +1366,10 @@ CREATE TABLE usage_meter_events (
     source_ref     VARCHAR(180),
     occurred_at    TIMESTAMP(6) NOT NULL,
     billing_period VARCHAR(20) NOT NULL,
-    metadata       TEXT
+    metadata_json  TEXT
 );
 CREATE INDEX idx_usage_meter_period ON usage_meter_events (tenant_id, billing_period);
+CREATE INDEX idx_usage_meter_key ON usage_meter_events (tenant_id, meter_key, billing_period);
 
 CREATE TABLE usage_aggregations (
     id                  BIGSERIAL PRIMARY KEY,
