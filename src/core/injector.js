@@ -11,73 +11,56 @@ const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
 const CONTEXA_VERSION = '0.1.0';
 
 async function injectYml(ymlPath, opts = {}) {
-  const { mode = 'shadow', llmProvider = 'ollama', llmModel = 'qwen2.5:7b',
+  const { mode = 'shadow', llmProviders = ['ollama'],
           securityMode = 'full', infra = 'standalone' } = opts;
 
-  // Build spring.ai block based on provider
-  let aiBlock = '';
-  if (llmProvider === 'ollama') {
-    aiBlock = `
-  ai:
-    ollama:
+  // Build spring.ai block based on selected providers
+  let aiParts = [];
+
+  if (llmProviders.includes('ollama')) {
+    aiParts.push(`    ollama:
       base-url: http://127.0.0.1:11434
       chat:
         options:
-          model: ${llmModel}
+          model: qwen2.5:7b
           keep-alive: "24h"
       embedding:
         enabled: true
-        model: mxbai-embed-large
-    anthropic:
-      api-key: \${ANTHROPIC_API_KEY:your-anthropic-api-key}
-      chat:
-        enabled: false`;
-  } else if (llmProvider === 'openai') {
-    aiBlock = `
-  ai:
-    openai:
+        model: mxbai-embed-large`);
+  }
+
+  if (llmProviders.includes('openai')) {
+    aiParts.push(`    openai:
       api-key: \${OPENAI_API_KEY:}
       base-url: https://api.openai.com
       chat:
         options:
-          model: ${llmModel}
+          model: gpt-4o-mini
           temperature: 0.3
         enabled: true
       embedding:
-        enabled: false
-    ollama:
-      base-url: http://127.0.0.1:11434
-      embedding:
-        enabled: true
-        model: mxbai-embed-large
-      chat:
-        options:
-          model: qwen2.5:7b
-          keep-alive: "24h"
-    anthropic:
-      api-key: \${ANTHROPIC_API_KEY:your-anthropic-api-key}
-      chat:
-        enabled: false`;
-  } else if (llmProvider === 'anthropic') {
-    aiBlock = `
-  ai:
-    anthropic:
+        enabled: false`);
+  }
+
+  if (llmProviders.includes('anthropic')) {
+    aiParts.push(`    anthropic:
       api-key: \${ANTHROPIC_API_KEY:}
       chat:
         enabled: true
         options:
-          model: ${llmModel}
-          temperature: 0.3
-    ollama:
-      base-url: http://127.0.0.1:11434
-      embedding:
-        enabled: true
-        model: mxbai-embed-large
+          model: claude-sonnet-4-20250514
+          temperature: 0.3`);
+  } else {
+    // Anthropic disabled but api-key dummy required to prevent bean creation failure
+    aiParts.push(`    anthropic:
+      api-key: \${ANTHROPIC_API_KEY:your-anthropic-api-key}
       chat:
-        options:
-          model: qwen2.5:7b
-          keep-alive: "24h"`;
+        enabled: false`);
   }
+
+  const aiBlock = `
+  ai:
+${aiParts.join('\n')}`;
 
   // Build datasource block
   const dsBlock = `
@@ -87,12 +70,8 @@ async function injectYml(ymlPath, opts = {}) {
     password: contexa1234!@#
     driver-class-name: org.postgresql.Driver`;
 
-  // Build contexa block
-  const priorityMap = {
-    ollama: 'ollama,openai',
-    openai: 'openai,ollama',
-    anthropic: 'anthropic,ollama,openai',
-  };
+  // Build priority from selected providers
+  const priority = llmProviders.join(',');
 
   const block = `\n${MARKER_START}
 spring:${dsBlock}
@@ -104,7 +83,7 @@ contexa:
     ai:
       chat:
         model:
-          priority: ${priorityMap[llmProvider] || 'ollama,openai'}
+          priority: ${priority}
 ${MARKER_END}`;
 
   await fs.ensureDir(path.dirname(ymlPath));

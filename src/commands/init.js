@@ -41,8 +41,8 @@ module.exports = function (program) {
 
       // 2. Prompts
       const defaults = {
-        securityMode: 'full', mode: 'shadow', llmProvider: 'ollama',
-        llmModel: 'qwen2.5:7b', infra: 'standalone', injectDep: true,
+        securityMode: 'full', mode: 'shadow', llmProviders: ['ollama'],
+        infra: 'standalone', injectDep: true,
         startDocker: true,
       };
 
@@ -51,44 +51,37 @@ module.exports = function (program) {
           type: 'list', name: 'securityMode',
           message: 'Security integration mode:',
           choices: [
-            { name: 'FULL      - Contexa manages entire authentication (new projects)', value: 'full' },
-            { name: 'SANDBOX   - Legacy auth preserved, Contexa adds Zero Trust',       value: 'sandbox' },
+            { name: 'FULL      - Contexa manages entire authentication  (default)', value: 'full' },
+            { name: 'SANDBOX   - Legacy auth preserved, Contexa adds Zero Trust',   value: 'sandbox' },
           ],
         },
         {
           type: 'list', name: 'mode', message: 'Initial analysis mode:',
           choices: [
-            { name: 'Shadow    - analyze only, no blocking', value: 'shadow' },
-            { name: 'Enforce   - block threats immediately',  value: 'enforce' },
+            { name: 'Shadow    - analyze only, no blocking  (default)', value: 'shadow' },
+            { name: 'Enforce   - block threats immediately',            value: 'enforce' },
           ],
         },
         {
-          type: 'list', name: 'llmProvider', message: 'LLM provider:',
+          type: 'checkbox', name: 'llmProviders', message: 'LLM providers (space to select, enter to confirm):',
           choices: [
-            { name: 'Ollama     (local, privacy-safe)',   value: 'ollama' },
-            { name: 'OpenAI     (gpt-4o-mini)',           value: 'openai' },
-            { name: 'Anthropic  (Claude Sonnet)',         value: 'anthropic' },
+            { name: 'Ollama     (local, privacy-safe)  (default)',  value: 'ollama',    checked: true },
+            { name: 'OpenAI     (gpt-4o-mini)',                     value: 'openai' },
+            { name: 'Anthropic  (Claude Sonnet)',                   value: 'anthropic' },
           ],
-        },
-        {
-          type: 'input', name: 'llmModel', message: 'Model name:',
-          default: a => {
-            if (a.llmProvider === 'ollama') return 'qwen2.5:7b';
-            if (a.llmProvider === 'openai') return 'gpt-4o-mini';
-            return 'claude-sonnet-4-20250514';
-          },
+          validate: a => a.length > 0 ? true : 'Select at least one provider',
         },
         {
           type: 'list', name: 'infra', message: 'Infrastructure mode:',
           choices: [
-            { name: 'Standalone   (PostgreSQL + Ollama)',                       value: 'standalone' },
-            { name: 'Distributed  (PostgreSQL + Ollama + Redis + Kafka)',       value: 'distributed' },
-            { name: 'Skip         (I will configure infrastructure manually)', value: 'skip' },
+            { name: 'Standalone   (PostgreSQL + Ollama + In Memory)  (default)',  value: 'standalone' },
+            { name: 'Distributed  (PostgreSQL + Ollama + Redis + Kafka)',         value: 'distributed' },
+            { name: 'Skip         (I will configure infrastructure manually)',   value: 'skip' },
           ],
         },
         {
           type: 'confirm', name: 'injectDep',
-          message: a => `Add dependency to ${project.buildTool === 'maven' ? 'pom.xml' : 'build.gradle'}?`,
+          message: a => `Add dependency to ${project.buildTool === 'maven' ? 'pom.xml' : 'build.gradle'}? (default: Yes)`,
           default: true,
         },
         {
