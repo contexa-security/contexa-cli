@@ -20,7 +20,7 @@ printf "  ██║░░██╗██║░░██║██║╚███�
 printf "  ╚█████╔╝╚█████╔╝██║░╚███║░░░██║░░░███████╗██╔╝░██╗██║░░██║\n"
 printf "  ░╚════╝░░╚════╝░╚═╝░░╚══╝░░░╚═╝░░░╚══════╝╚═╝░░╚═╝╚═╝░░╚═╝\n"
 printf "${NC}"
-printf "  ${DIM}AI-Native Zero Trust Security Platform${NC}  ${CYAN}ctxa.ai${NC}\n"
+printf "  ${BOLD}AI-Native Zero Trust Security Platform${NC}  ${YELLOW}https://ctxa.ai${NC}\n"
 printf "\n"
 
 # Fetch latest version
