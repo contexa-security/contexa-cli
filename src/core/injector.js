@@ -856,11 +856,12 @@ WHERE (g.group_name = 'Administrators' AND r.role_name IN ('ROLE_ADMIN', 'ROLE_M
    OR (g.group_name = 'Users'          AND r.role_name IN ('ROLE_USER'))
    OR (g.group_name = 'Developers'     AND r.role_name IN ('ROLE_DEVELOPER', 'ROLE_USER'));
 
+-- All passwords: 1234
 INSERT INTO users (username, email, password, name, department, position, enabled, mfa_enabled, created_at) VALUES
-    ('admin',       'admin@contexa.io',       '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'System Admin', 'IT',          'Administrator', TRUE, FALSE, CURRENT_TIMESTAMP),
-    ('kim_manager', 'kim.manager@contexa.io', '$2a$10$dXJ3SW6G7P50lGmMQgel5uVf3JCDq1w3r4bXaECY5V5Q7Ggk3jYlC', 'Kim Jihoon',   'Finance',     'Manager',       TRUE, FALSE, CURRENT_TIMESTAMP),
-    ('park_user',   'park.user@contexa.io',   '$2a$10$KkQZkYMGJPk7Xe1JhDcFGeYMM0E.VIiLvSdPqbMjPFHCdGo.ZsSXy', 'Park Minjun',  'Engineering', 'Developer',     TRUE, FALSE, CURRENT_TIMESTAMP),
-    ('dev_lead',    'dev.lead@contexa.io',    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'Lee Soyeon',   'Engineering', 'Tech Lead',     TRUE, FALSE, CURRENT_TIMESTAMP);
+    ('admin',       'admin@contexa.io',       '$2a$10$EqKcp1WFKumxl9EtWnyKVeJgLGQDP5FPvMflDbVzxjFPqzJHPe3oO', 'System Admin', 'IT',          'Administrator', TRUE, FALSE, CURRENT_TIMESTAMP),
+    ('kim_manager', 'kim.manager@contexa.io', '$2a$10$EqKcp1WFKumxl9EtWnyKVeJgLGQDP5FPvMflDbVzxjFPqzJHPe3oO', 'Kim Jihoon',   'Finance',     'Manager',       TRUE, FALSE, CURRENT_TIMESTAMP),
+    ('park_user',   'park.user@contexa.io',   '$2a$10$EqKcp1WFKumxl9EtWnyKVeJgLGQDP5FPvMflDbVzxjFPqzJHPe3oO', 'Park Minjun',  'Engineering', 'Developer',     TRUE, FALSE, CURRENT_TIMESTAMP),
+    ('dev_lead',    'dev.lead@contexa.io',    '$2a$10$EqKcp1WFKumxl9EtWnyKVeJgLGQDP5FPvMflDbVzxjFPqzJHPe3oO', 'Lee Soyeon',   'Engineering', 'Tech Lead',     TRUE, FALSE, CURRENT_TIMESTAMP);
 
 INSERT INTO user_groups (user_id, group_id, assigned_at, assigned_by)
 SELECT u.id, g.group_id, CURRENT_TIMESTAMP, 'SYSTEM'

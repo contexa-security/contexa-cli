@@ -14,9 +14,6 @@ ${chalk.cyan('  ╚═════╝ ╚═════╝ ╚═╝  ╚══
 ${chalk.gray('  AI-Native Zero Trust Security for Spring')}  ${chalk.yellow('v1.0.0')}
 `;
 
-// Always show banner on startup
-console.log(banner);
-
 program
   .name('contexa')
   .description('Contexa CLI - AI-Native Zero Trust Security Platform')
