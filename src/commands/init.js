@@ -13,6 +13,7 @@ module.exports = function (program) {
     .command('init')
     .description('Initialize Contexa AI Security in your Spring project')
     .option('--yes', 'Skip prompts, use defaults')
+    .option('--force', 'Reinitialize even if already configured')
     .option('--dir <path>', 'Project directory', process.cwd())
     .action(async (opts) => {
       console.log('');
@@ -35,8 +36,7 @@ module.exports = function (program) {
       console.log(chalk.gray(`    Docker  : ${project.hasDocker ? chalk.green('installed') : chalk.yellow('not found')}`));
 
       if (project.hasContexta) {
-        console.log(chalk.yellow('\n  Already initialized. Use: contexa status\n'));
-        return;
+        console.log(chalk.yellow('  Contexa already detected — settings will be updated.\n'));
       }
 
       // 2. Prompts
