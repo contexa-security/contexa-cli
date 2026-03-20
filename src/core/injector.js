@@ -438,7 +438,7 @@ CREATE TABLE role_permissions (
 CREATE TABLE policy (
     id                   BIGSERIAL PRIMARY KEY,
     name                 VARCHAR(255) NOT NULL UNIQUE,
-    description          VARCHAR(255),
+    description          TEXT,
     effect               VARCHAR(255) NOT NULL,
     priority             INTEGER NOT NULL,
     friendly_description VARCHAR(2048),
@@ -448,6 +448,7 @@ CREATE TABLE policy (
     approved_by          VARCHAR(255),
     confidence_score     DOUBLE PRECISION,
     source               VARCHAR(50) CHECK (source IN ('MANUAL','AI_GENERATED','AI_EVOLVED','IMPORTED')),
+    reasoning            VARCHAR(4096),
     updated_at           TIMESTAMP(6),
     created_at           TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_active            BOOLEAN DEFAULT TRUE NOT NULL
