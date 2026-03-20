@@ -10,15 +10,12 @@ jobs:
     name: Build / ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             label: linux-x64
             output: contexa-linux-x64
-
-          - os: macos-13
-            label: macos-x64
-            output: contexa-macos-x64
 
           - os: macos-latest
             label: macos-arm64
@@ -51,7 +48,7 @@ jobs:
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 \
             ${{ runner.os == 'macOS' && '--macho-segment-name NODE_SEA' || '' }}
           chmod +x dist/${{ matrix.output }}
-          ${{ runner.os == 'macOS' && 'codesign --sign - dist/${{ matrix.output }}' || 'echo done' }}
+          ${{ runner.os == 'macOS' && 'codesign --sign - dist/' || 'echo done #' }}${{ matrix.output }}
 
       - name: Build binary (Windows)
         if: runner.os == 'Windows'
@@ -88,6 +85,5 @@ jobs:
             ```
           files: |
             dist/contexa-linux-x64/contexa-linux-x64
-            dist/contexa-macos-x64/contexa-macos-x64
             dist/contexa-macos-arm64/contexa-macos-arm64
             dist/contexa-win-x64.exe/contexa-win-x64.exe
