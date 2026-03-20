@@ -6,7 +6,7 @@ const inquirer = require('inquirer');
 const path  = require('path');
 const { execSync } = require('child_process');
 const { detectSpringProject } = require('../core/detector');
-const { injectYml, injectMavenDep, injectGradleDep, generateDockerCompose } = require('../core/injector');
+const { injectYml, injectMavenDep, injectGradleDep, generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 
 module.exports = function (program) {
   program
@@ -14,6 +14,7 @@ module.exports = function (program) {
     .description('Initialize Contexa AI Security in your Spring project')
     .option('--yes', 'Skip prompts, use defaults')
     .option('--force', 'Reinitialize even if already configured')
+    .option('--enterprise', 'Include enterprise SaaS tables')
     .option('--dir <path>', 'Project directory', process.cwd())
     .action(async (opts) => {
       console.log('');
@@ -107,8 +108,12 @@ module.exports = function (program) {
         ok ? s2.succeed('Dependency added') : s2.info('Already present');
       }
 
-      // 5. Generate docker-compose.yml
+      // 5. Generate database init scripts + docker-compose.yml
       if (answers.infra !== 'skip') {
+        const s3a = ora('Generating database scripts...').start();
+        await generateInitDbScripts(opts.dir, { enterprise: opts.enterprise });
+        s3a.succeed(opts.enterprise ? 'Database scripts generated (enterprise)' : 'Database scripts generated');
+
         const s3 = ora('Generating docker-compose.yml...').start();
         await generateDockerCompose(opts.dir, answers);
         s3.succeed('docker-compose.yml generated');
