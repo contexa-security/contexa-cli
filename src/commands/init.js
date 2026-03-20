@@ -126,8 +126,10 @@ module.exports = function (program) {
             s4.succeed('Docker containers started');
 
             // 7. Pull Ollama models
-            if (answers.llmProvider === 'ollama') {
-              const s5 = ora(`Pulling LLM model: ${answers.llmModel}...`).start();
+            if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
+              const chatModel = 'qwen2.5:7b';
+              const embedModel = 'mxbai-embed-large';
+              const s5 = ora(`Pulling LLM model: ${chatModel}...`).start();
               try {
                 // Wait for Ollama to be ready
                 let ready = false;
@@ -140,17 +142,17 @@ module.exports = function (program) {
                 }
 
                 if (ready) {
-                  execSync(`docker exec contexa-ollama ollama pull ${answers.llmModel}`, { stdio: 'inherit' });
-                  s5.succeed(`Model ${answers.llmModel} pulled`);
+                  execSync(`docker exec contexa-ollama ollama pull ${chatModel}`, { stdio: 'inherit' });
+                  s5.succeed(`Model ${chatModel} pulled`);
 
-                  const s6 = ora('Pulling embedding model: mxbai-embed-large...').start();
-                  execSync('docker exec contexa-ollama ollama pull mxbai-embed-large', { stdio: 'inherit' });
+                  const s6 = ora(`Pulling embedding model: ${embedModel}...`).start();
+                  execSync(`docker exec contexa-ollama ollama pull ${embedModel}`, { stdio: 'inherit' });
                   s6.succeed('Embedding model pulled');
                 } else {
-                  s5.warn('Ollama not ready. Pull models manually: docker exec contexa-ollama ollama pull ' + answers.llmModel);
+                  s5.warn(`Ollama not ready. Pull models manually: docker exec contexa-ollama ollama pull ${chatModel}`);
                 }
               } catch (e) {
-                s5.warn('Model pull failed. Pull manually: docker exec contexa-ollama ollama pull ' + answers.llmModel);
+                s5.warn(`Model pull failed. Pull manually: docker exec contexa-ollama ollama pull ${chatModel}`);
               }
             }
           } catch (e) {

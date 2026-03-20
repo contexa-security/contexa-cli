@@ -14,84 +14,114 @@ async function injectYml(ymlPath, opts = {}) {
   const { mode = 'shadow', llmProviders = ['ollama'],
           securityMode = 'full', infra = 'standalone' } = opts;
 
-  // Build spring.ai block based on selected providers
-  let aiParts = [];
-
-  if (llmProviders.includes('ollama')) {
-    aiParts.push(`    ollama:
-      base-url: http://127.0.0.1:11434
-      chat:
-        options:
-          model: qwen2.5:7b
-          keep-alive: "24h"
-      embedding:
-        enabled: true
-        model: mxbai-embed-large`);
-  }
-
-  if (llmProviders.includes('openai')) {
-    aiParts.push(`    openai:
-      api-key: \${OPENAI_API_KEY:}
-      base-url: https://api.openai.com
-      chat:
-        options:
-          model: gpt-4o-mini
-          temperature: 0.3
-        enabled: true
-      embedding:
-        enabled: false`);
-  }
-
-  if (llmProviders.includes('anthropic')) {
-    aiParts.push(`    anthropic:
-      api-key: \${ANTHROPIC_API_KEY:}
-      chat:
-        enabled: true
-        options:
-          model: claude-sonnet-4-20250514
-          temperature: 0.3`);
-  } else {
-    // Anthropic disabled but api-key dummy required to prevent bean creation failure
-    aiParts.push(`    anthropic:
-      api-key: \${ANTHROPIC_API_KEY:your-anthropic-api-key}
-      chat:
-        enabled: false`);
-  }
-
-  const aiBlock = `
-  ai:
-${aiParts.join('\n')}`;
-
-  // Build datasource block
-  const dsBlock = `
-  datasource:
-    url: jdbc:postgresql://localhost:5432/contexa
-    username: contexa
-    password: contexa1234!@#
-    driver-class-name: org.postgresql.Driver`;
-
-  // Build priority from selected providers
   const priority = llmProviders.join(',');
+  const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
+  const lines = [];
 
-  const block = `\n${MARKER_START}
-spring:${dsBlock}
-${aiBlock}
+  // ── contexa ──
+  lines.push('contexa:');
+  lines.push('  llm:');
+  lines.push(`    chatModelPriority: ${priority}`);
+  lines.push(`    embeddingModelPriority: ${embeddingPriority}`);
+  if (infra === 'distributed') {
+    lines.push('  infrastructure:');
+    lines.push('    mode: DISTRIBUTED');
+  }
 
-contexa:
-  zero-trust:
-    enabled: true
-    ai:
-      chat:
-        model:
-          priority: ${priority}
-${MARKER_END}`;
+  // ── security.zerotrust ──
+  lines.push('');
+  lines.push('security:');
+  lines.push('  zerotrust:');
+  lines.push(`    mode: ${mode === 'enforce' ? 'ENFORCE' : 'SHADOW'}`);
+
+  // ── hcad ──
+  lines.push('');
+  lines.push('hcad:');
+  lines.push('  geoip:');
+  lines.push('    dbPath: data/GeoLite2-City.mmdb');
+
+  // ── spring ──
+  lines.push('');
+  lines.push('spring:');
+  lines.push('  datasource:');
+  lines.push('    url: jdbc:postgresql://localhost:5432/contexa');
+  lines.push('    username: contexa');
+  lines.push('    password: contexa1234!@#');
+  lines.push('    driver-class-name: org.postgresql.Driver');
+  lines.push('  auth:');
+  lines.push('    token-transport-type: header_cookie');
+  lines.push('    oauth2-csrf: false');
+  lines.push('    token-persistence: localstorage');
+
+  // ── spring.ai (selected providers only) ──
+  lines.push('  ai:');
+  if (llmProviders.includes('ollama')) {
+    lines.push('    ollama:');
+    lines.push('      base-url: http://127.0.0.1:11434');
+    lines.push('      chat:');
+    lines.push('        options:');
+    lines.push('          model: qwen2.5:7b');
+    lines.push('          keep-alive: "24h"');
+    lines.push('      embedding:');
+    lines.push('        model: mxbai-embed-large');
+  }
+  if (llmProviders.includes('openai')) {
+    lines.push('    openai:');
+    lines.push('      api-key: ${OPENAI_API_KEY:your-openai-api-key}');
+    lines.push('      base-url: https://api.openai.com');
+    lines.push('      chat:');
+    lines.push('        options:');
+    lines.push('          model: gpt-4o-mini');
+    lines.push('          temperature: 0.3');
+  }
+  if (llmProviders.includes('anthropic')) {
+    lines.push('    anthropic:');
+    lines.push('      api-key: ${ANTHROPIC_API_KEY:your-anthropic-api-key}');
+    lines.push('      chat:');
+    lines.push('        options:');
+    lines.push('          model: claude-3-sonnet-20240229');
+  } else {
+    // Anthropic bean requires api-key even when disabled
+    lines.push('    anthropic:');
+    lines.push('      api-key: ${ANTHROPIC_API_KEY:your-anthropic-api-key}');
+  }
+  lines.push('    security:');
+  lines.push('      tiered:');
+  lines.push('        security:');
+  lines.push('          trusted-proxy-validation-enabled: true');
+  lines.push('          trusted-proxies:');
+  lines.push('            - "127.0.0.1"');
+  lines.push('            - "::1"');
+  lines.push('            - "0:0:0:0:0:0:0:1"');
+  lines.push('    vectorstore:');
+  lines.push('      pgvector:');
+  lines.push('        dimensions: 1024');
+  lines.push('        initialize-schema: true');
+  lines.push('  jpa:');
+  lines.push('    database: POSTGRESQL');
+  lines.push('    hibernate:');
+  lines.push('      ddl-auto: validate');
+  lines.push('    properties:');
+  lines.push('      hibernate:');
+  lines.push('        jdbc:');
+  lines.push('          lob:');
+  lines.push('            non_contextual_creation: true');
+  lines.push('    show-sql: false');
+
+  // ── spring.data.redis (distributed only) ──
+  if (infra === 'distributed') {
+    lines.push('  data:');
+    lines.push('    redis:');
+    lines.push('      host: localhost');
+    lines.push('      port: 6379');
+  }
+
+  const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
 
   await fs.ensureDir(path.dirname(ymlPath));
 
   if (await fs.pathExists(ymlPath)) {
-    // Backup original
     await fs.copy(ymlPath, ymlPath + '.bak');
-
     let content = await fs.readFile(ymlPath, 'utf8');
     const regex = new RegExp(`${escapeRegex(MARKER_START)}[\\s\\S]*?${escapeRegex(MARKER_END)}`);
     content = content.match(regex)
