@@ -14,7 +14,6 @@ module.exports = function (program) {
     .description('Initialize Contexa AI Security in your Spring project')
     .option('--yes', 'Skip prompts, use defaults')
     .option('--force', 'Reinitialize even if already configured')
-    .option('--enterprise', 'Include enterprise SaaS tables')
     .option('--dir <path>', 'Project directory', process.cwd())
     .action(async (opts) => {
       console.log('');
@@ -76,7 +75,6 @@ module.exports = function (program) {
           type: 'list', name: 'infra', message: 'Infrastructure setup (Docker):',
           choices: [
             { name: 'Standard      - PostgreSQL + Ollama + In Memory  (default)',  value: 'standalone' },
-            { name: 'Distributed   - PostgreSQL + Ollama + Redis + Kafka',         value: 'distributed' },
             { name: 'Skip          - I will set up infrastructure myself',         value: 'skip' },
           ],
         },
@@ -111,11 +109,11 @@ module.exports = function (program) {
       // 5. Generate database init scripts + docker-compose.yml
       if (answers.infra !== 'skip') {
         const s3a = ora('Generating database scripts...').start();
-        await generateInitDbScripts(opts.dir, { enterprise: opts.enterprise });
-        s3a.succeed(opts.enterprise ? 'Database scripts generated (enterprise)' : 'Database scripts generated');
+        await generateInitDbScripts(opts.dir);
+        s3a.succeed('Database scripts generated');
 
         const s3 = ora('Generating docker-compose.yml...').start();
-        await generateDockerCompose(opts.dir, answers);
+        await generateDockerCompose(opts.dir);
         s3.succeed('docker-compose.yml generated');
 
         // 6. Start Docker

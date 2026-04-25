@@ -12,7 +12,7 @@ const CONTEXA_VERSION = '0.1.0';
 
 async function injectYml(ymlPath, opts = {}) {
   const { mode = 'shadow', llmProviders = ['ollama'],
-          securityMode = 'full', infra = 'standalone' } = opts;
+          securityMode = 'full' } = opts;
 
   const priority = llmProviders.join(',');
   const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
@@ -23,10 +23,6 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('  llm:');
   lines.push(`    chatModelPriority: ${priority}`);
   lines.push(`    embeddingModelPriority: ${embeddingPriority}`);
-  if (infra === 'distributed') {
-    lines.push('  infrastructure:');
-    lines.push('    mode: DISTRIBUTED');
-  }
 
   // ── security.zerotrust ──
   lines.push('');
@@ -108,14 +104,6 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('            non_contextual_creation: true');
   lines.push('    show-sql: false');
 
-  // ── spring.data.redis (distributed only) ──
-  if (infra === 'distributed') {
-    lines.push('  data:');
-    lines.push('    redis:');
-    lines.push('      host: localhost');
-    lines.push('      port: 6379');
-  }
-
   const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
 
   await fs.ensureDir(path.dirname(ymlPath));
@@ -168,8 +156,7 @@ async function injectGradleDep(gradlePath) {
   return true;
 }
 
-async function generateDockerCompose(projectDir, opts = {}) {
-  const { infra = 'standalone' } = opts;
+async function generateDockerCompose(projectDir) {
   const composePath = path.join(projectDir, 'docker-compose.yml');
 
   if (await fs.pathExists(composePath)) {
@@ -218,94 +205,18 @@ services:
     restart: unless-stopped
 `;
 
-  if (infra === 'distributed') {
-    content += `
-  # Redis - Session store, cache, distributed locks
-  redis:
-    image: redis:7.2-alpine
-    container_name: contexa-redis
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # Zookeeper - Kafka coordinator
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.4.0
-    container_name: contexa-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    ports:
-      - "2181:2181"
-    volumes:
-      - zookeeper-data:/var/lib/zookeeper/data
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "2181"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-    restart: unless-stopped
-
-  # Kafka - Event streaming
-  kafka:
-    image: confluentinc/cp-kafka:7.4.0
-    container_name: contexa-kafka
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    ports:
-      - "9092:9092"
-    volumes:
-      - kafka-data:/var/lib/kafka/data
-    healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 10s
-      timeout: 10s
-      retries: 5
-      start_period: 40s
-    restart: unless-stopped
-`;
-  }
-
   // Volumes
   content += `
 volumes:
   pgdata:
-  ollama-data:`;
-
-  if (infra === 'distributed') {
-    content += `
-  redis-data:
-  zookeeper-data:
-  kafka-data:`;
-  }
-
-  content += '\n';
+  ollama-data:
+`;
 
   await fs.writeFile(composePath, content);
   return composePath;
 }
 
-async function generateInitDbScripts(projectDir, opts = {}) {
-  const { enterprise = false } = opts;
+async function generateInitDbScripts(projectDir) {
   const initdbDir = path.join(projectDir, 'initdb');
   await fs.ensureDir(initdbDir);
 
@@ -314,11 +225,6 @@ async function generateInitDbScripts(projectDir, opts = {}) {
 
   // 02-dml.sql
   await fs.writeFile(path.join(initdbDir, '02-dml.sql'), getDmlScript());
-
-  // 03-enterprise-ddl.sql (optional)
-  if (enterprise) {
-    await fs.writeFile(path.join(initdbDir, '03-enterprise-ddl.sql'), getEnterpriseDdlScript());
-  }
 
   return initdbDir;
 }
@@ -1445,6 +1351,96 @@ create table security_spel
     created_at  timestamp default now()
 );
 
+create table admin_menu
+(
+    id         bigserial
+        primary key,
+    name       varchar(100) not null,
+    menu_type  varchar(20)  not null,
+    enabled    boolean      not null,
+    menu_order integer      not null,
+    parent_id  bigint,
+    data_page  varchar(50),
+    icon       varchar(2000),
+    url        varchar(255)
+);
+
+create table admin_menu_role
+(
+    id        bigserial
+        primary key,
+    menu_id   bigint       not null
+        references admin_menu (id),
+    role_name varchar(100) not null,
+    constraint admin_menu_role_menu_id_role_name_key unique (menu_id, role_name)
+);
+
+create table group_role_permissions
+(
+    group_id      bigint       not null
+        references app_group (group_id),
+    role_id       bigint       not null
+        references role (role_id),
+    permission_id bigint       not null
+        references permission (permission_id),
+    assigned_at   timestamp(6) not null,
+    assigned_by   varchar(100),
+    primary key (group_id, role_id, permission_id)
+);
+
+create table user_role_permissions
+(
+    user_id       bigint       not null
+        references users (id),
+    role_id       bigint       not null
+        references role (role_id),
+    permission_id bigint       not null
+        references permission (permission_id),
+    assigned_at   timestamp(6) not null,
+    assigned_by   varchar(100),
+    primary key (user_id, role_id, permission_id)
+);
+
+create table password_history
+(
+    id            bigserial
+        primary key,
+    user_id       bigint       not null,
+    password_hash varchar(512) not null,
+    changed_at    timestamp(6) not null
+);
+
+create table policy_version
+(
+    id             bigserial
+        primary key,
+    policy_id      bigint       not null,
+    version_number integer      not null,
+    change_type    varchar(20)  not null
+        constraint policy_version_change_type_check
+            check ((change_type)::text = ANY
+                   ((ARRAY ['CREATED'::character varying, 'UPDATED'::character varying, 'DELETED'::character varying, 'ROLLBACK'::character varying])::text[])),
+    change_reason  varchar(1024),
+    changed_by     varchar(255) not null,
+    changed_at     timestamp(6) not null,
+    snapshot_json  text         not null
+);
+
+create index idx_policy_version_changed_at on policy_version (changed_at);
+create index idx_policy_version_policy_id  on policy_version (policy_id);
+
+create table system_settings
+(
+    id                         bigserial
+        primary key,
+    audit_log_retention_days   integer      not null,
+    registration_enabled       boolean      not null,
+    policy_combining_algorithm varchar(50)  not null,
+    default_role               varchar(100) not null,
+    created_at                 timestamp(6) not null,
+    updated_at                 timestamp(6)
+);
+
 `;
 }
 
@@ -1519,446 +1515,6 @@ VALUES
     ('UPDATE', 'Update Access', 'Permission to modify existing resources', false, 'CRUD', 'UPDATE', CURRENT_TIMESTAMP),
     ('DELETE', 'Delete Access', 'Permission to remove resources', false, 'CRUD', 'DELETE', CURRENT_TIMESTAMP)
 ON CONFLICT (permission_name) DO NOTHING;
-`;
-}
-
-function getEnterpriseDdlScript() {
-  return `-- Contexa Enterprise DDL (SaaS excluded)
--- Auto-generated from entity definitions
-
-create table mcp_client_states
-(
-    client_name            varchar(100)                                     not null
-        primary key,
-    enabled                boolean     default true not null,
-    health_status          varchar(30) default 'UNKNOWN'::character varying not null,
-    health_message         varchar(500),
-    last_health_checked_at timestamp(6),
-    updated_at             timestamp(6)                                     not null
-);
-
-create table mcp_surface_states
-(
-    surface_key       varchar(180)         not null
-        primary key,
-    surface_type      varchar(30)          not null,
-    surface_name      varchar(140)         not null,
-    client_name       varchar(100)         not null,
-    enabled           boolean default true not null,
-    version           varchar(64)          not null,
-    last_refreshed_at timestamp(6),
-    updated_at        timestamp(6)         not null
-);
-
-create table tool_execution_contexts
-(
-    id                   bigserial
-        primary key,
-    request_id           varchar(100) not null
-        unique
-        constraint idx_tool_context_request_id
-            unique,
-    permit_id            varchar(100)
-        unique
-        constraint idx_tool_context_permit_id
-            unique,
-    approval_id          varchar(100),
-    status               varchar(20)  not null,
-    tool_name            varchar(255) not null,
-    tool_type            varchar(50),
-    tool_call_id         varchar(255),
-    tool_arguments       text,
-    tool_definitions     text,
-    prompt_content       text         not null,
-    execution_class      varchar(30),
-    arguments_hash       varchar(128),
-    required_scope       varchar(500),
-    available_tools      text,
-    chat_options         text,
-    chat_response        text,
-    execution_result     text,
-    execution_error      text,
-    execution_start_time timestamp(6),
-    execution_end_time   timestamp(6),
-    incident_id          varchar(100),
-    session_id           varchar(100),
-    risk_level           varchar(20),
-    soar_context         text,
-    pipeline_context     text,
-    metadata             text,
-    max_retries          integer,
-    retry_count          integer,
-    expires_at           timestamp(6),
-    created_at           timestamp(6) not null,
-    updated_at           timestamp(6) not null
-);
-
-
-create index idx_tool_context_created_at
-    on tool_execution_contexts (created_at);
-
-create index idx_tool_context_status
-    on tool_execution_contexts (status);
-
-create index idx_tool_context_tool_name
-    on tool_execution_contexts (tool_name);
-
-create table tenant_lifecycle_events
-(
-    id           bigserial
-        primary key,
-    tenant_id    varchar(120) not null,
-    event_type   varchar(80)  not null,
-    actor_id     varchar(120),
-    payload_json text,
-    created_at   timestamp(6) not null
-);
-
-
-create index idx_tenant_lifecycle_event_tenant_created
-    on tenant_lifecycle_events (tenant_id, created_at);
-
-create table knowledge_artifact_access_override
-(
-    id              bigint generated by default as identity
-        primary key,
-    access_state    varchar(64)  not null,
-    actor_name      varchar(128),
-    artifact_family varchar(64)  not null,
-    created_at      timestamp(6) not null,
-    expires_at      timestamp(6),
-    reason_text     varchar(1000),
-    tenant_id       varchar(128) not null,
-    updated_at      timestamp(6) not null,
-    constraint idx_knowledge_artifact_access_override_tenant_family
-        unique (tenant_id, artifact_family)
-);
-
-create table knowledge_artifact_registry
-(
-    id               bigint generated by default as identity
-        primary key,
-    approved_by      varchar(128),
-    artifact_family  varchar(64)  not null,
-    artifact_id      varchar(256),
-    artifact_key     varchar(256) not null,
-    artifact_type    varchar(128),
-    artifact_version varchar(128),
-    cohort_scope     varchar(128),
-    created_at       timestamp(6) not null,
-    lineage_json     varchar(8000),
-    owner_name       varchar(128),
-    promotion_state  varchar(64),
-    quarantined      boolean      not null,
-    runtime_ready    boolean      not null,
-    tenant_id        varchar(128) not null,
-    tenant_scope     varchar(128),
-    updated_at       timestamp(6) not null,
-    constraint idx_knowledge_artifact_registry_identity
-        unique (tenant_id, artifact_family, artifact_key, artifact_version)
-);
-
-
-create index idx_knowledge_artifact_registry_current
-    on knowledge_artifact_registry (tenant_id, artifact_family, artifact_key, updated_at);
-
-create index idx_knowledge_artifact_registry_family
-    on knowledge_artifact_registry (tenant_id, artifact_family, updated_at);
-
-create table threat_knowledge_artifact_releases
-(
-    id               bigint generated by default as identity
-        primary key,
-    actor            varchar(160) not null,
-    artifact_version varchar(160) not null,
-    created_at       timestamp(6) not null,
-    governance_state varchar(60),
-    reason           varchar(1000),
-    release_action   varchar(40)  not null,
-    rollback_state   varchar(60),
-    runtime_eligible boolean      not null,
-    signal_key       varchar(255) not null,
-    tenant_id        varchar(120) not null,
-    tevv_state       varchar(60)
-);
-
-
-create index idx_threat_artifact_release_tenant_created
-    on threat_knowledge_artifact_releases (tenant_id, created_at);
-
-create index idx_threat_artifact_release_tenant_signal_created
-    on threat_knowledge_artifact_releases (tenant_id, signal_key, created_at);
-
-create table threat_knowledge_promotion_reviews
-(
-    id                  bigint generated by default as identity
-        primary key,
-    artifact_version    varchar(160) not null,
-    created_at          timestamp(6) not null,
-    governance_state    varchar(60),
-    rationale           varchar(1000),
-    requested_by        varchar(160) not null,
-    review_decision     varchar(40)  not null,
-    review_eligible     boolean      not null,
-    review_window_end   timestamp(6),
-    review_window_start timestamp(6),
-    reviewed_by         varchar(160) not null,
-    rollback_linkage    varchar(255),
-    rollback_state      varchar(60),
-    signal_key          varchar(255) not null,
-    tenant_id           varchar(120) not null,
-    tevv_state          varchar(60)
-);
-
-
-create index idx_threat_promotion_review_tenant_created
-    on threat_knowledge_promotion_reviews (tenant_id, created_at);
-
-create index idx_threat_promotion_review_tenant_signal_created
-    on threat_knowledge_promotion_reviews (tenant_id, signal_key, created_at);
-
-create table threat_knowledge_runtime_overrides
-(
-    id              bigint generated by default as identity
-        primary key,
-    active          boolean      not null,
-    actor           varchar(160) not null,
-    created_at      timestamp(6) not null,
-    expires_at      timestamp(6),
-    override_action varchar(40)  not null,
-    override_scope  varchar(40)  not null,
-    reason          varchar(1000),
-    signal_key      varchar(255),
-    tenant_id       varchar(120) not null,
-    updated_at      timestamp(6) not null
-);
-
-
-create index idx_threat_runtime_override_tenant_active
-    on threat_knowledge_runtime_overrides (tenant_id, active);
-
-create index idx_threat_runtime_override_tenant_signal_active
-    on threat_knowledge_runtime_overrides (tenant_id, signal_key, active);
-
-create table prompt_governance_budget_profile
-(
-    id                             bigint generated by default as identity
-        primary key,
-    budget_profile_key             varchar(128) not null,
-    budget_state                   varchar(128) not null,
-    cache_policy_key               varchar(256) not null,
-    cache_policy_state             varchar(128) not null,
-    compaction_policy_key          varchar(256) not null,
-    compaction_policy_state        varchar(128) not null,
-    created_at                     timestamp(6) not null,
-    expansion_allowed              boolean      not null,
-    max_input_tokens               integer      not null,
-    output_reserve_tokens          integer      not null,
-    prompt_key                     varchar(128) not null,
-    prompt_version                 varchar(128) not null,
-    registration_source            varchar(128) not null,
-    registry_scope                 varchar(128) not null,
-    required_context_window_tokens integer      not null,
-    system_reserve_tokens          integer      not null,
-    token_counting_policy_key      varchar(256) not null,
-    updated_at                     timestamp(6) not null,
-    user_reserve_tokens            integer      not null,
-    constraint idx_prompt_budget_profile_identity
-        unique (registry_scope, prompt_key, prompt_version, budget_profile_key)
-);
-
-
-create index idx_prompt_budget_profile_current
-    on prompt_governance_budget_profile (registry_scope, prompt_key, updated_at);
-
-create table prompt_governance_change_ledger
-(
-    id                  bigint generated by default as identity
-        primary key,
-    change_reference    varchar(256)  not null,
-    change_state        varchar(64)   not null,
-    change_summary      varchar(2000) not null,
-    change_type         varchar(64)   not null,
-    changed_by          varchar(128)  not null,
-    contract_version    varchar(128)  not null,
-    created_at          timestamp(6)  not null,
-    prompt_key          varchar(128)  not null,
-    prompt_version      varchar(128)  not null,
-    registration_source varchar(128)  not null,
-    registry_scope      varchar(128)  not null,
-    updated_at          timestamp(6)  not null,
-    constraint idx_prompt_governance_change_identity
-        unique (registry_scope, prompt_key, prompt_version)
-);
-
-
-create index idx_prompt_governance_change_current
-    on prompt_governance_change_ledger (registry_scope, prompt_key, updated_at);
-
-create table prompt_governance_eval_ledger
-(
-    id                             bigint generated by default as identity
-        primary key,
-    cost_gate_state                varchar(64)   not null,
-    covered_scenario_count         integer       not null,
-    covered_scenario_families_json varchar(4000),
-    created_at                     timestamp(6)  not null,
-    empirical_evidence_state       varchar(64)   not null,
-    evaluated_by                   varchar(128)  not null,
-    evaluation_mode                varchar(64)   not null,
-    evaluation_reference           varchar(256)  not null,
-    evaluation_state               varchar(64)   not null,
-    evaluation_summary             varchar(2000) not null,
-    latency_gate_state             varchar(64)   not null,
-    prompt_injection_state         varchar(64)   not null,
-    prompt_key                     varchar(128)  not null,
-    prompt_version                 varchar(128)  not null,
-    quality_gate_state             varchar(64)   not null,
-    registration_source            varchar(128)  not null,
-    registry_scope                 varchar(128)  not null,
-    required_scenario_count        integer       not null,
-    scenario_coverage_state        varchar(64)   not null,
-    tevv_gate_state                varchar(64)   not null,
-    updated_at                     timestamp(6)  not null,
-    constraint idx_prompt_governance_eval_identity
-        unique (registry_scope, prompt_key, prompt_version)
-);
-
-
-create index idx_prompt_governance_eval_current
-    on prompt_governance_eval_ledger (registry_scope, prompt_key, updated_at);
-
-create table prompt_governance_model_compatibility
-(
-    id                        bigint generated by default as identity
-        primary key,
-    cache_policy_key          varchar(256) not null,
-    compaction_policy_key     varchar(256) not null,
-    compatibility_state       varchar(128) not null,
-    created_at                timestamp(6) not null,
-    model_profile_key         varchar(256) not null,
-    profile_category          varchar(128) not null,
-    prompt_key                varchar(128) not null,
-    prompt_version            varchar(128) not null,
-    provider_scope            varchar(256) not null,
-    registration_source       varchar(128) not null,
-    registry_scope            varchar(128) not null,
-    token_counting_policy_key varchar(256) not null,
-    updated_at                timestamp(6) not null,
-    constraint idx_prompt_model_compatibility_identity
-        unique (registry_scope, prompt_key, prompt_version, model_profile_key)
-);
-
-
-create index idx_prompt_model_compatibility_current
-    on prompt_governance_model_compatibility (registry_scope, prompt_key, updated_at);
-
-create table prompt_governance_registry
-(
-    id                            bigint generated by default as identity
-        primary key,
-    change_summary                varchar(2000),
-    contract_version              varchar(128) not null,
-    created_at                    timestamp(6) not null,
-    evaluation_baseline_reference varchar(256),
-    owner_name                    varchar(128) not null,
-    prompt_artifact_hash_sha256   varchar(64)  not null,
-    prompt_key                    varchar(128) not null,
-    prompt_version                varchar(128) not null,
-    registration_source           varchar(128) not null,
-    registry_scope                varchar(128) not null,
-    release_approval_reference    varchar(256),
-    release_status                varchar(64)  not null,
-    rollback_prompt_version       varchar(128),
-    supported_model_profiles_json varchar(8000),
-    template_class_name           varchar(512) not null,
-    template_key                  varchar(128) not null,
-    updated_at                    timestamp(6) not null,
-    constraint idx_prompt_governance_registry_identity
-        unique (registry_scope, prompt_key, prompt_version)
-);
-
-
-create index idx_prompt_governance_registry_current
-    on prompt_governance_registry (registry_scope, prompt_key, updated_at);
-
-create index idx_prompt_governance_registry_release
-    on prompt_governance_registry (registry_scope, release_status, updated_at);
-
-create table prompt_governance_release_ledger
-(
-    id                         bigint generated by default as identity
-        primary key,
-    approval_channel           varchar(64)   not null,
-    approval_state             varchar(64)   not null,
-    approval_summary           varchar(2000) not null,
-    approved_by                varchar(128)  not null,
-    created_at                 timestamp(6)  not null,
-    prompt_key                 varchar(128)  not null,
-    prompt_version             varchar(128)  not null,
-    registration_source        varchar(128)  not null,
-    registry_scope             varchar(128)  not null,
-    release_approval_reference varchar(256)  not null,
-    release_status             varchar(64)   not null,
-    updated_at                 timestamp(6)  not null,
-    constraint idx_prompt_governance_release_identity
-        unique (registry_scope, prompt_key, prompt_version)
-);
-
-
-create index idx_prompt_governance_release_current
-    on prompt_governance_release_ledger (registry_scope, prompt_key, updated_at);
-
-create table prompt_governance_release_workflow
-(
-    id                     bigint generated by default as identity
-        primary key,
-    actor_name             varchar(128)  not null,
-    approval_channel       varchar(128)  not null,
-    blockers_json          varchar(8000),
-    created_at             timestamp(6)  not null,
-    current_release_status varchar(64)   not null,
-    gate_state             varchar(64)   not null,
-    prompt_key             varchar(128)  not null,
-    prompt_version         varchar(128)  not null,
-    rationale              varchar(2000) not null,
-    registry_scope         varchar(128)  not null,
-    target_release_status  varchar(64)   not null,
-    workflow_state         varchar(64)   not null
-);
-
-
-create index idx_prompt_release_workflow_scope_created
-    on prompt_governance_release_workflow (registry_scope, created_at);
-
-create index idx_prompt_release_workflow_prompt_created
-    on prompt_governance_release_workflow (registry_scope, prompt_key, created_at);
-
-create table prompt_governance_rollback_ledger
-(
-    id                             bigint generated by default as identity
-        primary key,
-    created_at                     timestamp(6)  not null,
-    prepared_by                    varchar(128)  not null,
-    prompt_key                     varchar(128)  not null,
-    prompt_version                 varchar(128)  not null,
-    registration_source            varchar(128)  not null,
-    registry_scope                 varchar(128)  not null,
-    rollback_readiness_state       varchar(64)   not null,
-    rollback_reason                varchar(2000) not null,
-    rollback_reference             varchar(256)  not null,
-    rollback_state                 varchar(64)   not null,
-    rollback_strategy              varchar(64)   not null,
-    rollback_target_prompt_version varchar(128)  not null,
-    updated_at                     timestamp(6)  not null,
-    constraint idx_prompt_governance_rollback_identity
-        unique (registry_scope, prompt_key, prompt_version)
-);
-
-
-create index idx_prompt_governance_rollback_current
-    on prompt_governance_rollback_ledger (registry_scope, prompt_key, updated_at);
-
 `;
 }
 
