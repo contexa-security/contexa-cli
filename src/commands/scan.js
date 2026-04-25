@@ -6,6 +6,9 @@ const fs    = require('fs-extra');
 const path  = require('path');
 const { detectSpringProject } = require('../core/detector');
 
+const MARKER_START = '# --- Contexa AI Security ---';
+const MARKER_END   = '# --- End Contexa ---';
+
 module.exports = function (program) {
   program
     .command('scan')
@@ -32,9 +35,18 @@ module.exports = function (program) {
 
       if (project.appYmlPath) {
         const yml = await fs.readFile(project.appYmlPath, 'utf8');
-        if (yml.includes('mode: shadow')) warnings.push('Shadow mode — not blocking yet');
-        if (yml.match(/api-key:\s*sk-/))  issues.push('API key exposed in yml — use env variable');
-        passes.push('application.yml found');
+        const blockMatch = yml.match(
+          new RegExp(`${escapeRegex(MARKER_START)}([\\s\\S]*?)${escapeRegex(MARKER_END)}`)
+        );
+        if (blockMatch) {
+          const block = blockMatch[1];
+          const modeValue = block.match(/\bmode:\s*(\w+)/)?.[1];
+          if (modeValue === 'shadow') warnings.push('Shadow mode — not blocking yet');
+          if (/api-key:\s*sk-(?!\$\{)/.test(block)) issues.push('API key exposed in yml — use env variable');
+          passes.push('application.yml found (Contexa block detected)');
+        } else {
+          warnings.push('application.yml found but Contexa block missing — run contexa init');
+        }
       } else {
         warnings.push('application.yml not found');
       }
@@ -53,3 +65,7 @@ module.exports = function (program) {
       }
     });
 };
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

@@ -7,6 +7,7 @@ async function detectSpringProject(dir = process.cwd()) {
   const result = {
     isSpring: false,
     buildTool: null,
+    buildFilePath: null,
     hasSpringBoot: false,
     hasSpringSecurityCore: false,
     hasContexta: false,
@@ -19,6 +20,7 @@ async function detectSpringProject(dir = process.cwd()) {
   const pomPath = path.join(dir, 'pom.xml');
   if (await fs.pathExists(pomPath)) {
     result.buildTool = 'maven';
+    result.buildFilePath = pomPath;
     result.isSpring = true;
     const pom = await fs.readFile(pomPath, 'utf8');
     result.hasSpringBoot = pom.includes('spring-boot');
@@ -26,7 +28,9 @@ async function detectSpringProject(dir = process.cwd()) {
         || pom.includes('spring-boot-starter-security')
         || pom.includes('spring-security-web');
     result.hasContexta = pom.includes('spring-boot-starter-contexa');
-    const m = pom.match(/<artifactId>([^<]+)<\/artifactId>/);
+    // Strip <parent>...</parent> first so we don't accidentally match the parent's artifactId.
+    const projectPom = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
+    const m = projectPom.match(/<artifactId>([^<]+)<\/artifactId>/);
     if (m) result.projectName = m[1];
   }
 
@@ -38,6 +42,7 @@ async function detectSpringProject(dir = process.cwd()) {
 
   if (!result.isSpring && actualGradlePath) {
     result.buildTool = 'gradle';
+    result.buildFilePath = actualGradlePath;
     result.isSpring = true;
     const gradle = await fs.readFile(actualGradlePath, 'utf8');
     result.hasSpringBoot = gradle.includes('spring-boot');

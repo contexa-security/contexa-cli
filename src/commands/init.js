@@ -36,6 +36,11 @@ module.exports = function (program) {
       console.log(chalk.gray(`    Docker  : ${project.hasDocker ? chalk.green('installed') : chalk.yellow('not found')}`));
 
       if (project.hasContexta) {
+        if (!opts.force && !opts.yes) {
+          console.log(chalk.yellow('  Contexa already detected in this project.'));
+          console.log(chalk.gray('    Re-run with --force to overwrite settings, or --yes to accept defaults.\n'));
+          process.exit(0);
+        }
         console.log(chalk.yellow('  Contexa already detected — settings will be updated.\n'));
       }
 
@@ -100,9 +105,13 @@ module.exports = function (program) {
       // 4. Inject dependency
       if (answers.injectDep) {
         const s2 = ora('Adding dependency...').start();
+        const buildPath = project.buildFilePath
+          || (project.buildTool === 'maven'
+            ? path.join(opts.dir, 'pom.xml')
+            : path.join(opts.dir, 'build.gradle'));
         const ok = project.buildTool === 'maven'
-          ? await injectMavenDep(path.join(opts.dir, 'pom.xml'))
-          : await injectGradleDep(path.join(opts.dir, 'build.gradle'));
+          ? await injectMavenDep(buildPath)
+          : await injectGradleDep(buildPath);
         ok ? s2.succeed('Dependency added') : s2.info('Already present');
       }
 

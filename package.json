@@ -1,9 +1,36 @@
 {
   "name": "contexa-cli",
   "version": "1.0.0",
-  "description": "Contexa CLI - AI-Native Zero Trust Security for Spring",
+  "description": "Contexa CLI - AI-Native Zero Trust Security for Spring Boot",
   "main": "src/index.js",
-  "bin": "src/index.js",
+  "bin": {
+    "contexa": "src/index.js"
+  },
+  "files": [
+    "src/",
+    "sea-config.json",
+    "install.sh",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contexa-security/contexa-cli.git"
+  },
+  "homepage": "https://docs.ctxa.ai/",
+  "bugs": {
+    "url": "https://github.com/contexa-security/contexa-cli/issues"
+  },
+  "keywords": [
+    "contexa",
+    "spring-boot",
+    "zero-trust",
+    "ai-security",
+    "cli"
+  ],
+  "license": "Apache-2.0",
   "scripts": {
     "start": "node src/index.js",
     "bundle": "esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs",

@@ -123,20 +123,41 @@ async function injectYml(ymlPath, opts = {}) {
 
 async function injectMavenDep(pomPath) {
   if (!await fs.pathExists(pomPath)) return false;
-  let pom = await fs.readFile(pomPath, 'utf8');
+  const pom = await fs.readFile(pomPath, 'utf8');
   if (pom.includes(CONTEXA_ARTIFACT_ID)) return false;
+
+  // Locate the project-level </dependencies>, skipping over any
+  // <dependencyManagement>...</dependencyManagement> block whose inner
+  // </dependencies> tag must NOT be the injection point.
+  const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
+  const mgmtRanges = [];
+  let m;
+  while ((m = mgmtRegex.exec(pom)) !== null) {
+    mgmtRanges.push([m.index, m.index + m[0].length]);
+  }
+  const isInsideMgmt = (idx) => mgmtRanges.some(([a, b]) => idx >= a && idx < b);
+
+  let target = -1;
+  let cursor = 0;
+  while (true) {
+    const found = pom.indexOf('</dependencies>', cursor);
+    if (found === -1) break;
+    if (!isInsideMgmt(found)) { target = found; break; }
+    cursor = found + 1;
+  }
+  if (target === -1) return false;
 
   // Backup
   await fs.copy(pomPath, pomPath + '.bak');
 
-  const dep = `
-        <dependency>
-            <groupId>${CONTEXA_GROUP_ID}</groupId>
-            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>
-            <version>${CONTEXA_VERSION}</version>
-        </dependency>`;
-  pom = pom.replace('</dependencies>', `${dep}\n    </dependencies>`);
-  await fs.writeFile(pomPath, pom);
+  const dep =
+    `        <dependency>\n` +
+    `            <groupId>${CONTEXA_GROUP_ID}</groupId>\n` +
+    `            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>\n` +
+    `            <version>${CONTEXA_VERSION}</version>\n` +
+    `        </dependency>\n    `;
+  const updated = pom.slice(0, target) + dep + pom.slice(target);
+  await fs.writeFile(pomPath, updated);
   return true;
 }
 
@@ -148,9 +169,16 @@ async function injectGradleDep(gradlePath) {
   // Backup
   await fs.copy(gradlePath, gradlePath + '.bak');
 
+  // Kotlin DSL uses double-quoted, parenthesized form: implementation("group:artifact:version")
+  // Groovy DSL uses single-quoted form: implementation 'group:artifact:version'
+  const isKotlinDsl = gradlePath.endsWith('.kts');
+  const depLine = isKotlinDsl
+    ? `    implementation("${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}")`
+    : `    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`;
+
   gradle = gradle.replace(
     /dependencies\s*\{/,
-    `dependencies {\n    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`
+    `dependencies {\n${depLine}`
   );
   await fs.writeFile(gradlePath, gradle);
   return true;

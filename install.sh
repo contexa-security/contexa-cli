@@ -39,14 +39,20 @@ case "$OS" in
   Linux*)
     case "$ARCH" in
       x86_64)  FILE="contexa-linux-x64"; PLATFORM="Linux x64" ;;
-      aarch64) FILE="contexa-linux-arm64"; PLATFORM="Linux ARM64" ;;
-      *) printf "  ${RED}Unsupported: $ARCH${NC}\n"; exit 1 ;;
+      aarch64|arm64)
+        printf "  ${RED}Linux ARM64 binary is not yet published.${NC}\n"
+        printf "  ${DIM}Run from source: git clone https://github.com/${REPO} && cd contexa-cli && npm install && node src/index.js${NC}\n"
+        exit 1 ;;
+      *) printf "  ${RED}Unsupported architecture: $ARCH${NC}\n"; exit 1 ;;
     esac ;;
   Darwin*)
     case "$ARCH" in
-      x86_64) FILE="contexa-macos-x64"; PLATFORM="macOS x64" ;;
       arm64)  FILE="contexa-macos-arm64"; PLATFORM="macOS ARM64 (Apple Silicon)" ;;
-      *) printf "  ${RED}Unsupported: $ARCH${NC}\n"; exit 1 ;;
+      x86_64)
+        printf "  ${RED}macOS Intel (x86_64) binary is not yet published.${NC}\n"
+        printf "  ${DIM}Run from source: git clone https://github.com/${REPO} && cd contexa-cli && npm install && node src/index.js${NC}\n"
+        exit 1 ;;
+      *) printf "  ${RED}Unsupported architecture: $ARCH${NC}\n"; exit 1 ;;
     esac ;;
   MINGW*|MSYS*|CYGWIN*)
     FILE="contexa-win-x64.exe"; BIN="contexa.exe"
@@ -90,3 +96,13 @@ printf "  ${V}    ${CYAN}cd${NC} your-spring-project                       ${V}\
 printf "  ${V}    ${CYAN}contexa init${NC}                                 ${V}\n"
 printf "  ${BL}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${H}${BR}\n"
 printf "\n"
+
+# PATH hint when INSTALL_DIR is not on PATH (most relevant on Windows / non-standard installs)
+case ":$PATH:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *)
+    printf "  ${YELLOW}Note:${NC} ${INSTALL_DIR} is not on your PATH.\n"
+    printf "  ${DIM}Add this line to your shell profile (.bashrc / .zshrc / PowerShell profile):${NC}\n"
+    printf "    ${CYAN}export PATH=\"%s:\$PATH\"${NC}\n\n" "${INSTALL_DIR}"
+    ;;
+esac

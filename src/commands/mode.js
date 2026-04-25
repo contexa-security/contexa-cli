@@ -5,6 +5,9 @@ const ora   = require('ora');
 const fs    = require('fs-extra');
 const { detectSpringProject } = require('../core/detector');
 
+const MARKER_START = '# --- Contexa AI Security ---';
+const MARKER_END   = '# --- End Contexa ---';
+
 module.exports = function (program) {
   program
     .command('mode')
@@ -28,9 +31,23 @@ module.exports = function (program) {
       }
 
       const s = ora('Switching mode...').start();
-      let yml = await fs.readFile(project.appYmlPath, 'utf8');
-      yml = yml.replace(/mode: \w+/, `mode: ${target}`);
-      await fs.writeFile(project.appYmlPath, yml);
+      const yml = await fs.readFile(project.appYmlPath, 'utf8');
+
+      // Only touch the mode line inside the Contexa-managed block.
+      const blockRegex = new RegExp(
+        `(${escapeRegex(MARKER_START)}[\\s\\S]*?)(\\bmode:\\s*)\\w+([\\s\\S]*?${escapeRegex(MARKER_END)})`
+      );
+      if (!blockRegex.test(yml)) {
+        s.stop();
+        console.log(chalk.red('\n✗ Contexa block not found in application.yml — run contexa init first\n'));
+        return;
+      }
+
+      // Backup before modification
+      await fs.copy(project.appYmlPath, project.appYmlPath + '.bak');
+
+      const updated = yml.replace(blockRegex, `$1$2${target}$3`);
+      await fs.writeFile(project.appYmlPath, updated);
       s.stop();
 
       if (target === 'enforce') {
@@ -41,3 +58,7 @@ module.exports = function (program) {
       console.log(chalk.gray('  Restart your app to apply.\n'));
     });
 };
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
