@@ -7,9 +7,10 @@ Spring Boot project: it adds the starter dependency, writes Contexa configuratio
 into `application.yml`, and (optionally) generates a `docker-compose.yml` for the
 required infrastructure (PostgreSQL + Ollama).
 
-> Distributed deployments (Redis / Kafka) are **not** provisioned by the CLI —
-> see the [Distributed deployment](https://docs.ctxa.ai/docs/install/configuration/infrastructure.html)
-> guide.
+> For PoC / enterprise demo, run `contexa init --distributed` to additionally
+> provision Redis + Kafka and switch the application to
+> `contexa.infrastructure.mode: DISTRIBUTED`. Production deployments should use
+> Kubernetes + Helm.
 
 ---
 
@@ -58,6 +59,7 @@ Flags:
 | `--yes` | Skip prompts, use defaults |
 | `--force` | Re-initialize even if Contexa is already detected |
 | `--dir <path>` | Project directory (default: current working directory) |
+| `--distributed` | Provision Redis + Kafka and switch to `mode: DISTRIBUTED` (PoC / enterprise demo). Production: use Kubernetes + Helm |
 
 ### `contexa mode`
 

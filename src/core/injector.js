@@ -12,7 +12,7 @@ const CONTEXA_VERSION = '0.1.0';
 
 async function injectYml(ymlPath, opts = {}) {
   const { mode = 'shadow', llmProviders = ['ollama'],
-          securityMode = 'full' } = opts;
+          securityMode = 'full', infra = 'standalone' } = opts;
 
   const priority = llmProviders.join(',');
   const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
@@ -23,6 +23,10 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('  llm:');
   lines.push(`    chatModelPriority: ${priority}`);
   lines.push(`    embeddingModelPriority: ${embeddingPriority}`);
+  if (infra === 'distributed') {
+    lines.push('  infrastructure:');
+    lines.push('    mode: DISTRIBUTED');
+  }
 
   // ── security.zerotrust ──
   lines.push('');
@@ -104,6 +108,16 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('            non_contextual_creation: true');
   lines.push('    show-sql: false');
 
+  // ── spring.data.redis + spring.kafka (distributed only) ──
+  if (infra === 'distributed') {
+    lines.push('  data:');
+    lines.push('    redis:');
+    lines.push('      host: localhost');
+    lines.push('      port: 6379');
+    lines.push('  kafka:');
+    lines.push('    bootstrap-servers: localhost:9092');
+  }
+
   const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
 
   await fs.ensureDir(path.dirname(ymlPath));
@@ -184,7 +198,8 @@ async function injectGradleDep(gradlePath) {
   return true;
 }
 
-async function generateDockerCompose(projectDir) {
+async function generateDockerCompose(projectDir, opts = {}) {
+  const { infra = 'standalone' } = opts;
   const composePath = path.join(projectDir, 'docker-compose.yml');
 
   if (await fs.pathExists(composePath)) {
@@ -233,12 +248,85 @@ services:
     restart: unless-stopped
 `;
 
+  if (infra === 'distributed') {
+    content += `
+  # Redis - Session store, cache, distributed locks (PoC/demo only)
+  redis:
+    image: redis:7.2-alpine
+    container_name: contexa-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Zookeeper - Kafka coordinator
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: contexa-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # Kafka - Event streaming
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: contexa-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+`;
+  }
+
   // Volumes
   content += `
 volumes:
   pgdata:
-  ollama-data:
-`;
+  ollama-data:`;
+  if (infra === 'distributed') {
+    content += `
+  redis-data:
+  zookeeper-data:
+  kafka-data:`;
+  }
+  content += '\n';
 
   await fs.writeFile(composePath, content);
   return composePath;
@@ -1550,4 +1638,70 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { injectYml, injectMavenDep, injectGradleDep, generateDockerCompose, generateInitDbScripts };
+// Inject Redis/Kafka client dependencies for the distributed PoC profile.
+// Idempotent — silently does nothing if any of the markers already exist.
+async function injectDistributedDeps(buildPath) {
+  if (!buildPath || !await fs.pathExists(buildPath)) return false;
+  const content = await fs.readFile(buildPath, 'utf8');
+
+  if (buildPath.endsWith('.xml')) {
+    if (content.includes('spring-kafka') && content.includes('redisson')) return false;
+    const additions = [];
+    if (!content.includes('spring-kafka')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.kafka</groupId>\n` +
+        `            <artifactId>spring-kafka</artifactId>\n` +
+        `        </dependency>`);
+    }
+    if (!content.includes('redisson')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.redisson</groupId>\n` +
+        `            <artifactId>redisson</artifactId>\n` +
+        `            <version>3.48.0</version>\n` +
+        `        </dependency>`);
+    }
+    if (additions.length === 0) return false;
+
+    // Reuse the same project-level <dependencies> location logic.
+    const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
+    const mgmtRanges = [];
+    let m;
+    while ((m = mgmtRegex.exec(content)) !== null) mgmtRanges.push([m.index, m.index + m[0].length]);
+    const isInsideMgmt = (idx) => mgmtRanges.some(([a, b]) => idx >= a && idx < b);
+    let target = -1, cursor = 0;
+    while (true) {
+      const found = content.indexOf('</dependencies>', cursor);
+      if (found === -1) break;
+      if (!isInsideMgmt(found)) { target = found; break; }
+      cursor = found + 1;
+    }
+    if (target === -1) return false;
+
+    const block = additions.join('\n') + '\n    ';
+    const updated = content.slice(0, target) + block + content.slice(target);
+    await fs.writeFile(buildPath, updated);
+    return true;
+  }
+
+  // Gradle (Groovy or Kotlin DSL)
+  const isKts = buildPath.endsWith('.kts');
+  const lines = [];
+  if (!content.includes('spring-kafka')) {
+    lines.push(isKts
+      ? `    implementation("org.springframework.kafka:spring-kafka")`
+      : `    implementation 'org.springframework.kafka:spring-kafka'`);
+  }
+  if (!content.includes('redisson')) {
+    lines.push(isKts
+      ? `    implementation("org.redisson:redisson:3.48.0")`
+      : `    implementation 'org.redisson:redisson:3.48.0'`);
+  }
+  if (lines.length === 0) return false;
+  const updated = content.replace(/dependencies\s*\{/, `dependencies {\n${lines.join('\n')}`);
+  await fs.writeFile(buildPath, updated);
+  return true;
+}
+
+module.exports = { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps, generateDockerCompose, generateInitDbScripts };

@@ -5,8 +5,10 @@ const ora   = require('ora');
 const inquirer = require('inquirer');
 const path  = require('path');
 const { execSync } = require('child_process');
+const { Option } = require('commander');
 const { detectSpringProject } = require('../core/detector');
-const { injectYml, injectMavenDep, injectGradleDep, generateDockerCompose, generateInitDbScripts } = require('../core/injector');
+const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
+        generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 
 module.exports = function (program) {
   program
@@ -15,7 +17,14 @@ module.exports = function (program) {
     .option('--yes', 'Skip prompts, use defaults')
     .option('--force', 'Reinitialize even if already configured')
     .option('--dir <path>', 'Project directory', process.cwd())
+    // Hidden flag: provisions Redis + Kafka infrastructure for PoC / enterprise demos.
+    // Production deployments should use Kubernetes + Helm; not advertised in --help.
+    .addOption(new Option('--distributed', 'PoC/enterprise demo with Redis + Kafka').hideHelp())
     .action(async (opts) => {
+      if (opts.distributed) {
+        console.log(chalk.yellow('\n  ⚠ Distributed mode (PoC / enterprise demo)'));
+        console.log(chalk.gray('    For production, use Kubernetes + Helm — this profile is intended for short demos only.\n'));
+      }
       console.log('');
 
       // 1. Detect project
@@ -47,7 +56,8 @@ module.exports = function (program) {
       // 2. Prompts
       const defaults = {
         securityMode: 'full', mode: 'shadow', llmProviders: ['ollama'],
-        infra: 'standalone', injectDep: true,
+        infra: opts.distributed ? 'distributed' : 'standalone',
+        injectDep: true,
         startDocker: true,
       };
 
@@ -91,8 +101,10 @@ module.exports = function (program) {
         },
       ]);
 
-      // Always inject dependency
+      // Always inject dependency. --distributed forces the distributed profile
+      // even when the user picked Standard interactively.
       answers.injectDep = true;
+      if (opts.distributed) answers.infra = 'distributed';
 
       console.log('');
 
@@ -113,6 +125,12 @@ module.exports = function (program) {
           ? await injectMavenDep(buildPath)
           : await injectGradleDep(buildPath);
         ok ? s2.succeed('Dependency added') : s2.info('Already present');
+
+        if (answers.infra === 'distributed') {
+          const s2b = ora('Adding distributed dependencies (Kafka, Redisson)...').start();
+          const added = await injectDistributedDeps(buildPath);
+          added ? s2b.succeed('Distributed dependencies added') : s2b.info('Distributed dependencies already present');
+        }
       }
 
       // 5. Generate database init scripts + docker-compose.yml
@@ -122,8 +140,10 @@ module.exports = function (program) {
         s3a.succeed('Database scripts generated');
 
         const s3 = ora('Generating docker-compose.yml...').start();
-        await generateDockerCompose(opts.dir);
-        s3.succeed('docker-compose.yml generated');
+        await generateDockerCompose(opts.dir, answers);
+        s3.succeed(answers.infra === 'distributed'
+          ? 'docker-compose.yml generated (PostgreSQL + Ollama + Redis + Kafka)'
+          : 'docker-compose.yml generated');
 
         // 6. Start Docker
         if (answers.startDocker && project.hasDocker) {
