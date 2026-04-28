@@ -17,17 +17,36 @@ binds ports to `127.0.0.1` only.
 
 ## Install
 
+**Linux / macOS / Git Bash / WSL** — POSIX shell:
+
 ```bash
 curl -fsSL https://install.ctxa.ai | sh
 ```
 
-The installer downloads the binary, verifies it against the SHA-256 digest
-published next to it on GitHub Releases, and refuses to install on mismatch.
-Supported binaries: Linux x64, macOS ARM64 (Apple Silicon), Windows x64.
-Other platforms can run from source (see "From source" below).
+**Windows** — PowerShell 5.1 or later:
+
+```powershell
+irm https://install.ctxa.ai/install.ps1 | iex
+```
+
+Both installers download the binary, verify it against the SHA-256 digest
+published next to it on GitHub Releases, and refuse to install on mismatch.
+
+Supported prebuilt binaries:
+
+- Linux x64
+- macOS ARM64 (Apple Silicon)
+- Windows x64
+
+Intel Macs, Linux ARM64, and other platforms must build from source (see
+"From source" below).
 
 If the installer reports that the install directory is not on your `PATH`,
-follow the printed `export PATH=...` hint.
+follow the printed hint:
+
+- Linux / macOS: `export PATH="$HOME/.local/bin:$PATH"` in your shell profile
+- Windows: open a new terminal (the PowerShell installer adds the path
+  automatically to the user-scope PATH)
 
 ---
 
@@ -129,6 +148,39 @@ variable fallbacks, so you can override credentials without editing the file:
 For production deployments, set the `CONTEXA_DB_*` variants explicitly and
 **never** rely on the embedded defaults.
 
+### Setting environment variables
+
+Linux / macOS / Git Bash:
+
+```bash
+export CONTEXA_DB_PASSWORD='your-secret'
+contexa init
+```
+
+Windows PowerShell:
+
+```powershell
+$env:CONTEXA_DB_PASSWORD = 'your-secret'
+contexa init
+```
+
+For persistent values on Windows, prefer
+`[Environment]::SetEnvironmentVariable('CONTEXA_DB_PASSWORD', 'your-secret', 'User')`
+and reopen the terminal.
+
+### Default Ollama model footprint
+
+`qwen2.5:7b` is the default chat model and uses roughly 5 GB of RAM at
+inference time. On smaller machines, override with a lighter model before
+starting Docker:
+
+```bash
+export OLLAMA_CHAT_MODEL='qwen2.5:3b'   # ~2.4 GB
+contexa init
+```
+
+The `mxbai-embed-large` embedding model adds about 670 MB.
+
 ---
 
 ## From source
@@ -137,6 +189,7 @@ For production deployments, set the `CONTEXA_DB_*` variants explicitly and
 git clone https://github.com/contexa-security/contexa-cli
 cd contexa-cli
 npm install
+npm test                  # 37 unit tests for injector, detector, i18n
 node src/index.js init
 ```
 
@@ -144,6 +197,19 @@ Prebuilt binaries are produced from the same source via `npm run build`
 (esbuild bundle + Node.js Single Executable Application). The release
 workflow also publishes a `<binary>.sha256` sidecar for each platform that
 the installer verifies.
+
+---
+
+## Troubleshooting
+
+| Symptom | Where to look |
+|---|---|
+| `contexa: command not found` after install | Open a new terminal, then `which contexa` (Linux/macOS) or `Get-Command contexa` (PowerShell). The installer prints the PATH hint at the end. |
+| `Docker start failed` during `init` | Run `docker compose up -d` manually in the project directory. The `docker-compose.yml` was already generated. |
+| Ollama model pull failed | Run `docker exec contexa-ollama ollama pull qwen2.5:7b`. Re-run after the container is healthy. |
+| Application can't connect to DB | Confirm `CONTEXA_DB_PASSWORD` matches the value in `docker-compose.yml`. Volumes persist across restarts: `docker compose down -v` resets the data directory. |
+| `application.yml` got overwritten unexpectedly | Each `contexa init` creates an `application.yml.bak` next to the original. |
+| macOS Gatekeeper blocks `contexa` ("cannot be opened because it is from an unidentified developer") | The release binary is ad-hoc signed only. Strip the quarantine attribute: `xattr -d com.apple.quarantine $(which contexa)`. |
 
 ---
 
@@ -169,4 +235,4 @@ Before exposing the deployment to anything other than your own machine:
 
 ## License
 
-See repository root.
+Apache License 2.0 — see the `LICENSE` file in the repository root.
