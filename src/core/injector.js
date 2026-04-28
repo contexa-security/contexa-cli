@@ -2,6 +2,8 @@
 
 const fs = require('fs-extra');
 const path = require('path');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 const MARKER_START = '# --- Contexa AI Security ---';
 const MARKER_END   = '# --- End Contexa ---';
@@ -9,6 +11,18 @@ const MARKER_END   = '# --- End Contexa ---';
 const CONTEXA_GROUP_ID = 'io.contexa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
 const CONTEXA_VERSION = '0.1.0';
+
+// Generate a URL-safe random password (16 chars from 12 random bytes).
+// Node 18 supports base64url directly.
+function generateRandomPassword(byteLength = 12) {
+  return crypto.randomBytes(byteLength).toString('base64url');
+}
+
+// BCrypt hash with cost factor 6 to keep init time acceptable.
+// Cost 6 is sufficient for the seed accounts; users should rotate later.
+function bcryptHash(plain) {
+  return bcrypt.hashSync(plain, 6);
+}
 
 async function injectYml(ymlPath, opts = {}) {
   const { mode = 'shadow', llmProviders = ['ollama'],
@@ -18,7 +32,7 @@ async function injectYml(ymlPath, opts = {}) {
   const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
   const lines = [];
 
-  // ── contexa ──
+  // contexa: AI security configuration + isolated datasource (env override pattern)
   lines.push('contexa:');
   lines.push('  llm:');
   lines.push(`    chatModelPriority: ${priority}`);
@@ -27,43 +41,54 @@ async function injectYml(ymlPath, opts = {}) {
     lines.push('  infrastructure:');
     lines.push('    mode: DISTRIBUTED');
   }
+  // contexa.datasource: isolated DB owned by contexa (independent from app DB)
+  lines.push('  datasource:');
+  lines.push('    url: ${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}');
+  lines.push('    username: ${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa}}');
+  lines.push('    password: ${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}');
+  lines.push('    driver-class-name: ${CONTEXA_DB_DRIVER:org.postgresql.Driver}');
+  lines.push('    isolation:');
+  lines.push('      contexa-owned-application: true');
+  lines.push('  jpa:');
+  lines.push('    hibernate:');
+  lines.push('      ddl-auto: ${CONTEXA_JPA_DDL_AUTO:update}');
 
-  // ── security.zerotrust ──
+  // security.zerotrust: enforcement mode toggle
   lines.push('');
   lines.push('security:');
   lines.push('  zerotrust:');
   lines.push(`    mode: ${mode === 'enforce' ? 'ENFORCE' : 'SHADOW'}`);
 
-  // ── hcad ──
+  // hcad: geoip lookup
   lines.push('');
   lines.push('hcad:');
   lines.push('  geoip:');
   lines.push('    dbPath: data/GeoLite2-City.mmdb');
 
-  // ── spring ──
+  // spring: application datasource + AI providers
   lines.push('');
   lines.push('spring:');
   lines.push('  datasource:');
-  lines.push('    url: jdbc:postgresql://localhost:5432/contexa');
-  lines.push('    username: contexa');
-  lines.push('    password: contexa1234!@#');
+  lines.push('    url: ${DB_URL:jdbc:postgresql://localhost:5432/contexa}');
+  lines.push('    username: ${DB_USERNAME:contexa}');
+  lines.push('    password: ${DB_PASSWORD:contexa1234!@#}');
   lines.push('    driver-class-name: org.postgresql.Driver');
   lines.push('  auth:');
   lines.push('    token-transport-type: header_cookie');
   lines.push('    oauth2-csrf: false');
   lines.push('    token-persistence: localstorage');
 
-  // ── spring.ai (selected providers only) ──
+  // spring.ai: selected providers only (env override for API keys)
   lines.push('  ai:');
   if (llmProviders.includes('ollama')) {
     lines.push('    ollama:');
-    lines.push('      base-url: http://127.0.0.1:11434');
+    lines.push('      base-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}');
     lines.push('      chat:');
     lines.push('        options:');
-    lines.push('          model: qwen2.5:7b');
+    lines.push('          model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}');
     lines.push('          keep-alive: "24h"');
     lines.push('      embedding:');
-    lines.push('        model: mxbai-embed-large');
+    lines.push('        model: ${OLLAMA_EMBEDDING_MODEL:mxbai-embed-large}');
   }
   if (llmProviders.includes('openai')) {
     lines.push('    openai:');
@@ -108,14 +133,14 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('            non_contextual_creation: true');
   lines.push('    show-sql: false');
 
-  // ── spring.data.redis + spring.kafka (distributed only) ──
+  // spring.data.redis + spring.kafka (distributed mode only)
   if (infra === 'distributed') {
     lines.push('  data:');
     lines.push('    redis:');
-    lines.push('      host: localhost');
-    lines.push('      port: 6379');
+    lines.push('      host: ${REDIS_HOST:localhost}');
+    lines.push('      port: ${REDIS_PORT:6379}');
     lines.push('  kafka:');
-    lines.push('    bootstrap-servers: localhost:9092');
+    lines.push('    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}');
   }
 
   const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
@@ -207,23 +232,25 @@ async function generateDockerCompose(projectDir, opts = {}) {
   }
 
   let content = `# Contexa Infrastructure - Auto-generated by contexa init
+# Ports are bound to 127.0.0.1 only to prevent unintended LAN exposure.
+# Override with COMPOSE_BIND_HOST=0.0.0.0 only if external access is required.
 services:
   # PostgreSQL with PGVector
   postgres:
     image: pgvector/pgvector:pg16
     container_name: contexa-postgres
     environment:
-      POSTGRES_DB: contexa
-      POSTGRES_USER: contexa
-      POSTGRES_PASSWORD: contexa1234!@#
+      POSTGRES_DB: \${CONTEXA_DB_NAME:-contexa}
+      POSTGRES_USER: \${CONTEXA_DB_USERNAME:-contexa}
+      POSTGRES_PASSWORD: \${CONTEXA_DB_PASSWORD:-contexa1234!@#}
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     ports:
-      - "5432:5432"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U contexa -d contexa"]
+      test: ["CMD-SHELL", "pg_isready -U \${CONTEXA_DB_USERNAME:-contexa} -d \${CONTEXA_DB_NAME:-contexa}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -234,7 +261,7 @@ services:
     image: ollama/ollama:latest
     container_name: contexa-ollama
     ports:
-      - "11434:11434"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:11434:11434"
     volumes:
       - ollama-data:/root/.ollama
     environment:
@@ -255,7 +282,7 @@ services:
     image: redis:7.2-alpine
     container_name: contexa-redis
     ports:
-      - "6379:6379"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:6379:6379"
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
@@ -274,7 +301,7 @@ services:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
-      - "2181:2181"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:2181:2181"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
     healthcheck:
@@ -302,7 +329,7 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     ports:
-      - "9092:9092"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:9092:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
@@ -332,17 +359,23 @@ volumes:
   return composePath;
 }
 
-async function generateInitDbScripts(projectDir) {
+// Generate database init scripts.
+// When seedPassword is omitted, a fresh random password is generated.
+// Returns { initdbDir, seedPassword } so the caller can show it to the user once.
+async function generateInitDbScripts(projectDir, opts = {}) {
   const initdbDir = path.join(projectDir, 'initdb');
   await fs.ensureDir(initdbDir);
+
+  const seedPassword = opts.seedPassword || generateRandomPassword();
+  const seedHash = bcryptHash(seedPassword);
 
   // 01-core-ddl.sql (numbered for execution order)
   await fs.writeFile(path.join(initdbDir, '01-core-ddl.sql'), getDdlScript());
 
-  // 02-dml.sql
-  await fs.writeFile(path.join(initdbDir, '02-dml.sql'), getDmlScript());
+  // 02-dml.sql with per-init randomized BCrypt hash for the four seed accounts.
+  await fs.writeFile(path.join(initdbDir, '02-dml.sql'), getDmlScript(seedHash));
 
-  return initdbDir;
+  return { initdbDir, seedPassword };
 }
 
 function getDdlScript() {
@@ -1560,14 +1593,17 @@ create table system_settings
 `;
 }
 
-function getDmlScript() {
-  return `-- ============================================================
+function getDmlScript(seedBcryptHash) {
+  if (!seedBcryptHash || typeof seedBcryptHash !== 'string') {
+    throw new Error('getDmlScript requires a seedBcryptHash argument');
+  }
+  const template = `-- ============================================================
 -- Contexa AI-Native Zero Trust Security Platform
 -- Initial Data (DML)
 -- Version: 0.1.0
 -- ============================================================
 -- Run AFTER ddlScript.sql
--- Password: BCrypt encoded '1234'
+-- Password: BCrypt encoded random password (generated at init time, see init output)
 -- ============================================================
 
 -- ============================================================
@@ -1603,14 +1639,14 @@ WHERE (g.group_name = 'Administrators' AND r.role_name IN ('ROLE_ADMIN', 'ROLE_M
    OR (g.group_name = 'Developers'     AND r.role_name IN ('ROLE_DEVELOPER', 'ROLE_USER'));
 
 -- ============================================================
--- 4. Users (All passwords: 1234)
+-- 4. Users (Seed password: random, see contexa init output)
 -- ============================================================
 
 INSERT INTO users (username, email, password, name, phone, department, position, enabled, mfa_enabled, account_locked, bridge_managed, credentials_expired, external_auth_only, failed_login_attempts, created_at) VALUES
-    ('admin',       'admin@contexa.io',       '{bcrypt}$2a$06$8zyaQFyvO1gn1gbPp.bjrumKfRFif3CiDgpqK4aB4n8Gl2cbTOxJy', 'System Admin',   '010-0000-0001', 'IT',          'Administrator', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
-    ('kim_manager', 'kim.manager@contexa.io', '{bcrypt}$2a$06$8zyaQFyvO1gn1gbPp.bjrumKfRFif3CiDgpqK4aB4n8Gl2cbTOxJy', 'Kim Jihoon',     '010-0000-0002', 'Finance',     'Manager',       TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
-    ('park_user',   'park.user@contexa.io',   '{bcrypt}$2a$06$8zyaQFyvO1gn1gbPp.bjrumKfRFif3CiDgpqK4aB4n8Gl2cbTOxJy', 'Park Minjun',    '010-0000-0003', 'Engineering', 'Developer',     TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
-    ('dev_lead',    'dev.lead@contexa.io',    '{bcrypt}$2a$06$8zyaQFyvO1gn1gbPp.bjrumKfRFif3CiDgpqK4aB4n8Gl2cbTOxJy', 'Lee Soyeon',     '010-0000-0004', 'Engineering', 'Tech Lead',     TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP);
+    ('admin',       'admin@contexa.io',       '{bcrypt}__SEED_BCRYPT_HASH__', 'System Admin',   '010-0000-0001', 'IT',          'Administrator', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
+    ('kim_manager', 'kim.manager@contexa.io', '{bcrypt}__SEED_BCRYPT_HASH__', 'Kim Jihoon',     '010-0000-0002', 'Finance',     'Manager',       TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
+    ('park_user',   'park.user@contexa.io',   '{bcrypt}__SEED_BCRYPT_HASH__', 'Park Minjun',    '010-0000-0003', 'Engineering', 'Developer',     TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP),
+    ('dev_lead',    'dev.lead@contexa.io',    '{bcrypt}__SEED_BCRYPT_HASH__', 'Lee Soyeon',     '010-0000-0004', 'Engineering', 'Tech Lead',     TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 0, CURRENT_TIMESTAMP);
 
 -- ============================================================
 -- 5. User-Group Assignments
@@ -1632,6 +1668,7 @@ VALUES
     ('DELETE', 'Delete Access', 'Permission to remove resources', false, 'CRUD', 'DELETE', CURRENT_TIMESTAMP)
 ON CONFLICT (permission_name) DO NOTHING;
 `;
+  return template.split('__SEED_BCRYPT_HASH__').join(seedBcryptHash);
 }
 
 function escapeRegex(s) {

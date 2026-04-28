@@ -34,6 +34,9 @@ jobs:
 
       - run: npm install
 
+      - name: Run unit tests
+        run: npm test
+
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs
 
@@ -75,6 +78,19 @@ jobs:
         with:
           path: dist/
 
+      # Generate SHA-256 sidecars next to each binary so install.sh can verify
+      # the download against a tamper-evident digest before chmod +x.
+      - name: Generate SHA-256 checksums
+        run: |
+          set -e
+          for f in \
+              dist/contexa-linux-x64/contexa-linux-x64 \
+              dist/contexa-macos-arm64/contexa-macos-arm64 \
+              dist/contexa-win-x64.exe/contexa-win-x64.exe; do
+            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+            echo "$(cat "$f.sha256")  $(basename "$f")"
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
           name: Contexa CLI ${{ github.ref_name }}
@@ -83,7 +99,11 @@ jobs:
             ```bash
             curl -fsSL https://install.ctxa.ai | sh
             ```
+            The installer verifies a SHA-256 digest published next to each binary.
           files: |
             dist/contexa-linux-x64/contexa-linux-x64
+            dist/contexa-linux-x64/contexa-linux-x64.sha256
             dist/contexa-macos-arm64/contexa-macos-arm64
+            dist/contexa-macos-arm64/contexa-macos-arm64.sha256
             dist/contexa-win-x64.exe/contexa-win-x64.exe
+            dist/contexa-win-x64.exe/contexa-win-x64.exe.sha256

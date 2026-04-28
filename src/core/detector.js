@@ -13,6 +13,7 @@ async function detectSpringProject(dir = process.cwd()) {
     hasContexta: false,
     projectName: null,
     appYmlPath: null,
+    appPropertiesPath: null,
     hasDocker: false,
   };
 
@@ -51,14 +52,13 @@ async function detectSpringProject(dir = process.cwd()) {
     result.hasContexta = gradle.includes('spring-boot-starter-contexa');
   }
 
-  // application.yml or application.properties
+  // Track application.yml and application.properties independently so callers
+  // can warn the operator when both exist - Spring loads one and silently
+  // shadows the other depending on classpath order.
   const ymlPath = path.join(dir, 'src/main/resources/application.yml');
   const propsPath = path.join(dir, 'src/main/resources/application.properties');
-  if (await fs.pathExists(ymlPath)) {
-    result.appYmlPath = ymlPath;
-  } else if (await fs.pathExists(propsPath)) {
-    result.appYmlPath = propsPath;
-  }
+  if (await fs.pathExists(ymlPath)) result.appYmlPath = ymlPath;
+  if (await fs.pathExists(propsPath)) result.appPropertiesPath = propsPath;
 
   // Docker detection
   try {
