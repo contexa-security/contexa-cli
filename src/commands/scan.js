@@ -49,7 +49,7 @@ module.exports = function (program) {
           const block = blockMatch[1];
           const modeValue = (block.match(/\bzerotrust:[\s\S]*?\bmode:\s*(\w+)/)?.[1]
                           || block.match(/\bmode:\s*(\w+)/)?.[1] || '').toLowerCase();
-          if (modeValue === 'shadow' || modeValue === 'shadow') {
+          if (modeValue === 'shadow') {
             warnings.push(t('scan.shadowMode'));
           } else if (modeValue === 'enforce') {
             passes.push(t('scan.enforceMode'));
