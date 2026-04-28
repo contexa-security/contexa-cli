@@ -57,7 +57,10 @@ test('injectYml: ENFORCE mode writes uppercase value', async () => {
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: distributed mode adds redis and kafka blocks', async () => {
+test('injectYml: distributed mode toggles contexa.infrastructure.mode only', async () => {
+  // The spring.data.redis and spring.kafka namespaces belong to the host
+  // application; contexa-cli must not write them. Only contexa.infrastructure
+  // is touched when --distributed is set.
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
@@ -65,8 +68,51 @@ test('injectYml: distributed mode adds redis and kafka blocks', async () => {
     const out = await fs.readFile(ymlPath, 'utf8');
     assert.ok(out.includes('infrastructure:'));
     assert.ok(out.includes('mode: DISTRIBUTED'));
-    assert.ok(out.includes('${REDIS_HOST:localhost}'));
-    assert.ok(out.includes('${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}'));
+    assert.equal(out.includes('${REDIS_HOST'), false, 'spring.data.redis must not be written');
+    assert.equal(out.includes('${KAFKA_BOOTSTRAP_SERVERS'), false, 'spring.kafka must not be written');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: managed block carries only contexa.* top-level keys (no security:, hcad: at top level)', async () => {
+  // Regression guard: previously security.zerotrust.* and hcad.* were written as
+  // separate top-level keys. They are now nested under contexa.* so that the
+  // entire managed block lives in a single namespace.
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const out = await fs.readFile(ymlPath, 'utf8');
+    const blockMatch = out.match(/# --- Contexa AI Security ---[\s\S]*?# --- End Contexa ---/);
+    const block = blockMatch[0];
+    // Inside the managed block, top-level lines (no leading whitespace) must be
+    // markers + contexa: only.
+    const topLevelLines = block.split('\n').filter(l => /^[A-Za-z][\w-]*:\s*$/.test(l));
+    assert.deepEqual(topLevelLines.sort(), ['contexa:'], `unexpected top-level keys: ${topLevelLines}`);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: never writes any spring.* key (host application owns that namespace)', async () => {
+  // Regression guard: contexa-cli used to inject spring.datasource / spring.jpa /
+  // spring.ai.* and that produced duplicate top-level keys when the user's
+  // application.yml already had a `spring:` block. The managed block must now
+  // be free of any `spring:` line.
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    // Try every llm permutation + both infra modes to be safe.
+    for (const infra of ['standalone', 'distributed']) {
+      for (const providers of [['ollama'], ['openai'], ['anthropic'], ['ollama', 'openai', 'anthropic']]) {
+        await injectYml(ymlPath, { mode: 'shadow', llmProviders: providers, infra });
+        const out = await fs.readFile(ymlPath, 'utf8');
+        const blockMatch = out.match(/# --- Contexa AI Security ---[\s\S]*?# --- End Contexa ---/);
+        assert.ok(blockMatch, 'managed block must exist');
+        const block = blockMatch[0];
+        // No top-level spring: nor any spring.* sub-keys
+        assert.equal(/^spring:\s*$/m.test(block), false, `block contains spring: with infra=${infra} providers=${providers}`);
+        assert.equal(block.includes('spring.datasource'), false);
+        assert.equal(block.includes('spring.jpa'), false);
+      }
+    }
   } finally { await fs.remove(dir); }
 });
 

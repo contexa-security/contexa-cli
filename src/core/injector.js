@@ -53,95 +53,22 @@ async function injectYml(ymlPath, opts = {}) {
   lines.push('    hibernate:');
   lines.push('      ddl-auto: ${CONTEXA_JPA_DDL_AUTO:update}');
 
-  // security.zerotrust: enforcement mode toggle
-  lines.push('');
-  lines.push('security:');
-  lines.push('  zerotrust:');
-  lines.push(`    mode: ${mode === 'enforce' ? 'ENFORCE' : 'SHADOW'}`);
+  // contexa.security.zerotrust: enforcement mode toggle
+  // (contexa starter binds this prefix; do not place under spring.security)
+  lines.push('  security:');
+  lines.push('    zerotrust:');
+  lines.push(`      mode: ${mode === 'enforce' ? 'ENFORCE' : 'SHADOW'}`);
 
-  // hcad: geoip lookup
-  lines.push('');
-  lines.push('hcad:');
-  lines.push('  geoip:');
-  lines.push('    dbPath: data/GeoLite2-City.mmdb');
+  // contexa.hcad: geoip lookup used by contexa runtime decisioning
+  lines.push('  hcad:');
+  lines.push('    geoip:');
+  lines.push('      dbPath: data/GeoLite2-City.mmdb');
 
-  // spring: application datasource + AI providers
-  lines.push('');
-  lines.push('spring:');
-  lines.push('  datasource:');
-  lines.push('    url: ${DB_URL:jdbc:postgresql://localhost:5432/contexa}');
-  lines.push('    username: ${DB_USERNAME:contexa}');
-  lines.push('    password: ${DB_PASSWORD:contexa1234!@#}');
-  lines.push('    driver-class-name: org.postgresql.Driver');
-  lines.push('  auth:');
-  lines.push('    token-transport-type: header_cookie');
-  lines.push('    oauth2-csrf: false');
-  lines.push('    token-persistence: localstorage');
-
-  // spring.ai: selected providers only (env override for API keys)
-  lines.push('  ai:');
-  if (llmProviders.includes('ollama')) {
-    lines.push('    ollama:');
-    lines.push('      base-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}');
-    lines.push('      chat:');
-    lines.push('        options:');
-    lines.push('          model: ${OLLAMA_CHAT_MODEL:qwen2.5:7b}');
-    lines.push('          keep-alive: "24h"');
-    lines.push('      embedding:');
-    lines.push('        model: ${OLLAMA_EMBEDDING_MODEL:mxbai-embed-large}');
-  }
-  if (llmProviders.includes('openai')) {
-    lines.push('    openai:');
-    lines.push('      api-key: ${OPENAI_API_KEY:your-openai-api-key}');
-    lines.push('      base-url: https://api.openai.com');
-    lines.push('      chat:');
-    lines.push('        options:');
-    lines.push('          model: gpt-4o-mini');
-    lines.push('          temperature: 0.3');
-  }
-  if (llmProviders.includes('anthropic')) {
-    lines.push('    anthropic:');
-    lines.push('      api-key: ${ANTHROPIC_API_KEY:your-anthropic-api-key}');
-    lines.push('      chat:');
-    lines.push('        options:');
-    lines.push('          model: claude-3-sonnet-20240229');
-  } else {
-    // Anthropic bean requires api-key even when disabled
-    lines.push('    anthropic:');
-    lines.push('      api-key: ${ANTHROPIC_API_KEY:your-anthropic-api-key}');
-  }
-  lines.push('    security:');
-  lines.push('      tiered:');
-  lines.push('        security:');
-  lines.push('          trusted-proxy-validation-enabled: true');
-  lines.push('          trusted-proxies:');
-  lines.push('            - "127.0.0.1"');
-  lines.push('            - "::1"');
-  lines.push('            - "0:0:0:0:0:0:0:1"');
-  lines.push('    vectorstore:');
-  lines.push('      pgvector:');
-  lines.push('        dimensions: 1024');
-  lines.push('        initialize-schema: true');
-  lines.push('  jpa:');
-  lines.push('    database: POSTGRESQL');
-  lines.push('    hibernate:');
-  lines.push('      ddl-auto: validate');
-  lines.push('    properties:');
-  lines.push('      hibernate:');
-  lines.push('        jdbc:');
-  lines.push('          lob:');
-  lines.push('            non_contextual_creation: true');
-  lines.push('    show-sql: false');
-
-  // spring.data.redis + spring.kafka (distributed mode only)
-  if (infra === 'distributed') {
-    lines.push('  data:');
-    lines.push('    redis:');
-    lines.push('      host: ${REDIS_HOST:localhost}');
-    lines.push('      port: ${REDIS_PORT:6379}');
-    lines.push('  kafka:');
-    lines.push('    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}');
-  }
+  // NOTE: spring.* (datasource, jpa, ai, data.redis, kafka, ...) is intentionally
+  // NOT written here. That namespace belongs to the host application; the user
+  // configures it themselves. Contexa only owns the contexa.* namespace plus
+  // the two auxiliary prefixes above (security.zerotrust, hcad) which the
+  // starter binds directly.
 
   const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
 
