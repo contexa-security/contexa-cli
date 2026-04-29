@@ -69,7 +69,6 @@ module.exports = function (program) {
       // present causes PgVector bean creation errors. Surface both halves.
       if (project.hasEnableAiSecurity) {
         passes.push('@EnableAISecurity declared in src/main/java');
-        // Look for at least one Spring AI provider starter in the build file.
         const buildPath = project.buildFilePath;
         if (buildPath && await fs.pathExists(buildPath)) {
           const buildText = await fs.readFile(buildPath, 'utf8');
@@ -81,10 +80,17 @@ module.exports = function (program) {
             issues.push('@EnableAISecurity is declared but no Spring AI provider starter is on the build file. ' +
               'Add at least one of spring-ai-starter-model-{ollama,openai,anthropic}, or run "contexa init" again.');
           }
+          const hasVectorStarter = buildText.includes('spring-ai-starter-vector-store-pgvector');
+          if (!hasVectorStarter) {
+            issues.push('@EnableAISecurity is declared but spring-ai-starter-vector-store-pgvector is missing. ' +
+              'Without it the rag-vector capability cannot resolve and the application fails to start. ' +
+              'Run "contexa init" again to auto-add it.');
+          }
         }
       } else {
-        // No annotation. If the build file already pulls a Spring AI provider
-        // starter, warn that this will likely trigger PgVector bean errors.
+        // No annotation. If the build file already pulls Spring AI / vector
+        // starters, warn that this will likely trigger bean instantiation
+        // errors at startup.
         const buildPath = project.buildFilePath;
         if (buildPath && await fs.pathExists(buildPath)) {
           const buildText = await fs.readFile(buildPath, 'utf8');
@@ -92,9 +98,10 @@ module.exports = function (program) {
             buildText.includes('spring-ai-starter-model-ollama') ||
             buildText.includes('spring-ai-starter-model-openai') ||
             buildText.includes('spring-ai-starter-model-anthropic');
-          if (hasAnyAiStarter) {
-            warnings.push('Spring AI provider starter is on the build file but @EnableAISecurity is NOT declared. ' +
-              'PgVector / ChatModel beans may fail at startup. Either declare @EnableAISecurity on your @SpringBootApplication, or remove the unused Spring AI starter.');
+          const hasVectorStarter = buildText.includes('spring-ai-starter-vector-store-pgvector');
+          if (hasAnyAiStarter || hasVectorStarter) {
+            warnings.push('Spring AI / vector starter is on the build file but @EnableAISecurity is NOT declared. ' +
+              'PgVector / ChatModel beans may fail at startup. Either declare @EnableAISecurity on your @SpringBootApplication, or remove the unused starters.');
           }
         }
       }

@@ -1712,14 +1712,28 @@ const AI_STARTER_BY_PROVIDER = {
   anthropic: { groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-model-anthropic' },
 };
 
-// Add Spring AI provider starters matching the chosen LLM providers. Without
-// these, the contexa starter aborts at startup with "No Spring AI ChatModel
-// is configured for CONTEXA". Idempotent.
+// Vector store starter required by @EnableAISecurity. Without it, the contexa
+// runtime aborts at startup with "rag-vector capability unresolved" because
+// SecurityDecisionPostProcessor depends on UnifiedVectorService which depends
+// on a Spring AI VectorStore bean. Only the pgvector backend is supported by
+// the platform today (contexa-core/.../PgVectorStoreProperties).
+const VECTOR_STORE_STARTER = {
+  groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-vector-store-pgvector',
+};
+
+// Add Spring AI provider starters matching the chosen LLM providers, plus the
+// pgvector vector-store starter that the contexa runtime requires whenever
+// @EnableAISecurity is present (rag-vector capability). Without these, the
+// starter aborts at startup with either "No Spring AI ChatModel is configured
+// for CONTEXA" or "rag-vector capability unresolved". Idempotent.
 async function injectAiStarterDeps(buildPath, providers) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   if (!Array.isArray(providers) || providers.length === 0) return false;
   const content = await fs.readFile(buildPath, 'utf8');
-  const wanted = providers.map(p => AI_STARTER_BY_PROVIDER[p]).filter(Boolean);
+  const wanted = [
+    ...providers.map(p => AI_STARTER_BY_PROVIDER[p]).filter(Boolean),
+    VECTOR_STORE_STARTER,
+  ];
   const missing = wanted.filter(d => !content.includes(d.artifactId));
   if (missing.length === 0) return false;
 

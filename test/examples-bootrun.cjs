@@ -151,8 +151,8 @@ async function bootRunModule(moduleName) {
 
   let stdoutTail = '';
   let stderrTail = '';
-  child.stdout.on('data', c => { stdoutTail = (stdoutTail + c).slice(-4000); });
-  child.stderr.on('data', c => { stderrTail = (stderrTail + c).slice(-4000); });
+  child.stdout.on('data', c => { stdoutTail = (stdoutTail + c).slice(-8000); });
+  child.stderr.on('data', c => { stderrTail = (stderrTail + c).slice(-8000); });
 
   // Poll health for up to 180 seconds. Spring Boot + AI starter typically
   // takes 30-90s on cold start. Ollama health probe lives in starter.

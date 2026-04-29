@@ -18,6 +18,7 @@ const yaml = require('js-yaml');
 const { detectSpringProject } = require('../src/core/detector');
 const {
   injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
+  injectAiStarterDeps,
 } = require('../src/core/injector');
 
 async function makeProject(layout) {
@@ -618,6 +619,32 @@ test('K2: detector reports hasEnableAiSecurity=false when no Java sources', asyn
   try {
     const detect = await detectSpringProject(dir);
     assert.equal(detect.hasEnableAiSecurity, false);
+  } finally { await fs.remove(dir); }
+});
+
+test('K4: injectAiStarterDeps adds pgvector starter alongside provider starter (Gradle)', async () => {
+  const dir = await makeProject({
+    'build.gradle': `dependencies {\n  implementation 'org.springframework.boot:spring-boot-starter'\n}\n`,
+  });
+  try {
+    const added = await injectAiStarterDeps(path.join(dir, 'build.gradle'), ['ollama']);
+    assert.equal(added, true);
+    const txt = await fs.readFile(path.join(dir, 'build.gradle'), 'utf8');
+    assert.match(txt, /spring-ai-starter-model-ollama/);
+    assert.match(txt, /spring-ai-starter-vector-store-pgvector/);
+  } finally { await fs.remove(dir); }
+});
+
+test('K5: injectAiStarterDeps adds pgvector starter for Maven', async () => {
+  const dir = await makeProject({
+    'pom.xml': `<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter</artifactId></dependency></dependencies></project>`,
+  });
+  try {
+    const added = await injectAiStarterDeps(path.join(dir, 'pom.xml'), ['openai']);
+    assert.equal(added, true);
+    const pom = await fs.readFile(path.join(dir, 'pom.xml'), 'utf8');
+    assert.match(pom, /spring-ai-starter-model-openai/);
+    assert.match(pom, /spring-ai-starter-vector-store-pgvector/);
   } finally { await fs.remove(dir); }
 });
 
