@@ -3,13 +3,10 @@
   "lang.choose": "Language / 언어:",
   "lang.choice.en": "English",
   "lang.choice.ko": "한국어",
-
   "banner.tagline": "AI-Native Zero Trust Security",
   "banner.subtitle": "Spring Boot Integration",
-
   "init.distributed.warning": "Distributed mode (PoC / enterprise demo)",
   "init.distributed.note": "For production, use Kubernetes + Helm - this profile is intended for short demos only.",
-
   "init.detecting": "Detecting Spring project...",
   "init.notSpring": "Spring project not found.",
   "init.notSpring.hint": "Run this command inside your Spring project root.",
@@ -22,31 +19,24 @@
   "init.security.legacy": "none (Legacy)",
   "init.docker.installed": "installed",
   "init.docker.missing": "not found",
-
   "init.alreadyDetected": "Contexa already detected in this project.",
   "init.alreadyDetected.hint": "Re-run with --force to overwrite settings, or --yes to accept defaults.",
   "init.alreadyDetected.update": "Contexa already detected - settings will be updated.",
-
   "prompt.securityMode": "Your project type (New project / Legacy system):",
   "prompt.securityMode.full": "New project     - Contexa handles login + security  (default)",
   "prompt.securityMode.sandbox": "Legacy system  - Keep your login, add AI security",
-
   "prompt.mode": "Enable AI security immediately:",
   "prompt.mode.shadow": "No, observe   - monitor and log only  (default)",
   "prompt.mode.enforce": "Yes, enforce  - detect and block immediately",
-
   "prompt.llm": "AI / LLM Model (space to select, enter to confirm):",
   "prompt.llm.ollama": "Ollama     - runs locally, no data leaves your server  (default)",
   "prompt.llm.openai": "OpenAI     - cloud API, fast (requires API key)",
   "prompt.llm.anthropic": "Anthropic  - cloud API, advanced (requires API key)",
   "prompt.llm.atLeastOne": "Select at least one",
-
   "prompt.infra": "Infrastructure setup (Docker):",
   "prompt.infra.standalone": "Standard      - PostgreSQL + Ollama + In Memory  (default)",
-  "prompt.infra.skip": "Skip          - I will set up infrastructure myself",
-
+  "prompt.infra.skip": "No  - I will set up infrastructure myself  (default)",
   "prompt.startDocker": "Start Docker containers now? (default: Yes)",
-
   "step.updatingYml": "Updating application.yml...",
   "step.ymlUpdated": "application.yml updated",
   "step.addingDep": "Adding dependency...",
@@ -69,12 +59,10 @@
   "step.embeddingPulled": "Embedding model pulled",
   "step.ollamaNotReady": "Ollama not ready. Pull models manually: docker exec contexa-ollama ollama pull {0}",
   "step.modelPullFailed": "Model pull failed. Pull manually: docker exec contexa-ollama ollama pull {0}",
-
   "init.done": "Done!",
   "init.seedPassword.title": "Seed account password (admin / kim_manager / park_user / dev_lead):",
   "init.seedPassword.note1": "Save this password now - it is shown only once.",
   "init.seedPassword.note2": "Rotate after first login. Hash is stored in initdb/02-dml.sql.",
-
   "next.steps": "Next steps:",
   "next.step1.sandbox": "1. Add to your main class:",
   "next.step1.full": "1. Add to your main class:",
@@ -82,18 +70,15 @@
   "next.step3": "3. Restart your application",
   "next.shadowActive": "Shadow mode active - analyze only, no blocking.",
   "next.shadowToggle": "Run: contexa mode --enforce  when ready.",
-
   "warn.security.title": "Security checklist before exposing this deployment:",
   "warn.security.envVars": "Set CONTEXA_DB_PASSWORD / DB_PASSWORD before deploying outside this machine.",
   "warn.security.gitignore": "Verify application.yml is not committed with default credentials.",
   "warn.security.demoUsers": "Rotate seed account passwords (admin / kim_manager / park_user / dev_lead).",
   "warn.security.shadowMode": "SHADOW mode logs threats only. Run 'contexa mode --enforce' to actively block.",
-
   "mode.notInstalled": "Contexa not initialized. Run: contexa init",
   "mode.noBlock": "Contexa-managed block not found in application.yml.",
   "mode.changed": "Mode changed: {0} -> {1}",
   "mode.unchanged": "Mode already set to {0}.",
-
   "scan.title": "Configuration scan:",
   "scan.passed": "passed",
   "scan.warnings": "warnings",
@@ -112,7 +97,6 @@
   "scan.defaultDbPassword": "Default DB password detected. Set CONTEXA_DB_PASSWORD env var.",
   "scan.apiKeyExposed": "API key appears to be a literal value, not an environment placeholder.",
   "scan.propertiesAndYml": "Both application.properties and application.yml exist - one will shadow the other.",
-
   "status.title": "Contexa status:",
   "status.spring": "Spring",
   "status.contexa": "Contexa",
@@ -121,7 +105,7 @@
   "status.llm": "LLM",
   "status.installed": "installed",
   "status.notInstalled": "not installed",
-
   "common.yes": "Yes",
-  "common.no": "No"
+  "common.no": "No",
+  "prompt.infra.distributed": "Yes - install distributed (Postgres + Ollama + Redis + Kafka)"
 }

@@ -3,6 +3,8 @@
 const fs = require('fs-extra');
 const path = require('path');
 
+const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
+
 async function detectSpringProject(dir = process.cwd()) {
   const result = {
     isSpring: false,
@@ -15,6 +17,7 @@ async function detectSpringProject(dir = process.cwd()) {
     appYmlPath: null,
     appPropertiesPath: null,
     hasDocker: false,
+    gradleRootDir: null,
   };
 
   // Maven detection
@@ -28,7 +31,7 @@ async function detectSpringProject(dir = process.cwd()) {
     result.hasSpringSecurityCore = pom.includes('spring-security')
         || pom.includes('spring-boot-starter-security')
         || pom.includes('spring-security-web');
-    result.hasContexta = pom.includes('spring-boot-starter-contexa');
+    result.hasContexta = pom.includes(CONTEXA_ARTIFACT_ID);
     // Strip <parent>...</parent> first so we don't accidentally match the parent's artifactId.
     const projectPom = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
     const m = projectPom.match(/<artifactId>([^<]+)<\/artifactId>/);
@@ -49,7 +52,65 @@ async function detectSpringProject(dir = process.cwd()) {
     result.hasSpringBoot = gradle.includes('spring-boot');
     result.hasSpringSecurityCore = gradle.includes('spring-security')
         || gradle.includes('spring-boot-starter-security');
-    result.hasContexta = gradle.includes('spring-boot-starter-contexa');
+    result.hasContexta = gradle.includes(CONTEXA_ARTIFACT_ID);
+  }
+
+  // Resolve a project name for Gradle: settings.gradle's rootProject.name takes
+  // precedence; otherwise fall back to the directory basename. Maven users get
+  // the artifactId already, so we only run this branch for Gradle.
+  if (result.buildTool === 'gradle' && !result.projectName) {
+    const settingsLocal = await firstExisting([
+      path.join(dir, 'settings.gradle'),
+      path.join(dir, 'settings.gradle.kts'),
+    ]);
+    if (settingsLocal) {
+      const content = await fs.readFile(settingsLocal, 'utf8');
+      const m = content.match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/);
+      if (m) result.projectName = m[1];
+    }
+    if (!result.projectName) result.projectName = path.basename(dir);
+  }
+
+  // Multi-module Gradle: walk up to find a parent settings.gradle that includes
+  // this directory. Common in mono-repos that share a root with subprojects { }
+  // dependency injection. Without this check, detector reports hasContexta=false
+  // even when the parent's subprojects block already adds the starter, and init
+  // would then add a redundant per-module dependency line.
+  if (result.buildTool === 'gradle') {
+    const moduleName = path.basename(dir);
+    let cur = path.resolve(dir, '..');
+    for (let depth = 0; depth < 4; depth++) {
+      const parentSettings = await firstExisting([
+        path.join(cur, 'settings.gradle'),
+        path.join(cur, 'settings.gradle.kts'),
+      ]);
+      if (parentSettings) {
+        const settingsContent = await fs.readFile(parentSettings, 'utf8');
+        // Match include 'module-name' (Groovy) or include("module-name") (Kotlin DSL)
+        const includeRegex = new RegExp(
+          `include[\\s(]*['"]:?${moduleName}['"]`
+        );
+        if (includeRegex.test(settingsContent)) {
+          result.gradleRootDir = cur;
+          const rootBuild = await firstExisting([
+            path.join(cur, 'build.gradle'),
+            path.join(cur, 'build.gradle.kts'),
+          ]);
+          if (rootBuild) {
+            const rb = await fs.readFile(rootBuild, 'utf8');
+            if (rb.includes(CONTEXA_ARTIFACT_ID)) result.hasContexta = true;
+            if (rb.includes('spring-security') ||
+                rb.includes('spring-boot-starter-security')) {
+              result.hasSpringSecurityCore = true;
+            }
+          }
+          break;
+        }
+      }
+      const next = path.resolve(cur, '..');
+      if (next === cur) break;
+      cur = next;
+    }
   }
 
   // Track application.yml and application.properties independently so callers
@@ -70,6 +131,13 @@ async function detectSpringProject(dir = process.cwd()) {
   }
 
   return result;
+}
+
+async function firstExisting(paths) {
+  for (const p of paths) {
+    if (await fs.pathExists(p)) return p;
+  }
+  return null;
 }
 
 module.exports = { detectSpringProject };

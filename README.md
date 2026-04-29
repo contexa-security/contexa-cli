@@ -99,7 +99,14 @@ Flags:
 | `--force` | Re-initialize even if Contexa is already detected |
 | `--dir <path>` | Project directory (default: current working directory) |
 | `--lang <code>` | Interface language (`en` or `ko`) |
-| `--distributed` | Provision Redis + Kafka and switch to `mode: DISTRIBUTED` (PoC / enterprise demo). Production: use Kubernetes + Helm |
+| `--distributed` | **Opt-in:** install distributed infrastructure (Postgres + Ollama + Redis + Zookeeper + Kafka), set `contexa.infrastructure.mode: DISTRIBUTED`, and add `redisson` + `spring-kafka` deps. Without this flag, `init` does not generate `docker-compose.yml`, does not generate `initdb/`, and does not start any containers. Production deployments should still use Kubernetes + Helm. |
+| `--no-docker` | With `--distributed`: generate compose/initdb files but do not run `docker compose up -d`. Has no effect without `--distributed` (init does nothing infra-related anyway). |
+
+> **Default behavior:** `contexa init` (no flags) only updates `application.yml`
+> with the contexa-managed keys and adds `spring-boot-starter-contexa` to your
+> build file. It does not touch Docker, does not write `docker-compose.yml`,
+> and does not generate database init scripts. Customers running their own
+> PostgreSQL / Ollama (and Redis / Kafka) infrastructure are unaffected.
 
 ### `contexa mode`
 
@@ -202,14 +209,53 @@ the installer verifies.
 
 ## Troubleshooting
 
-| Symptom | Where to look |
+If something goes wrong during `init`, the original `application.yml`,
+`pom.xml`, `build.gradle`, and `docker-compose.yml` are always backed up
+to `<file>.bak` next to the original before any change. Recovery is a
+copy: `cp application.yml.bak application.yml`.
+
+### Install / launch
+
+| Symptom | Resolution |
 |---|---|
 | `contexa: command not found` after install | Open a new terminal, then `which contexa` (Linux/macOS) or `Get-Command contexa` (PowerShell). The installer prints the PATH hint at the end. |
-| `Docker start failed` during `init` | Run `docker compose up -d` manually in the project directory. The `docker-compose.yml` was already generated. |
-| Ollama model pull failed | Run `docker exec contexa-ollama ollama pull qwen2.5:7b`. Re-run after the container is healthy. |
-| Application can't connect to DB | Confirm `CONTEXA_DB_PASSWORD` matches the value in `docker-compose.yml`. Volumes persist across restarts: `docker compose down -v` resets the data directory. |
-| `application.yml` got overwritten unexpectedly | Each `contexa init` creates an `application.yml.bak` next to the original. |
-| macOS Gatekeeper blocks `contexa` ("cannot be opened because it is from an unidentified developer") | The release binary is ad-hoc signed only. Strip the quarantine attribute: `xattr -d com.apple.quarantine $(which contexa)`. |
+| macOS Gatekeeper blocks `contexa` | The release binary is ad-hoc signed only. Strip the quarantine attribute: `xattr -d com.apple.quarantine $(which contexa)`. |
+| `Docker start failed` during `init` | Run `docker compose up -d` manually in the project directory. The `docker-compose.yml` was already generated. To skip the docker step entirely, re-run with `contexa init --infra skip` or `--no-docker`. |
+
+### `contexa init` errors
+
+| Symptom | Resolution |
+|---|---|
+| `application.yml is not valid YAML (around line N)` | Open the file at the indicated line. Common causes: tabs (use spaces), inconsistent indentation, missing colons. The file is restored from `.bak` if you cannot fix it. |
+| `Both application.properties and application.yml exist` warning | Spring Boot loads one and silently shadows the other based on classpath order. Pick a single source - usually move `.properties` content into `.yml` and delete `.properties`. |
+| Existing `contexa.*` keys disappear after `init` | They should not. The CLI uses YAML-aware merge and preserves user values. If they do, restore from `application.yml.bak` and please file an issue with the input file. |
+| `init` adds a redundant `spring-boot-starter-contexa` line in a multi-module Gradle build | The CLI now walks up to the parent `settings.gradle` and recognizes the starter when it is added in a parent `subprojects { dependencies { } }` block. If you still see the duplicate, ensure your `settings.gradle` `include` line uses the directory basename. |
+
+### Infrastructure (`--distributed`, Docker, ports)
+
+`contexa init --distributed` provisions PostgreSQL + Ollama + Redis +
+Zookeeper + Kafka. Standalone (default) only provisions PostgreSQL + Ollama.
+Both modes run a pre-flight check before `docker compose up -d`.
+
+| Symptom | Resolution |
+|---|---|
+| `Docker is not installed on this machine` | Install Docker Desktop (Windows/macOS) or Docker Engine (Linux), then open a new terminal and re-run `contexa init`. If you cannot install Docker, re-run with `--no-infra` to skip infrastructure provisioning - you must then run PostgreSQL/Ollama (and Redis/Kafka if `--distributed`) yourself. |
+| `Docker is installed but the daemon is not running` | Open Docker Desktop and wait for the whale icon to settle, OR run `sudo systemctl start docker` on Linux. Or re-run with `--no-docker` to generate compose/initdb files without starting them. |
+| `Port 5432 / 6379 / 9092 (...) is already in use` | Stop the conflicting service, OR set `COMPOSE_BIND_HOST=0.0.0.0` to bind to a different interface, OR re-run with `--no-docker` and resolve the conflict before running compose manually. |
+| `Container "contexa-postgres" already exists` | compose will silently reuse it. If its config has drifted (different password, mount path, etc.) run `docker rm -f contexa-postgres` (and other contexa-* containers) before re-init. |
+| `redisson` version conflict with your existing BOM (`--distributed` only) | Set `CONTEXA_REDISSON_VERSION=<your-version>` before running `contexa init --distributed`. The CLI will use that version instead of the bundled `3.48.0`. |
+| Ollama model pull failed | Run `docker exec contexa-ollama ollama pull qwen2.5:7b`. Override default models with `OLLAMA_CHAT_MODEL=qwen2.5:3b` (and optionally `OLLAMA_EMBEDDING_MODEL`) before re-running `init`. |
+| Application can't connect to DB | Confirm `CONTEXA_DB_PASSWORD` matches the value in `docker-compose.yml`. Volumes persist across restarts; `docker compose down -v` resets the data directory. |
+| `permission` table column `auto_created` does not exist | Older `02-dml.sql` had a column the DDL did not declare. Re-run `contexa init --force` to regenerate `initdb/01-core-ddl.sql`, then `docker compose down -v && docker compose up -d` to re-bootstrap. |
+
+### `contexa scan` warnings explained
+
+| Warning | Meaning | Fix |
+|---|---|---|
+| `Dead key contexa.jpa.hibernate.ddl-auto` | No `@ConfigurationProperties` binds this; older CLI versions emitted it. | Remove the key, or move the value to `spring.jpa.hibernate.ddl-auto`. |
+| `Deprecated key contexa.llm.chatModelPriority` | Replaced by `contexa.llm.selection.chat.priority`. Core still binds the old key today but it will be removed. | Replace with the new key. |
+| `Top-level "contexa:" appears N times` | Spring Boot 3.x SnakeYAML rejects duplicate top-level keys. | Run `contexa init` again; the CLI merges them into one. |
+| `Default DB password still in use` | `contexa1234!@#` is in `contexa.datasource.password`. | Set `CONTEXA_DB_PASSWORD` and remove the literal default. |
 
 ---
 

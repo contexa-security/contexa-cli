@@ -1,0 +1,98 @@
+# Examples integration test infrastructure.
+# All container names use the "ctxa-test-" prefix and ports are offset by
+# +10000 so they never collide with the production stack (contexa-postgres,
+# contexa-ollama, contexa-redis, contexa-zookeeper, contexa-kafka on default
+# ports). Brought up by test/examples-matrix.cjs and torn down at the end.
+
+name: ctxa-test
+
+services:
+  ctxa-test-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ctxa-test-postgres
+    environment:
+      POSTGRES_DB: contexa_test
+      POSTGRES_USER: contexa_test
+      POSTGRES_PASSWORD: contexa_test_pw
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ctxa-test-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contexa_test -d contexa_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+
+  ctxa-test-ollama:
+    image: ollama/ollama:latest
+    container_name: ctxa-test-ollama
+    ports:
+      - "127.0.0.1:21434:11434"
+    volumes:
+      - ctxa-test-ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: "no"
+
+  ctxa-test-redis:
+    image: redis:7.2-alpine
+    container_name: ctxa-test-redis
+    ports:
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
+  ctxa-test-zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: ctxa-test-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "127.0.0.1:12181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: "no"
+
+  ctxa-test-kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: ctxa-test-kafka
+    depends_on:
+      ctxa-test-zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 99
+      KAFKA_ZOOKEEPER_CONNECT: ctxa-test-zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://ctxa-test-kafka:9093,PLAINTEXT_HOST://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:19092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "127.0.0.1:19092:9092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:19092"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    restart: "no"
+
+volumes:
+  ctxa-test-pgdata:
+  ctxa-test-ollama-data:

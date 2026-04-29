@@ -4,9 +4,13 @@ const fs = require('fs-extra');
 const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const yaml = require('js-yaml');
 
-const MARKER_START = '# --- Contexa AI Security ---';
-const MARKER_END   = '# --- End Contexa ---';
+// Legacy marker block written by pre-1.1 versions. Kept here only so that
+// re-running init on an older project strips and rewrites the block as a
+// merged contexa: tree instead of producing a duplicate top-level key.
+const LEGACY_MARKER_START = '# --- Contexa AI Security ---';
+const LEGACY_MARKER_END   = '# --- End Contexa ---';
 
 const CONTEXA_GROUP_ID = 'ai.ctxa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
@@ -24,67 +28,151 @@ function bcryptHash(plain) {
   return bcrypt.hashSync(plain, 6);
 }
 
-async function injectYml(ymlPath, opts = {}) {
-  const { mode = 'shadow', llmProviders = ['ollama'],
-          securityMode = 'full', infra = 'standalone' } = opts;
-
+// Build the contexa.* sub-tree this CLI version is responsible for.
+// The shape mirrors the @ConfigurationProperties surface in the platform.
+// Returned tree is a fresh object the caller can mutate freely.
+function buildCliContexaTree(opts) {
+  const { mode = 'shadow', llmProviders = ['ollama'], infra = 'standalone' } = opts;
   const priority = llmProviders.join(',');
   const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
-  const lines = [];
 
-  // contexa: AI security configuration + isolated datasource (env override pattern)
-  lines.push('contexa:');
-  lines.push('  llm:');
-  lines.push(`    chatModelPriority: ${priority}`);
-  lines.push(`    embeddingModelPriority: ${embeddingPriority}`);
+  const tree = {
+    llm: {
+      // Use the non-deprecated selection API. Deprecated chatModelPriority/
+      // embeddingModelPriority on contexa.llm.* are intentionally NOT written.
+      selection: {
+        chat: { priority },
+        embedding: { priority: embeddingPriority },
+      },
+    },
+    datasource: {
+      url: '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}',
+      username: '${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa}}',
+      password: '${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}',
+      'driver-class-name': '${CONTEXA_DB_DRIVER:org.postgresql.Driver}',
+      isolation: { 'contexa-owned-application': true },
+    },
+    security: {
+      zerotrust: { mode: mode === 'enforce' ? 'ENFORCE' : 'SHADOW' },
+    },
+    hcad: {
+      geoip: { enabled: true, dbPath: 'data/GeoLite2-City.mmdb' },
+    },
+  };
   if (infra === 'distributed') {
-    lines.push('  infrastructure:');
-    lines.push('    mode: DISTRIBUTED');
+    tree.infrastructure = { mode: 'DISTRIBUTED' };
   }
-  // contexa.datasource: isolated DB owned by contexa (independent from app DB)
-  lines.push('  datasource:');
-  lines.push('    url: ${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}');
-  lines.push('    username: ${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa}}');
-  lines.push('    password: ${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}');
-  lines.push('    driver-class-name: ${CONTEXA_DB_DRIVER:org.postgresql.Driver}');
-  lines.push('    isolation:');
-  lines.push('      contexa-owned-application: true');
-  lines.push('  jpa:');
-  lines.push('    hibernate:');
-  lines.push('      ddl-auto: ${CONTEXA_JPA_DDL_AUTO:update}');
+  return tree;
+}
 
-  // contexa.security.zerotrust: enforcement mode toggle
-  // (contexa starter binds this prefix; do not place under spring.security)
-  lines.push('  security:');
-  lines.push('    zerotrust:');
-  lines.push(`      mode: ${mode === 'enforce' ? 'ENFORCE' : 'SHADOW'}`);
+// Recursively fill missing keys from source into target. Existing primitives
+// are preserved (user wins). Objects merge; arrays/primitives never overwrite.
+function fillOnly(target, source) {
+  for (const key of Object.keys(source)) {
+    const sv = source[key];
+    if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
+      if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) {
+        target[key] = {};
+      }
+      fillOnly(target[key], sv);
+    } else if (target[key] === undefined) {
+      target[key] = sv;
+    }
+  }
+}
 
-  // contexa.hcad: geoip lookup used by contexa runtime decisioning
-  lines.push('  hcad:');
-  lines.push('    geoip:');
-  lines.push('      dbPath: data/GeoLite2-City.mmdb');
+function setPath(obj, pathArr, value) {
+  let cur = obj;
+  for (let i = 0; i < pathArr.length - 1; i++) {
+    const k = pathArr[i];
+    if (!cur[k] || typeof cur[k] !== 'object' || Array.isArray(cur[k])) cur[k] = {};
+    cur = cur[k];
+  }
+  cur[pathArr[pathArr.length - 1]] = value;
+}
 
-  // NOTE: spring.* (datasource, jpa, ai, data.redis, kafka, ...) is intentionally
-  // NOT written here. That namespace belongs to the host application; the user
-  // configures it themselves. Contexa only owns the contexa.* namespace plus
-  // the two auxiliary prefixes above (security.zerotrust, hcad) which the
-  // starter binds directly.
+// Apply the CLI tree onto the host application's parsed yml object.
+// Policy:
+//   - User-set values are preserved by default (fill-only merge).
+//   - A small set of CLI-managed keys are always force-overwritten because they
+//     define platform behavior and must not silently drift between init runs:
+//       * contexa.security.zerotrust.mode
+//       * contexa.hcad.geoip.enabled
+//       * contexa.datasource.isolation.contexa-owned-application
+//       * contexa.llm.selection.{chat,embedding}.priority
+//   - --distributed additionally forces contexa.infrastructure.mode = DISTRIBUTED.
+function applyCliContexaTree(rootObj, cliTree, opts) {
+  if (!rootObj.contexa || typeof rootObj.contexa !== 'object' || Array.isArray(rootObj.contexa)) {
+    rootObj.contexa = {};
+  }
+  fillOnly(rootObj.contexa, cliTree);
 
-  const block = `\n${MARKER_START}\n${lines.join('\n')}\n${MARKER_END}`;
+  setPath(rootObj.contexa, ['security', 'zerotrust', 'mode'],
+    opts.mode === 'enforce' ? 'ENFORCE' : 'SHADOW');
+  setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
+  setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
+  setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
+    cliTree.llm.selection.chat.priority);
+  setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
+    cliTree.llm.selection.embedding.priority);
 
-  await fs.ensureDir(path.dirname(ymlPath));
+  if (opts.infra === 'distributed') {
+    setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
+  }
+}
 
+// Strip a marker block written by older CLI versions. Idempotent on input
+// without a marker. Returns the cleaned yml text.
+function stripLegacyMarker(content) {
+  const regex = new RegExp(
+    `\\n*${escapeRegex(LEGACY_MARKER_START)}[\\s\\S]*?${escapeRegex(LEGACY_MARKER_END)}\\n*`,
+    'g'
+  );
+  return content.replace(regex, '\n');
+}
+
+async function injectYml(ymlPath, opts = {}) {
+  const cliTree = buildCliContexaTree(opts);
+
+  let rootObj = {};
   if (await fs.pathExists(ymlPath)) {
     await fs.copy(ymlPath, ymlPath + '.bak');
-    let content = await fs.readFile(ymlPath, 'utf8');
-    const regex = new RegExp(`${escapeRegex(MARKER_START)}[\\s\\S]*?${escapeRegex(MARKER_END)}`);
-    content = content.match(regex)
-      ? content.replace(regex, block.trim())
-      : content + block;
-    await fs.writeFile(ymlPath, content);
-  } else {
-    await fs.writeFile(ymlPath, block.trim());
+    const content = await fs.readFile(ymlPath, 'utf8');
+    const stripped = stripLegacyMarker(content);
+    try {
+      const parsed = yaml.load(stripped);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        rootObj = parsed;
+      }
+    } catch (err) {
+      // Surface a friendly, actionable message instead of a raw stack trace.
+      // The .bak file is already in place so the user can recover.
+      const lineHint = err.mark && typeof err.mark.line === 'number'
+        ? ` (around line ${err.mark.line + 1})` : '';
+      const guidance = [
+        `application.yml is not valid YAML${lineHint}.`,
+        `Backup saved to ${ymlPath}.bak`,
+        `How to fix:`,
+        `  1) Open ${ymlPath} and check indentation${lineHint}.`,
+        `  2) Tabs are NOT valid in YAML - replace with spaces.`,
+        `  3) Run "contexa init" again once the file parses cleanly.`,
+        `  4) If you cannot resolve it, restore from the .bak file.`,
+        `Original parser error: ${err.message}`,
+      ].join('\n  ');
+      throw new Error(guidance);
+    }
   }
+
+  applyCliContexaTree(rootObj, cliTree, opts);
+
+  await fs.ensureDir(path.dirname(ymlPath));
+  const out = yaml.dump(rootObj, {
+    lineWidth: 200,
+    noRefs: true,
+    sortKeys: false,
+    quotingType: '"',
+  });
+  await fs.writeFile(ymlPath, out);
 }
 
 async function injectMavenDep(pomPath) {
@@ -427,6 +515,7 @@ create table permission
         unique
                                                                 references managed_resource
                                                                     on delete set null,
+    auto_created         boolean      default false             not null,
     created_at           timestamp(6) default CURRENT_TIMESTAMP not null,
     updated_at           timestamp(6)
 );
@@ -1604,9 +1693,14 @@ function escapeRegex(s) {
 
 // Inject Redis/Kafka client dependencies for the distributed PoC profile.
 // Idempotent — silently does nothing if any of the markers already exist.
+//
+// spring-kafka version is omitted: Spring Boot's BOM manages it. redisson's
+// version can be overridden via CONTEXA_REDISSON_VERSION env var so that
+// customers whose own BOM pins a different redisson can avoid a clash.
 async function injectDistributedDeps(buildPath) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
+  const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
 
   if (buildPath.endsWith('.xml')) {
     if (content.includes('spring-kafka') && content.includes('redisson')) return false;
@@ -1623,7 +1717,7 @@ async function injectDistributedDeps(buildPath) {
         `        <dependency>\n` +
         `            <groupId>org.redisson</groupId>\n` +
         `            <artifactId>redisson</artifactId>\n` +
-        `            <version>3.48.0</version>\n` +
+        `            <version>${redissonVersion}</version>\n` +
         `        </dependency>`);
     }
     if (additions.length === 0) return false;
@@ -1659,8 +1753,8 @@ async function injectDistributedDeps(buildPath) {
   }
   if (!content.includes('redisson')) {
     lines.push(isKts
-      ? `    implementation("org.redisson:redisson:3.48.0")`
-      : `    implementation 'org.redisson:redisson:3.48.0'`);
+      ? `    implementation("org.redisson:redisson:${redissonVersion}")`
+      : `    implementation 'org.redisson:redisson:${redissonVersion}'`);
   }
   if (lines.length === 0) return false;
   const updated = content.replace(/dependencies\s*\{/, `dependencies {\n${lines.join('\n')}`);

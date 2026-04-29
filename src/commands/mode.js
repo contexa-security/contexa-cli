@@ -3,11 +3,9 @@
 const chalk = require('chalk');
 const ora   = require('ora');
 const fs    = require('fs-extra');
+const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
-
-const MARKER_START = '# --- Contexa AI Security ---';
-const MARKER_END   = '# --- End Contexa ---';
 
 module.exports = function (program) {
   program
@@ -24,6 +22,7 @@ module.exports = function (program) {
       }
 
       const target = opts.enforce ? 'enforce' : 'shadow';
+      const targetUpper = target.toUpperCase();
       const project = await detectSpringProject(opts.dir);
 
       if (!project.appYmlPath || !await fs.pathExists(project.appYmlPath)) {
@@ -32,38 +31,37 @@ module.exports = function (program) {
       }
 
       const s = ora('...').start();
-      const yml = await fs.readFile(project.appYmlPath, 'utf8');
+      const content = await fs.readFile(project.appYmlPath, 'utf8');
 
-      // Capture the current mode value to report old -> new.
-      const blockRegex = new RegExp(
-        `(${escapeRegex(MARKER_START)}[\\s\\S]*?)(\\bmode:\\s*)(\\w+)([\\s\\S]*?${escapeRegex(MARKER_END)})`
-      );
-      const match = yml.match(blockRegex);
-      if (!match) {
+      let root;
+      try {
+        root = yaml.load(content);
+      } catch (err) {
+        s.stop();
+        console.log(chalk.red('\n  x cannot parse application.yml: ' + err.message + '\n'));
+        return;
+      }
+      if (!root || typeof root !== 'object' || Array.isArray(root)) root = {};
+
+      const previous = root?.contexa?.security?.zerotrust?.mode;
+      if (!root.contexa || !root.contexa.security || !root.contexa.security.zerotrust) {
         s.stop();
         console.log(chalk.red('\n  x ' + t('mode.noBlock') + '\n'));
         return;
       }
-
-      const previous = (match[3] || '').toLowerCase();
-      const targetUpper = target.toUpperCase();
-      if (previous === targetUpper.toLowerCase() || previous === targetUpper) {
+      const previousUpper = (previous || '').toString().toUpperCase();
+      if (previousUpper === targetUpper) {
         s.stop();
         console.log(chalk.gray('\n  - ' + t('mode.unchanged', targetUpper) + '\n'));
         return;
       }
 
-      // Backup before modification
       await fs.copy(project.appYmlPath, project.appYmlPath + '.bak');
-
-      const updated = yml.replace(blockRegex, `$1$2${targetUpper}$4`);
-      await fs.writeFile(project.appYmlPath, updated);
+      root.contexa.security.zerotrust.mode = targetUpper;
+      const out = yaml.dump(root, { lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"' });
+      await fs.writeFile(project.appYmlPath, out);
       s.stop();
 
-      console.log(chalk.green('\n  v ' + t('mode.changed', previous.toUpperCase(), targetUpper) + '\n'));
+      console.log(chalk.green('\n  v ' + t('mode.changed', previousUpper || 'unset', targetUpper) + '\n'));
     });
 };
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}

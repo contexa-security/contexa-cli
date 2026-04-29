@@ -3,12 +3,42 @@
 const chalk = require('chalk');
 const ora   = require('ora');
 const fs    = require('fs-extra');
+const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
-const MARKER_START = '# --- Contexa AI Security ---';
-const MARKER_END   = '# --- End Contexa ---';
 const DEFAULT_DB_PASSWORD = 'contexa1234!@#';
+// Dead keys: present in older CLI output but not bound by any
+// @ConfigurationProperties class. Surface them so users migrate away.
+const DEAD_KEYS = [
+  ['contexa', 'jpa', 'hibernate', 'ddl-auto'],
+  ['contexa', 'jpa', 'hibernate', 'ddlAuto'],
+];
+// Deprecated keys: still bound today but slated for removal. Recommend
+// migration to contexa.llm.selection.{chat,embedding}.priority.
+const DEPRECATED_KEYS = [
+  ['contexa', 'llm', 'chatModelPriority'],
+  ['contexa', 'llm', 'embeddingModelPriority'],
+];
+
+function getPath(obj, pathArr) {
+  let cur = obj;
+  for (const k of pathArr) {
+    if (!cur || typeof cur !== 'object') return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
+function flatten(obj, prefix, out) {
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    for (const k of Object.keys(obj)) {
+      flatten(obj[k], prefix ? `${prefix}.${k}` : k, out);
+    }
+  } else {
+    out[prefix] = obj;
+  }
+}
 
 module.exports = function (program) {
   program
@@ -33,38 +63,67 @@ module.exports = function (program) {
       if (!project.hasSpringSecurityCore) { warnings.push(t('scan.springSecurityMissing')); }
       else                                { passes.push(t('scan.springSecurity')); }
 
-      // Both files exist - one shadows the other depending on Spring's load order.
       if (project.appPropertiesPath && project.appYmlPath) {
         warnings.push(t('scan.propertiesAndYml'));
       }
 
       if (project.appYmlPath) {
         passes.push(t('scan.ymlPresent'));
-        const yml = await fs.readFile(project.appYmlPath, 'utf8');
-        const blockMatch = yml.match(
-          new RegExp(`${escapeRegex(MARKER_START)}([\\s\\S]*?)${escapeRegex(MARKER_END)}`)
-        );
-        if (blockMatch) {
+        const content = await fs.readFile(project.appYmlPath, 'utf8');
+        let root = null;
+        try { root = yaml.load(content); }
+        catch (err) { issues.push(`application.yml parse error: ${err.message}`); }
+
+        if (root && typeof root === 'object' && root.contexa) {
           passes.push(t('scan.blockPresent'));
-          const block = blockMatch[1];
-          const modeValue = (block.match(/\bzerotrust:[\s\S]*?\bmode:\s*(\w+)/)?.[1]
-                          || block.match(/\bmode:\s*(\w+)/)?.[1] || '').toLowerCase();
-          if (modeValue === 'shadow') {
-            warnings.push(t('scan.shadowMode'));
-          } else if (modeValue === 'enforce') {
-            passes.push(t('scan.enforceMode'));
+          const modeRaw = getPath(root, ['contexa', 'security', 'zerotrust', 'mode']);
+          const modeValue = (modeRaw || '').toString().toLowerCase();
+          if (modeValue === 'shadow')       warnings.push(t('scan.shadowMode'));
+          else if (modeValue === 'enforce') passes.push(t('scan.enforceMode'));
+
+          // Default contexa DB password retained anywhere under contexa.datasource
+          // or its env-fallback default.
+          const flat = {};
+          flatten(root.contexa, 'contexa', flat);
+          for (const [k, v] of Object.entries(flat)) {
+            if (typeof v === 'string' && v.includes(DEFAULT_DB_PASSWORD) &&
+                k.startsWith('contexa.datasource.password')) {
+              issues.push(t('scan.defaultDbPassword'));
+              break;
+            }
           }
 
-          // API key exposed in plaintext (not a ${ENV:default} placeholder).
-          if (/api-key:\s*(sk-|sk_)(?!\$\{)/.test(block)) {
-            issues.push(t('scan.apiKeyExposed'));
+          // Plaintext API key anywhere under spring.ai.* or contexa.* (sk- prefix)
+          const allFlat = {};
+          flatten(root, '', allFlat);
+          for (const [k, v] of Object.entries(allFlat)) {
+            if (typeof v === 'string' && /(api[-_]?key|apikey)/i.test(k) &&
+                /^(sk-|sk_)/.test(v) && !v.includes('${')) {
+              issues.push(t('scan.apiKeyExposed'));
+              break;
+            }
           }
 
-          // Default DB password remained in any datasource block.
-          if (block.includes(DEFAULT_DB_PASSWORD)) {
-            issues.push(t('scan.defaultDbPassword'));
+          // Dead and deprecated keys
+          for (const dk of DEAD_KEYS) {
+            if (getPath(root, dk) !== undefined) {
+              warnings.push(`Dead key ${dk.join('.')} - not bound by any @ConfigurationProperties; remove or move to spring.jpa.hibernate.ddl-auto`);
+            }
           }
-        } else {
+          for (const dpk of DEPRECATED_KEYS) {
+            if (getPath(root, dpk) !== undefined) {
+              warnings.push(`Deprecated key ${dpk.join('.')} - migrate to contexa.llm.selection.{chat,embedding}.priority`);
+            }
+          }
+
+          // Duplicate top-level contexa: detection (yaml.load already throws on
+          // strict-duplicate keys; surface a friendly message in case a non-strict
+          // parser somewhere lets it through)
+          const occurrences = (content.match(/^contexa\s*:/gm) || []).length;
+          if (occurrences > 1) {
+            issues.push(`Top-level "contexa:" appears ${occurrences} times in application.yml. Spring Boot will fail to start.`);
+          }
+        } else if (root) {
           warnings.push(t('scan.blockMissing'));
         }
       } else if (project.isSpring) {
@@ -81,7 +140,3 @@ module.exports = function (program) {
       if (issues.length > 0) process.exitCode = 1;
     });
 };
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}

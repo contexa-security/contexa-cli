@@ -9,6 +9,7 @@ const { Option } = require('commander');
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
+const { inspectInfra } = require('../core/preflight');
 const { t } = require('../core/i18n');
 
 module.exports = function (program) {
@@ -18,9 +19,18 @@ module.exports = function (program) {
     .option('--yes', 'Skip prompts, use defaults')
     .option('--force', 'Reinitialize even if already configured')
     .option('--dir <path>', 'Project directory', process.cwd())
-    // Hidden flag: provisions Redis + Kafka infrastructure for PoC / enterprise demos.
-    // Production deployments should use Kubernetes + Helm; not advertised in --help.
-    .addOption(new Option('--distributed', 'PoC/enterprise demo with Redis + Kafka').hideHelp())
+    // Infrastructure provisioning is OPT-IN. Without --distributed, contexa init
+    // only updates application.yml and adds the starter dependency - it does NOT
+    // generate docker-compose.yml, does NOT generate initdb scripts, and does NOT
+    // start any containers. Customers who already run their own Postgres/Ollama
+    // (and Redis/Kafka) infrastructure are unaffected by re-running init.
+    //
+    // --distributed installs the full PoC/demo stack:
+    //   PostgreSQL + Ollama + Redis + Zookeeper + Kafka
+    // --no-docker (only meaningful with --distributed) generates compose/initdb
+    // files but does not run "docker compose up -d".
+    .option('--distributed', 'Install distributed infrastructure (Postgres + Ollama + Redis + Kafka) for PoC/enterprise demo')
+    .option('--no-docker', 'With --distributed: generate compose/initdb files but do not start containers')
     .action(async (opts) => {
       if (opts.distributed) {
         console.log(chalk.yellow('\n  ! ' + t('init.distributed.warning')));
@@ -45,6 +55,23 @@ module.exports = function (program) {
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
       console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing'))}`));
 
+      // Docker is only consulted when the user explicitly opted into infra
+      // provisioning via --distributed. Without --distributed, init does not
+      // touch infrastructure regardless of whether Docker is installed.
+      const wantsContainers = opts.distributed && opts.docker !== false;
+      if (!project.hasDocker && wantsContainers) {
+        console.log('');
+        console.log(chalk.yellow('  ! Docker is required to start the distributed infrastructure.'));
+        console.log(chalk.gray('    This run will still write compose/initdb files so you can start them later.'));
+        console.log(chalk.gray('    To install Docker:'));
+        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
+        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
+        console.log(chalk.gray('    To skip infrastructure entirely, abort and re-run without --distributed.'));
+        console.log('');
+        // Auto-flip to "files only" mode so we never try to call docker compose.
+        opts.docker = false;
+      }
+
       // Warn when both application.properties and application.yml exist - one shadows the other.
       if (project.appPropertiesPath && project.appYmlPath) {
         console.log(chalk.yellow('  ! ' + t('scan.propertiesAndYml')));
@@ -60,11 +87,14 @@ module.exports = function (program) {
       }
 
       // 2. Prompts
+      // Infrastructure is opt-in. Without --distributed the CLI never touches
+      // compose/initdb/containers. The interactive prompt still offers a
+      // distributed install for users who want one but did not pass the flag.
       const defaults = {
         securityMode: 'full', mode: 'shadow', llmProviders: ['ollama'],
-        infra: opts.distributed ? 'distributed' : 'standalone',
+        infra: opts.distributed ? 'distributed' : 'skip',
         injectDep: true,
-        startDocker: true,
+        startDocker: opts.docker !== false,
       };
 
       const answers = opts.yes ? defaults : await inquirer.prompt([
@@ -94,9 +124,14 @@ module.exports = function (program) {
         },
         {
           type: 'list', name: 'infra', message: t('prompt.infra'),
+          // Default = skip: never touch infrastructure unless the user opts in.
+          // Distributed is the only auto-provisioning option (Postgres + Ollama +
+          // Redis + Zookeeper + Kafka). Customers running their own stack should
+          // accept the default.
+          default: 'skip',
           choices: [
-            { name: t('prompt.infra.standalone'), value: 'standalone' },
             { name: t('prompt.infra.skip'),       value: 'skip' },
+            { name: t('prompt.infra.distributed') || 'Yes - install distributed (Postgres + Ollama + Redis + Kafka)', value: 'distributed' },
           ],
         },
         {
@@ -107,18 +142,37 @@ module.exports = function (program) {
         },
       ]);
 
-      // Always inject dependency. --distributed forces the distributed profile
-      // even when the user picked Standard interactively.
+      // Always inject dependency. --distributed remains authoritative even when
+      // the interactive prompt suggested otherwise.
       answers.injectDep = true;
       if (opts.distributed) answers.infra = 'distributed';
+      if (opts.docker === false) answers.startDocker = false;
 
       console.log('');
 
       // 3. Inject application.yml
       const s1 = ora(t('step.updatingYml')).start();
       const ymlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
-      await injectYml(ymlPath, answers);
-      s1.succeed(t('step.ymlUpdated'));
+      try {
+        await injectYml(ymlPath, answers);
+        s1.succeed(t('step.ymlUpdated'));
+      } catch (err) {
+        s1.fail(t('step.ymlUpdated'));
+        console.log('');
+        console.log(chalk.red('  x application.yml could not be updated.'));
+        console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
+        console.log('');
+        process.exit(1);
+      }
+
+      // application.properties + application.yml coexistence is a load-order
+      // hazard in Spring Boot. Surface a single-line resolution hint here so
+      // the user does not have to dig through docs.
+      if (project.appPropertiesPath && project.appYmlPath) {
+        console.log(chalk.yellow('  ! Both application.properties and application.yml exist.'));
+        console.log(chalk.gray('    Spring Boot will load one and silently shadow the other.'));
+        console.log(chalk.gray('    Recommended: keep one source of truth (yml). Move properties content into yml.'));
+      }
 
       // 4. Inject dependency
       if (answers.injectDep) {
@@ -142,6 +196,12 @@ module.exports = function (program) {
       // 5. Generate database init scripts + docker-compose.yml
       let seedPassword = null;
       if (answers.infra !== 'skip') {
+        if (answers.infra === 'distributed') {
+          console.log(chalk.cyan('\n  Distributed infrastructure: PostgreSQL + Ollama + Redis + Zookeeper + Kafka'));
+        } else {
+          console.log(chalk.cyan('\n  Standalone infrastructure: PostgreSQL + Ollama'));
+        }
+
         const s3a = ora(t('step.generatingDb')).start();
         const dbResult = await generateInitDbScripts(opts.dir);
         seedPassword = dbResult.seedPassword;
@@ -153,6 +213,36 @@ module.exports = function (program) {
           ? t('step.composeGenerated.distributed')
           : t('step.composeGenerated'));
 
+        // 5b. Pre-flight checks before docker compose up. We do this even when
+        // --no-docker is set so the user knows what conflicts to expect when
+        // they run compose manually later.
+        const sPre = ora('Running infrastructure pre-flight checks').start();
+        const issues = await inspectInfra({
+          infra: answers.infra,
+          startDocker: answers.startDocker,
+        });
+        sPre.stop();
+        const errs  = issues.filter(i => i.severity === 'error');
+        const warns = issues.filter(i => i.severity === 'warning');
+        const infos = issues.filter(i => i.severity === 'info');
+        for (const i of errs) {
+          console.log(chalk.red(`  x ${i.message}`));
+          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
+        }
+        for (const i of warns) {
+          console.log(chalk.yellow(`  ! ${i.message}`));
+          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
+        }
+        for (const i of infos) {
+          console.log(chalk.gray(`  i ${i.message}`));
+          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
+        }
+        if (errs.length > 0) {
+          console.log(chalk.red('\n  Infrastructure cannot start. Resolve the errors above and re-run "contexa init".'));
+          console.log('');
+          process.exit(1);
+        }
+
         // 6. Start Docker
         if (answers.startDocker && project.hasDocker) {
           const s4 = ora(t('step.startingDocker')).start();
@@ -162,8 +252,8 @@ module.exports = function (program) {
 
             // 7. Pull Ollama models
             if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
-              const chatModel = 'qwen2.5:7b';
-              const embedModel = 'mxbai-embed-large';
+              const chatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
+              const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
               const s5 = ora(t('step.pullingChat', chatModel)).start();
               try {
                 // Wait for Ollama to be ready

@@ -2,11 +2,18 @@
 
 const chalk = require('chalk');
 const fs    = require('fs-extra');
+const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
-const MARKER_START = '# --- Contexa AI Security ---';
-const MARKER_END   = '# --- End Contexa ---';
+function getPath(obj, pathArr) {
+  let cur = obj;
+  for (const k of pathArr) {
+    if (!cur || typeof cur !== 'object') return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
 
 module.exports = function (program) {
   program
@@ -23,19 +30,22 @@ module.exports = function (program) {
       console.log(`  ${t('status.security')} : ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`);
 
       if (project.appYmlPath && await fs.pathExists(project.appYmlPath)) {
-        const yml = await fs.readFile(project.appYmlPath, 'utf8');
-        const blockMatch = yml.match(
-          new RegExp(`${escapeRegex(MARKER_START)}([\\s\\S]*?)${escapeRegex(MARKER_END)}`)
-        );
-        if (blockMatch) {
-          const block = blockMatch[1];
-          const mode = (block.match(/\bzerotrust:[\s\S]*?\bmode:\s*(\w+)/)?.[1]
-                     || block.match(/\bmode:\s*(\w+)/)?.[1] || '').toUpperCase();
-          const chatPriority = block.match(/chatModelPriority:\s*([^\n]+)/)?.[1]?.trim();
-          const ollamaModel = block.match(/ollama:[\s\S]*?model:[^\n]*?(\S+)\s*$/m)?.[1]?.trim();
-          console.log(`  ${t('status.mode')}     : ${mode === 'ENFORCE' ? chalk.green('ENFORCE') : chalk.yellow('SHADOW')}`);
+        const content = await fs.readFile(project.appYmlPath, 'utf8');
+        let root = null;
+        try { root = yaml.load(content); } catch { root = null; }
+        if (root && typeof root === 'object' && root.contexa) {
+          const modeRaw = getPath(root, ['contexa', 'security', 'zerotrust', 'mode']);
+          const mode = (modeRaw || '').toString().toUpperCase();
+          // Prefer the new selection-API priority; fall back to the legacy
+          // chatModelPriority key for projects still using the deprecated form.
+          const chatPriority =
+            getPath(root, ['contexa', 'llm', 'selection', 'chat', 'priority']) ||
+            getPath(root, ['contexa', 'llm', 'chatModelPriority']);
+          if (mode) {
+            console.log(`  ${t('status.mode')}     : ${mode === 'ENFORCE' ? chalk.green('ENFORCE') : chalk.yellow('SHADOW')}`);
+          }
           if (chatPriority) {
-            console.log(`  ${t('status.llm')}      : ${chatPriority}${ollamaModel ? ` / ${chalk.cyan(ollamaModel)}` : ''}`);
+            console.log(`  ${t('status.llm')}      : ${chatPriority}`);
           }
         } else {
           console.log(`  ${chalk.yellow('!')} ${t('scan.blockMissing')}`);
@@ -44,7 +54,3 @@ module.exports = function (program) {
       console.log('');
     });
 };
-
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}

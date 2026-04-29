@@ -5,127 +5,98 @@ const assert = require('node:assert/strict');
 const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
+const yaml = require('js-yaml');
 
 const {
   injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
   generateDockerCompose, generateInitDbScripts,
 } = require('../src/core/injector');
 
-const MARKER_START = '# --- Contexa AI Security ---';
-const MARKER_END   = '# --- End Contexa ---';
-
 async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-injector-'));
 }
 
+function loadYml(p) {
+  return yaml.load(fs.readFileSync(p, 'utf8'));
+}
+
 // ============================================================
-// injectYml
+// injectYml - merged contexa.* tree (no marker block)
 // ============================================================
 
-test('injectYml: writes Contexa-managed block with markers', async () => {
+test('injectYml: produces a parseable yaml with a single contexa: tree', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    assert.ok(out.includes(MARKER_START));
-    assert.ok(out.includes(MARKER_END));
+    const text = await fs.readFile(ymlPath, 'utf8');
+    const root = yaml.load(text);
+    assert.ok(root && root.contexa, 'contexa: must exist as a top-level key');
+    const contexaOccurrences = (text.match(/^contexa\s*:/gm) || []).length;
+    assert.equal(contexaOccurrences, 1, 'contexa: must appear exactly once at top level');
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: emits contexa.datasource with double env fallback', async () => {
+test('injectYml: emits contexa.datasource with double env fallback (preserves customer DB isolation)', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    assert.ok(out.includes('contexa:'));
-    assert.ok(out.includes('${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}'));
-    assert.ok(out.includes('${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}'));
-    assert.ok(out.includes('contexa-owned-application: true'));
-    assert.ok(out.includes('${CONTEXA_JPA_DDL_AUTO:update}'));
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.datasource.url,
+      '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}');
+    assert.equal(root.contexa.datasource.password,
+      '${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}');
+    assert.equal(root.contexa.datasource.isolation['contexa-owned-application'], true);
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: ENFORCE mode writes uppercase value', async () => {
+test('injectYml: ENFORCE mode writes contexa.security.zerotrust.mode = ENFORCE', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await injectYml(ymlPath, { mode: 'enforce', llmProviders: ['ollama'] });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    assert.match(out, /zerotrust:\s*\n\s*mode:\s*ENFORCE/);
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: distributed mode toggles contexa.infrastructure.mode only', async () => {
-  // The spring.data.redis and spring.kafka namespaces belong to the host
-  // application; contexa-cli must not write them. Only contexa.infrastructure
-  // is touched when --distributed is set.
+test('injectYml: distributed sets contexa.infrastructure.mode and never spring.data.redis/kafka', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed' });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    assert.ok(out.includes('infrastructure:'));
-    assert.ok(out.includes('mode: DISTRIBUTED'));
-    assert.equal(out.includes('${REDIS_HOST'), false, 'spring.data.redis must not be written');
-    assert.equal(out.includes('${KAFKA_BOOTSTRAP_SERVERS'), false, 'spring.kafka must not be written');
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
+    assert.equal(root.spring, undefined, 'spring.* must not be written by CLI');
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: managed block carries only contexa.* top-level keys (no security:, hcad: at top level)', async () => {
-  // Regression guard: previously security.zerotrust.* and hcad.* were written as
-  // separate top-level keys. They are now nested under contexa.* so that the
-  // entire managed block lives in a single namespace.
+test('injectYml: never writes any spring.* key across all provider/infra combinations', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    const blockMatch = out.match(/# --- Contexa AI Security ---[\s\S]*?# --- End Contexa ---/);
-    const block = blockMatch[0];
-    // Inside the managed block, top-level lines (no leading whitespace) must be
-    // markers + contexa: only.
-    const topLevelLines = block.split('\n').filter(l => /^[A-Za-z][\w-]*:\s*$/.test(l));
-    assert.deepEqual(topLevelLines.sort(), ['contexa:'], `unexpected top-level keys: ${topLevelLines}`);
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: never writes any spring.* key (host application owns that namespace)', async () => {
-  // Regression guard: contexa-cli used to inject spring.datasource / spring.jpa /
-  // spring.ai.* and that produced duplicate top-level keys when the user's
-  // application.yml already had a `spring:` block. The managed block must now
-  // be free of any `spring:` line.
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    // Try every llm permutation + both infra modes to be safe.
     for (const infra of ['standalone', 'distributed']) {
       for (const providers of [['ollama'], ['openai'], ['anthropic'], ['ollama', 'openai', 'anthropic']]) {
         await injectYml(ymlPath, { mode: 'shadow', llmProviders: providers, infra });
-        const out = await fs.readFile(ymlPath, 'utf8');
-        const blockMatch = out.match(/# --- Contexa AI Security ---[\s\S]*?# --- End Contexa ---/);
-        assert.ok(blockMatch, 'managed block must exist');
-        const block = blockMatch[0];
-        // No top-level spring: nor any spring.* sub-keys
-        assert.equal(/^spring:\s*$/m.test(block), false, `block contains spring: with infra=${infra} providers=${providers}`);
-        assert.equal(block.includes('spring.datasource'), false);
-        assert.equal(block.includes('spring.jpa'), false);
+        const root = loadYml(ymlPath);
+        assert.equal(root.spring, undefined,
+          `spring.* leaked with infra=${infra} providers=${providers}`);
       }
     }
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: idempotent - second call replaces the managed block, not appends', async () => {
+test('injectYml: idempotent - second call updates only the CLI-managed keys', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
     await injectYml(ymlPath, { mode: 'enforce', llmProviders: ['ollama'] });
-    const out = await fs.readFile(ymlPath, 'utf8');
-    const startCount = (out.match(new RegExp(MARKER_START.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'), 'g')) || []).length;
-    assert.equal(startCount, 1, 'managed block must appear exactly once');
-    assert.match(out, /mode:\s*ENFORCE/);
+    const text = await fs.readFile(ymlPath, 'utf8');
+    const root = yaml.load(text);
+    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1);
+    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
   } finally { await fs.remove(dir); }
 });
 
@@ -136,6 +107,119 @@ test('injectYml: backs up existing file before modifying', async () => {
     await fs.writeFile(ymlPath, 'server:\n  port: 8080\n');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
     assert.ok(await fs.pathExists(ymlPath + '.bak'));
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: merges into existing contexa: block instead of duplicating top-level key', async () => {
+  // Real-world scenario: application.yml already has contexa.infrastructure.mode
+  // and contexa.vectorstore set by the developer. CLI must merge into the same
+  // top-level contexa: tree, not produce a second one (which Spring Boot 3.x
+  // SnakeYAML rejects with DuplicateKeyException).
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await fs.writeFile(ymlPath, [
+      'server:',
+      '  port: 8081',
+      '',
+      'contexa:',
+      '  infrastructure:',
+      '    mode: standalone',
+      '  vectorstore:',
+      '    pgvector:',
+      '      table-name: vector_store',
+      '      dimensions: 1024',
+      '',
+      'spring:',
+      '  datasource:',
+      '    url: jdbc:postgresql://localhost:5432/host_app',
+      '',
+    ].join('\n'));
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const text = await fs.readFile(ymlPath, 'utf8');
+    const root = yaml.load(text); // must not throw
+    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1,
+      'single top-level contexa: required to avoid duplicate-key errors');
+    assert.equal(root.contexa.infrastructure.mode, 'standalone',
+      'user infrastructure.mode must be preserved (CLI does not overwrite without --distributed)');
+    assert.equal(root.contexa.vectorstore.pgvector['table-name'], 'vector_store',
+      'user vectorstore must be preserved');
+    assert.ok(root.contexa.security.zerotrust.mode, 'CLI-managed key must still be added');
+    assert.equal(root.spring.datasource.url, 'jdbc:postgresql://localhost:5432/host_app',
+      'host spring.datasource must be untouched');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: --distributed overrides existing contexa.infrastructure.mode', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await fs.writeFile(ymlPath, 'contexa:\n  infrastructure:\n    mode: standalone\n');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed' });
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: strips a legacy marker block from a previous CLI version', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await fs.writeFile(ymlPath, [
+      'server:',
+      '  port: 8080',
+      '',
+      '# --- Contexa AI Security ---',
+      'contexa:',
+      '  llm:',
+      '    chatModelPriority: ollama',
+      '# --- End Contexa ---',
+      '',
+    ].join('\n'));
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const text = await fs.readFile(ymlPath, 'utf8');
+    assert.equal(text.includes('# --- Contexa AI Security ---'), false,
+      'legacy marker block must be stripped');
+    const root = yaml.load(text);
+    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1);
+    assert.ok(root.contexa.llm.selection.chat.priority,
+      'CLI must write the new selection-API priority');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: never emits dead key contexa.jpa.hibernate.ddl-auto', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.jpa, undefined,
+      'contexa.jpa is not bound by any @ConfigurationProperties; CLI must not write it');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: emits contexa.hcad.geoip.enabled = true alongside dbPath', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.hcad.geoip.enabled, true,
+      'enabled must be true so the dbPath actually takes effect (default in core is false)');
+    assert.equal(root.contexa.hcad.geoip.dbPath, 'data/GeoLite2-City.mmdb');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: emits contexa.llm.selection.* (new API) instead of deprecated chatModelPriority', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai'] });
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai');
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama,openai');
+    assert.equal(root.contexa.llm.chatModelPriority, undefined,
+      'deprecated key must not be re-introduced');
   } finally { await fs.remove(dir); }
 });
 
