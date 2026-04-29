@@ -78,7 +78,7 @@ Or set `CONTEXA_LANG=ko` (or `LANG=ko_KR.UTF-8`) in your environment.
 Interactive setup. Detects Maven (`pom.xml`) or Gradle (`build.gradle` /
 `build.gradle.kts`), then:
 
-1. Adds `io.contexa:spring-boot-starter-contexa` dependency.
+1. Adds `ai.ctxa:spring-boot-starter-contexa` dependency.
 2. Writes a Contexa-managed block into `application.yml`
    (between `# --- Contexa AI Security ---` and `# --- End Contexa ---`).
    The block contains an isolated `contexa.datasource` (driven by

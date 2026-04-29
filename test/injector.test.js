@@ -185,7 +185,7 @@ test('injectMavenDep: idempotent when artifact already present', async () => {
   try {
     const pomPath = path.join(dir, 'pom.xml');
     await fs.writeFile(pomPath, `<project><dependencies>
-  <dependency><groupId>io.contexa</groupId><artifactId>spring-boot-starter-contexa</artifactId><version>0.1.0</version></dependency>
+  <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId><version>0.1.0</version></dependency>
 </dependencies></project>`);
     const ok = await injectMavenDep(pomPath);
     assert.equal(ok, false);
@@ -227,7 +227,7 @@ test('injectGradleDep: idempotent when artifact already present', async () => {
   try {
     const gPath = path.join(dir, 'build.gradle');
     await fs.writeFile(gPath, `dependencies {
-  implementation 'io.contexa:spring-boot-starter-contexa:0.1.0'
+  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0'
 }`);
     const ok = await injectGradleDep(gPath);
     assert.equal(ok, false);

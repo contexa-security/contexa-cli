@@ -72,7 +72,7 @@ test('detector: Maven detects Spring Security and Contexa starter', async () => 
   <artifactId>x</artifactId>
   <dependencies>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security</artifactId></dependency>
-    <dependency><groupId>io.contexa</groupId><artifactId>spring-boot-starter-contexa</artifactId></dependency>
+    <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId></dependency>
   </dependencies>
 </project>`,
   });
