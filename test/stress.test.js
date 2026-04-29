@@ -597,6 +597,42 @@ test('H5: CONTEXA_REDISSON_VERSION env var overrides redisson version (Maven)', 
   }
 });
 
+test('K1: detector recognizes @EnableAISecurity in src/main/java', async () => {
+  const dir = await makeProject({
+    'build.gradle': `dependencies {\n  implementation 'org.springframework.boot:spring-boot-starter'\n}\n`,
+    'src/main/java/com/example/App.java':
+      `package com.example;\nimport io.contexa.contexacore.annotation.EnableAISecurity;\n` +
+      `import org.springframework.boot.autoconfigure.SpringBootApplication;\n` +
+      `@EnableAISecurity\n@SpringBootApplication\npublic class App {}\n`,
+  });
+  try {
+    const detect = await detectSpringProject(dir);
+    assert.equal(detect.hasEnableAiSecurity, true);
+  } finally { await fs.remove(dir); }
+});
+
+test('K2: detector reports hasEnableAiSecurity=false when no Java sources', async () => {
+  const dir = await makeProject({
+    'build.gradle': `dependencies {\n  implementation 'org.springframework.boot:spring-boot-starter'\n}\n`,
+  });
+  try {
+    const detect = await detectSpringProject(dir);
+    assert.equal(detect.hasEnableAiSecurity, false);
+  } finally { await fs.remove(dir); }
+});
+
+test('K3: detector reports hasEnableAiSecurity=false when annotation is absent', async () => {
+  const dir = await makeProject({
+    'build.gradle': `dependencies {\n  implementation 'org.springframework.boot:spring-boot-starter'\n}\n`,
+    'src/main/java/com/example/App.java':
+      `package com.example;\n@org.springframework.boot.autoconfigure.SpringBootApplication\npublic class App {}\n`,
+  });
+  try {
+    const detect = await detectSpringProject(dir);
+    assert.equal(detect.hasEnableAiSecurity, false);
+  } finally { await fs.remove(dir); }
+});
+
 test('H6: CONTEXA_REDISSON_VERSION env var overrides redisson version (Gradle)', async () => {
   const dir = await makeProject({
     'build.gradle': `dependencies {\n  implementation 'org.springframework.boot:spring-boot-starter'\n}\n`,

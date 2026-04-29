@@ -32,7 +32,9 @@
   "license": "Apache-2.0",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test",
+    "test": "node --test test/*.test.js",
+    "test:e2e": "node test/examples-matrix.cjs",
+    "test:bootrun": "node test/examples-bootrun.cjs",
     "bundle": "esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs",
     "build": "npm run bundle && node --experimental-sea-config sea-config.json"
   },

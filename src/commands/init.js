@@ -8,6 +8,7 @@ const { execSync } = require('child_process');
 const { Option } = require('commander');
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
+        injectAiStarterDeps,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { t } = require('../core/i18n');
@@ -31,7 +32,37 @@ module.exports = function (program) {
     // files but does not run "docker compose up -d".
     .option('--distributed', 'Install distributed infrastructure (Postgres + Ollama + Redis + Kafka) for PoC/enterprise demo')
     .option('--no-docker', 'With --distributed: generate compose/initdb files but do not start containers')
+    .option('--simulate', 'Install isolated simulation stack (ctxa-sim-* containers on +20000 ports) so you can practice the manual install flow without colliding with production. Implies --distributed.')
     .action(async (opts) => {
+      // --simulate isolates this run from any other contexa stack on the same
+      // host: separate compose project name, separate container names, and
+      // separate ports. Implemented as preset env vars consumed by both the
+      // generated docker-compose.yml and the runtime contexa.* / spring.*
+      // env-fallback placeholders the CLI writes into application.yml.
+      if (opts.simulate) {
+        opts.distributed = true;
+        const setIfAbsent = (k, v) => { if (!process.env[k]) process.env[k] = v; };
+        setIfAbsent('CONTEXA_PROJECT',          'ctxa-sim');
+        setIfAbsent('CONTEXA_POSTGRES_PORT',    '25432');
+        setIfAbsent('CONTEXA_OLLAMA_PORT',      '31434');
+        setIfAbsent('CONTEXA_REDIS_PORT',       '26379');
+        setIfAbsent('CONTEXA_ZOOKEEPER_PORT',   '22181');
+        setIfAbsent('CONTEXA_KAFKA_PORT',       '29092');
+        setIfAbsent('CONTEXA_DB_NAME',          'contexa_sim');
+        setIfAbsent('CONTEXA_DB_USERNAME',      'contexa_sim');
+        setIfAbsent('CONTEXA_DB_PASSWORD',      'contexa_sim_pw');
+        setIfAbsent('CONTEXA_DB_URL',           `jdbc:postgresql://localhost:${process.env.CONTEXA_POSTGRES_PORT}/${process.env.CONTEXA_DB_NAME}`);
+        setIfAbsent('OLLAMA_BASE_URL',          `http://127.0.0.1:${process.env.CONTEXA_OLLAMA_PORT}`);
+        setIfAbsent('REDIS_HOST',               'localhost');
+        setIfAbsent('REDIS_PORT',               process.env.CONTEXA_REDIS_PORT);
+        setIfAbsent('KAFKA_BOOTSTRAP_SERVERS',  `localhost:${process.env.CONTEXA_KAFKA_PORT}`);
+        console.log(chalk.cyan('\n  Simulation mode: isolated stack "ctxa-sim"'));
+        console.log(chalk.gray(`    Postgres : 127.0.0.1:${process.env.CONTEXA_POSTGRES_PORT}  (production stays on 5432)`));
+        console.log(chalk.gray(`    Ollama   : 127.0.0.1:${process.env.CONTEXA_OLLAMA_PORT}  (production stays on 11434)`));
+        console.log(chalk.gray(`    Redis    : 127.0.0.1:${process.env.CONTEXA_REDIS_PORT}`));
+        console.log(chalk.gray(`    Kafka    : 127.0.0.1:${process.env.CONTEXA_KAFKA_PORT}`));
+        console.log(chalk.gray('    Reset anytime: docker compose -p ctxa-sim down -v && docker compose -p ctxa-sim up -d'));
+      }
       if (opts.distributed) {
         console.log(chalk.yellow('\n  ! ' + t('init.distributed.warning')));
         console.log(chalk.gray('    ' + t('init.distributed.note') + '\n'));
@@ -185,6 +216,22 @@ module.exports = function (program) {
           ? await injectMavenDep(buildPath)
           : await injectGradleDep(buildPath);
         ok ? s2.succeed(t('step.depAdded')) : s2.info(t('step.depAlreadyPresent'));
+
+        // Spring AI provider starters are ONLY required when the application
+        // declares @EnableAISecurity. Adding them blindly to a user app that
+        // depends on spring-boot-starter-contexa without that annotation can
+        // trigger PgVector / ChatModel bean instantiation errors. Detector
+        // scans src/main/java for the annotation to decide.
+        if (project.hasEnableAiSecurity && answers.llmProviders && answers.llmProviders.length > 0) {
+          const s2a = ora('Adding Spring AI provider starter dependencies').start();
+          const added = await injectAiStarterDeps(buildPath, answers.llmProviders);
+          added ? s2a.succeed('Spring AI starters added: ' + answers.llmProviders.join(', '))
+                : s2a.info('Spring AI starters already present');
+        } else if (!project.hasEnableAiSecurity) {
+          console.log(chalk.gray('  i Spring AI provider starters skipped (no @EnableAISecurity in src/main/java).'));
+          console.log(chalk.gray('    They will be auto-added the next time you run "contexa init"'));
+          console.log(chalk.gray('    after declaring @EnableAISecurity on a @SpringBootApplication class.'));
+        }
 
         if (answers.infra === 'distributed') {
           const s2b = ora(t('step.addingDistributedDeps')).start();

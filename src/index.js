@@ -35,6 +35,7 @@ require('./commands/init')(program);
 require('./commands/mode')(program);
 require('./commands/status')(program);
 require('./commands/scan')(program);
+require('./commands/simulate')(program);
 
 program.parse(process.argv);
 

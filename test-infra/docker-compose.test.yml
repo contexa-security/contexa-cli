@@ -19,6 +19,7 @@ services:
       - "127.0.0.1:15432:5432"
     volumes:
       - ctxa-test-pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U contexa_test -d contexa_test"]
       interval: 5s

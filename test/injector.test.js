@@ -367,8 +367,22 @@ test('generateDockerCompose: binds ports to 127.0.0.1 by default', async () => {
   try {
     await generateDockerCompose(dir, { infra: 'standalone' });
     const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:5432:5432'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:11434:11434'));
+    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_POSTGRES_PORT:-5432}:5432'));
+    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_OLLAMA_PORT:-11434}:11434'));
+  } finally { await fs.remove(dir); }
+});
+
+test('generateDockerCompose: container names and project name use CONTEXA_PROJECT prefix', async () => {
+  const dir = await tempDir();
+  try {
+    await generateDockerCompose(dir, { infra: 'distributed' });
+    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
+    assert.ok(yml.includes('name: ${CONTEXA_PROJECT:-contexa}'));
+    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-postgres'));
+    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-ollama'));
+    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-redis'));
+    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-zookeeper'));
+    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-kafka'));
   } finally { await fs.remove(dir); }
 });
 
@@ -388,9 +402,9 @@ test('generateDockerCompose: distributed mode adds redis/zookeeper/kafka with lo
   try {
     await generateDockerCompose(dir, { infra: 'distributed' });
     const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:6379:6379'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:2181:2181'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:9092:9092'));
+    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_REDIS_PORT:-6379}:6379'));
+    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_ZOOKEEPER_PORT:-2181}:2181'));
+    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_KAFKA_PORT:-9092}:9092'));
   } finally { await fs.remove(dir); }
 });
 

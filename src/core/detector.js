@@ -18,6 +18,14 @@ async function detectSpringProject(dir = process.cwd()) {
     appPropertiesPath: null,
     hasDocker: false,
     gradleRootDir: null,
+    // True iff a Java source file in src/main/java references @EnableAISecurity
+    // (or its FQN). Only when this is true should the CLI add the Spring AI
+    // ChatModel starter and the pgvector vector store - the contexa platform
+    // creates those beans only when the annotation is present, and adding the
+    // dependencies preemptively causes PgVector bean instantiation errors in
+    // applications that only depend on spring-boot-starter-contexa without
+    // declaring the annotation.
+    hasEnableAiSecurity: false,
   };
 
   // Maven detection
@@ -121,6 +129,15 @@ async function detectSpringProject(dir = process.cwd()) {
   if (await fs.pathExists(ymlPath)) result.appYmlPath = ymlPath;
   if (await fs.pathExists(propsPath)) result.appPropertiesPath = propsPath;
 
+  // Detect @EnableAISecurity in src/main/java to decide whether vector/
+  // ai-starter dependencies are required. Recursive shallow scan capped at
+  // ~200 files to keep init fast on big repos.
+  const javaRoot = path.join(dir, 'src/main/java');
+  if (await fs.pathExists(javaRoot)) {
+    result.hasEnableAiSecurity = await scanForAnnotation(javaRoot,
+      /@EnableAISecurity\b|io\.contexa\.[\w.]*EnableAISecurity\b/);
+  }
+
   // Docker detection
   try {
     const { execSync } = require('child_process');
@@ -138,6 +155,35 @@ async function firstExisting(paths) {
     if (await fs.pathExists(p)) return p;
   }
   return null;
+}
+
+// Walk src/main/java looking for the first Java file matching `regex`.
+// Capped at MAX_FILES so init stays snappy on big monorepos. Returns true on
+// the first match, false if no match within the cap.
+async function scanForAnnotation(rootDir, regex) {
+  const MAX_FILES = 250;
+  const queue = [rootDir];
+  let scanned = 0;
+  while (queue.length > 0 && scanned < MAX_FILES) {
+    const cur = queue.shift();
+    let entries;
+    try { entries = await fs.readdir(cur, { withFileTypes: true }); }
+    catch { continue; }
+    for (const e of entries) {
+      const full = path.join(cur, e.name);
+      if (e.isDirectory()) {
+        queue.push(full);
+      } else if (e.isFile() && e.name.endsWith('.java')) {
+        scanned++;
+        try {
+          const text = await fs.readFile(full, 'utf8');
+          if (regex.test(text)) return true;
+        } catch {}
+        if (scanned >= MAX_FILES) break;
+      }
+    }
+  }
+  return false;
 }
 
 module.exports = { detectSpringProject };
