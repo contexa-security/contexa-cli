@@ -30,6 +30,7 @@ const MODULE_PORTS = {
   'contexa-example-identity-ott': 8086,
   'contexa-example-identity-rest': 8085,
   'contexa-example-legacy-system': 9090,
+  'contexa-example-legacy-dependency-only': 8888,
   'contexa-example-protectable': 8082,
   'contexa-example-quickstart': 8081,
   'contexa-example-shadow-enforce': 8084,
