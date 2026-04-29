@@ -4,13 +4,33 @@ const chalk = require('chalk');
 const ora   = require('ora');
 const inquirer = require('inquirer');
 const path  = require('path');
+const os    = require('os');
+const fs    = require('fs-extra');
 const { execSync } = require('child_process');
 const { Option } = require('commander');
+
+// Normalize a user-entered path so that:
+//   1) "~" or "~/..." is expanded to the OS home directory (shells do this
+//      for command-line args, but inquirer prompt input does not).
+//   2) Relative paths resolve against `baseDir` (typically opts.dir, the
+//      customer's project root). path.resolve() alone resolves against
+//      process.cwd(), which is wrong when the user passed --dir <other>.
+function normalizePath(input, baseDir) {
+  if (!input) return null;
+  let p = String(input).trim();
+  if (!p) return null;
+  if (p === '~') p = os.homedir();
+  else if (p.startsWith('~/') || p.startsWith('~\\')) {
+    p = path.join(os.homedir(), p.slice(2));
+  }
+  return path.isAbsolute(p) ? path.resolve(p) : path.resolve(baseDir, p);
+}
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
-        injectAiStarterDeps,
+        injectStandalone,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
+const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
 const { t } = require('../core/i18n');
 
 module.exports = function (program) {
@@ -33,6 +53,16 @@ module.exports = function (program) {
     .option('--distributed', 'Install distributed infrastructure (Postgres + Ollama + Redis + Kafka) for PoC/enterprise demo')
     .option('--no-docker', 'With --distributed: generate compose/initdb files but do not start containers')
     .option('--simulate', 'Install isolated simulation stack (ctxa-sim-* containers on +20000 ports) so you can practice the manual install flow without colliding with production. Implies --distributed.')
+    // The two integration modes. By default the prompt asks the user; these
+    // flags exist for prompt-bypass automation.
+    .option('--merge', 'Merge mode: write contexa.* into the customer build/yml (default)')
+    .option('--standalone', 'Standalone mode: place contexa-only build/yml under a separate directory; never touch customer originals')
+    .option('--standalone-dir <path>', 'Standalone mode output directory (default: <projectDir>/contexa)')
+    // Infrastructure files (docker-compose.yml + initdb/) are ALWAYS written
+    // outside the customer project directory. Default: contexa-owned home
+    // (Linux/macOS: $XDG_CONFIG_HOME/contexa/<projectName> or $HOME/.contexa/<name>;
+    // Windows: %LOCALAPPDATA%\Contexa\<projectName>). Override with --infra-dir.
+    .option('--infra-dir <path>', 'Override the contexa-owned directory used for docker-compose.yml + initdb/')
     .action(async (opts) => {
       // --simulate isolates this run from any other contexa stack on the same
       // host: separate compose project name, separate container names, and
@@ -118,10 +148,24 @@ module.exports = function (program) {
       }
 
       // 2. Prompts
-      // Infrastructure is opt-in. Without --distributed the CLI never touches
-      // compose/initdb/containers. The interactive prompt still offers a
-      // distributed install for users who want one but did not pass the flag.
+      //
+      // Decision policy: the user is NOT expected to know any flag names. Every
+      // non-trivial decision is asked by inquirer when running `contexa init`
+      // without flags. Flags only exist as prompt-bypass for advanced users /
+      // CI automation:
+      //   --merge / --standalone        bypass the integration-mode prompt
+      //   --standalone-dir <path>       bypass the standalone-folder prompt
+      //   --infra-dir <path>            bypass the infra-folder prompt
+      //   --distributed                 explicit "install distributed infra" intent
+      //   --simulate                    explicit "isolated simulation" intent
+      //   --no-docker                   explicit "do not start containers" intent
+      //   --yes                         CI automation: skip every prompt
+      const explicitIntegrationMode = opts.standalone ? 'standalone'
+        : opts.merge ? 'merge'
+        : null;
+
       const defaults = {
+        integrationMode: explicitIntegrationMode || 'merge',
         securityMode: 'full', mode: 'shadow', llmProviders: ['ollama'],
         infra: opts.distributed ? 'distributed' : 'skip',
         injectDep: true,
@@ -129,6 +173,29 @@ module.exports = function (program) {
       };
 
       const answers = opts.yes ? defaults : await inquirer.prompt([
+        {
+          type: 'list', name: 'integrationMode',
+          message: t('prompt.integrationMode'),
+          // Merge is the default because most projects want a one-line install
+          // and treat the contexa.* keys as part of their config. Standalone
+          // is for projects that must keep the customer files byte-identical
+          // (e.g. heavily reviewed monorepos, vendored builds).
+          default: 'merge',
+          choices: [
+            { name: t('prompt.integrationMode.merge'),      value: 'merge' },
+            { name: t('prompt.integrationMode.standalone'), value: 'standalone' },
+          ],
+          when: () => explicitIntegrationMode === null,
+        },
+        {
+          type: 'input', name: 'standaloneDir',
+          message: t('prompt.standaloneDir'),
+          default: path.join(opts.dir, 'contexa'),
+          when: a => {
+            const mode = explicitIntegrationMode || a.integrationMode;
+            return mode === 'standalone' && !opts.standaloneDir;
+          },
+        },
         {
           type: 'list', name: 'securityMode',
           message: t('prompt.securityMode'),
@@ -159,89 +226,169 @@ module.exports = function (program) {
           // Distributed is the only auto-provisioning option (Postgres + Ollama +
           // Redis + Zookeeper + Kafka). Customers running their own stack should
           // accept the default.
-          default: 'skip',
+          default: opts.distributed ? 'distributed' : 'skip',
           choices: [
             { name: t('prompt.infra.skip'),       value: 'skip' },
             { name: t('prompt.infra.distributed') || 'Yes - install distributed (Postgres + Ollama + Redis + Kafka)', value: 'distributed' },
           ],
+          when: () => !opts.distributed,
+        },
+        {
+          type: 'input', name: 'infraDir',
+          message: t('prompt.infraDir'),
+          default: () => resolveInfraDir(resolveProjectName(), {}),
+          when: a => {
+            const infra = opts.distributed ? 'distributed' : a.infra;
+            return infra !== 'skip' && !opts.infraDir;
+          },
         },
         {
           type: 'confirm', name: 'startDocker',
           message: t('prompt.startDocker'),
           default: true,
-          when: a => a.infra !== 'skip' && project.hasDocker,
+          when: a => {
+            const infra = opts.distributed ? 'distributed' : a.infra;
+            return infra !== 'skip' && project.hasDocker && opts.docker !== false;
+          },
         },
       ]);
 
+      // Resolve final integration mode: explicit flag > prompt answer > default.
+      answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
       // Always inject dependency. --distributed remains authoritative even when
       // the interactive prompt suggested otherwise.
       answers.injectDep = true;
       if (opts.distributed) answers.infra = 'distributed';
       if (opts.docker === false) answers.startDocker = false;
+      // Resolve standalone dir: explicit flag > prompt answer > default.
+      // Inputs are normalized so "~" expands and relative paths resolve
+      // against opts.dir (the customer project root), not process.cwd().
+      const standaloneDir = answers.integrationMode === 'standalone'
+        ? (normalizePath(opts.standaloneDir, opts.dir)
+            || normalizePath(answers.standaloneDir, opts.dir)
+            || path.resolve(opts.dir, 'contexa'))
+        : null;
+      // Resolve infra dir: explicit flag > prompt answer > OS default.
+      // Same normalization rule. The OS-default fallback is applied later
+      // by resolveInfraDir() when this override is null.
+      const infraDirOverride = normalizePath(opts.infraDir, opts.dir)
+        || normalizePath(answers.infraDir, opts.dir)
+        || null;
 
       console.log('');
 
-      // 3. Inject application.yml
-      const s1 = ora(t('step.updatingYml')).start();
-      const ymlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
-      try {
-        await injectYml(ymlPath, answers);
-        s1.succeed(t('step.ymlUpdated'));
-      } catch (err) {
-        s1.fail(t('step.ymlUpdated'));
-        console.log('');
-        console.log(chalk.red('  x application.yml could not be updated.'));
-        console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
-        console.log('');
-        process.exit(1);
-      }
-
-      // application.properties + application.yml coexistence is a load-order
-      // hazard in Spring Boot. Surface a single-line resolution hint here so
-      // the user does not have to dig through docs.
-      if (project.appPropertiesPath && project.appYmlPath) {
-        console.log(chalk.yellow('  ! Both application.properties and application.yml exist.'));
-        console.log(chalk.gray('    Spring Boot will load one and silently shadow the other.'));
-        console.log(chalk.gray('    Recommended: keep one source of truth (yml). Move properties content into yml.'));
-      }
-
-      // 4. Inject dependency
-      if (answers.injectDep) {
-        const s2 = ora(t('step.addingDep')).start();
+      // 3 + 4. Apply contexa configuration to the customer project.
+      //
+      // Two integration modes:
+      //   merge      - mutate the customer's application.yml and build file
+      //                in-place (single transaction with .bak rollback).
+      //   standalone - write contexa-only artifacts to a separate folder; the
+      //                customer's project files are NEVER touched.
+      let standaloneResult = null;
+      if (answers.integrationMode === 'standalone') {
+        console.log(chalk.cyan('\n  ' + t('standalone.intro')));
+        console.log(chalk.gray(`  ${t('standalone.location')} ${standaloneDir}`));
+        const sStandalone = ora(t('step.writingStandalone')).start();
+        try {
+          // Pass --force so injectStandalone will overwrite an existing
+          // non-empty folder. Without --force, a non-empty folder that does
+          // not look like a previous contexa-cli output is rejected up-front.
+          standaloneResult = await injectStandalone(standaloneDir, project, {
+            ...answers, force: !!opts.force,
+          });
+          sStandalone.succeed(t('step.standaloneWritten'));
+        } catch (err) {
+          sStandalone.fail(t('step.standaloneWritten'));
+          console.log('');
+          console.log(chalk.red('  x Standalone artifacts could not be written.'));
+          console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
+          console.log('');
+          process.exit(1);
+        }
+      } else {
+        // Merge mode: yml + build mutation as a SINGLE transaction. If any step
+        // inside fails, every change in this block is rolled back from its .bak
+        // so the customer never ends up with a half-applied install (e.g. yml
+        // mutated but build dep missing).
+        const ymlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
         const buildPath = project.buildFilePath
           || (project.buildTool === 'maven'
             ? path.join(opts.dir, 'pom.xml')
             : path.join(opts.dir, 'build.gradle'));
-        const ok = project.buildTool === 'maven'
-          ? await injectMavenDep(buildPath)
-          : await injectGradleDep(buildPath);
-        ok ? s2.succeed(t('step.depAdded')) : s2.info(t('step.depAlreadyPresent'));
+        let ymlChanged = false;
+        let buildChanged = false;
 
-        // Spring AI provider starters are ONLY required when the application
-        // declares @EnableAISecurity. Adding them blindly to a user app that
-        // depends on spring-boot-starter-contexa without that annotation can
-        // trigger PgVector / ChatModel bean instantiation errors. Detector
-        // scans src/main/java for the annotation to decide.
-        if (project.hasEnableAiSecurity && answers.llmProviders && answers.llmProviders.length > 0) {
-          const s2a = ora('Adding Spring AI provider starter dependencies').start();
-          const added = await injectAiStarterDeps(buildPath, answers.llmProviders);
-          added ? s2a.succeed('Spring AI starters added: ' + answers.llmProviders.join(', '))
-                : s2a.info('Spring AI starters already present');
-        } else if (!project.hasEnableAiSecurity) {
-          console.log(chalk.gray('  i Spring AI provider starters skipped (no @EnableAISecurity in src/main/java).'));
-          console.log(chalk.gray('    They will be auto-added the next time you run "contexa init"'));
-          console.log(chalk.gray('    after declaring @EnableAISecurity on a @SpringBootApplication class.'));
+        // 3. Inject application.yml
+        const s1 = ora(t('step.updatingYml')).start();
+        try {
+          await injectYml(ymlPath, answers);
+          ymlChanged = true;
+          s1.succeed(t('step.ymlUpdated'));
+        } catch (err) {
+          s1.fail(t('step.ymlUpdated'));
+          console.log('');
+          console.log(chalk.red('  x application.yml could not be updated.'));
+          console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
+          console.log('');
+          process.exit(1);
         }
 
-        if (answers.infra === 'distributed') {
-          const s2b = ora(t('step.addingDistributedDeps')).start();
-          const added = await injectDistributedDeps(buildPath);
-          added ? s2b.succeed(t('step.distributedDepsAdded')) : s2b.info(t('step.distributedDepsPresent'));
+        // application.properties + application.yml coexistence is a load-order
+        // hazard in Spring Boot. Surface a single-line resolution hint here so
+        // the user does not have to dig through docs.
+        if (project.appPropertiesPath && project.appYmlPath) {
+          console.log(chalk.yellow('  ! Both application.properties and application.yml exist.'));
+          console.log(chalk.gray('    Spring Boot will load one and silently shadow the other.'));
+          console.log(chalk.gray('    Recommended: keep one source of truth (yml). Move properties content into yml.'));
+        }
+
+        // 4. Inject dependency (rolls back yml on failure)
+        if (answers.injectDep) {
+          try {
+            const s2 = ora(t('step.addingDep')).start();
+            const ok = project.buildTool === 'maven'
+              ? await injectMavenDep(buildPath)
+              : await injectGradleDep(buildPath);
+            if (ok) buildChanged = true;
+            ok ? s2.succeed(t('step.depAdded')) : s2.info(t('step.depAlreadyPresent'));
+
+            // Spring AI provider starters and the pgvector vector-store starter
+            // are intentionally NOT added by contexa-cli. They are only needed
+            // when the application declares @EnableAISecurity, and even then
+            // they belong to the customer's dependency surface - automatically
+            // adding them blindly to a customer app without @EnableAISecurity
+            // triggers PgVector / ChatModel bean instantiation errors at start.
+            // contexa-cli's contract: "we add ONE dependency line and merge
+            // contexa.* into your yml. Nothing else." The next.steps section
+            // tells the operator which extra deps to add by hand if they
+            // declare @EnableAISecurity.
+
+            if (answers.infra === 'distributed') {
+              const s2b = ora(t('step.addingDistributedDeps')).start();
+              const added = await injectDistributedDeps(buildPath);
+              if (added) buildChanged = true;
+              added ? s2b.succeed(t('step.distributedDepsAdded')) : s2b.info(t('step.distributedDepsPresent'));
+            }
+          } catch (err) {
+            console.log('');
+            console.log(chalk.red('  x Build dependency injection failed.'));
+            console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
+            console.log('');
+            await rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged);
+            process.exit(1);
+          }
         }
       }
 
       // 5. Generate database init scripts + docker-compose.yml
+      //
+      // Infrastructure files (docker-compose.yml + initdb/) are written to a
+      // contexa-owned directory, NEVER the customer project directory. The
+      // customer project's existing docker-compose.yml (if any) is therefore
+      // never touched. Default location is OS-specific contexa home; users
+      // can override via --infra-dir.
       let seedPassword = null;
+      let infraDir = null;
       if (answers.infra !== 'skip') {
         if (answers.infra === 'distributed') {
           console.log(chalk.cyan('\n  Distributed infrastructure: PostgreSQL + Ollama + Redis + Zookeeper + Kafka'));
@@ -249,13 +396,16 @@ module.exports = function (program) {
           console.log(chalk.cyan('\n  Standalone infrastructure: PostgreSQL + Ollama'));
         }
 
+        infraDir = resolveInfraDir(resolveProjectName(), { infraDir: infraDirOverride });
+        console.log(chalk.gray(`  Infrastructure files location: ${infraDir}`));
+
         const s3a = ora(t('step.generatingDb')).start();
-        const dbResult = await generateInitDbScripts(opts.dir);
+        const dbResult = await generateInitDbScripts(infraDir);
         seedPassword = dbResult.seedPassword;
         s3a.succeed(t('step.dbGenerated'));
 
         const s3 = ora(t('step.generatingCompose')).start();
-        await generateDockerCompose(opts.dir, answers);
+        await generateDockerCompose(infraDir, answers);
         s3.succeed(answers.infra === 'distributed'
           ? t('step.composeGenerated.distributed')
           : t('step.composeGenerated'));
@@ -291,40 +441,58 @@ module.exports = function (program) {
         }
 
         // 6. Start Docker
+        // cwd is the contexa-owned infraDir so the docker-compose.yml that we
+        // just generated is the one compose picks up - never the customer's.
         if (answers.startDocker && project.hasDocker) {
           const s4 = ora(t('step.startingDocker')).start();
           try {
-            execSync('docker compose up -d', { cwd: opts.dir, stdio: 'inherit' });
+            execSync('docker compose up -d', { cwd: infraDir, stdio: 'inherit' });
             s4.succeed(t('step.dockerStarted'));
 
             // 7. Pull Ollama models
+            // Container name is project-aware (production: contexa-ollama,
+            // simulate: ctxa-sim-ollama, custom CONTEXA_PROJECT: <name>-ollama).
+            // Hard-coding "contexa-ollama" would silently target a production
+            // container if the user is running --simulate alongside an existing
+            // production stack on the same host.
             if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
+              const ollamaContainer = containerName('ollama');
               const chatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
               const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
               const s5 = ora(t('step.pullingChat', chatModel)).start();
               try {
-                // Wait for Ollama to be ready
+                // Wait for Ollama to be ready - bounded by both per-call timeout
+                // and absolute wall-clock deadline so a wedged docker daemon
+                // can never hang the CLI indefinitely.
                 let ready = false;
-                for (let i = 0; i < 30; i++) {
+                const deadlineMs = Date.now() + 90000; // 90s absolute cap
+                while (!ready && Date.now() < deadlineMs) {
                   try {
-                    execSync('docker exec contexa-ollama curl -sf http://localhost:11434/api/tags', { stdio: 'ignore' });
+                    execSync(
+                      `docker exec ${ollamaContainer} curl -sf http://localhost:11434/api/tags`,
+                      { stdio: 'ignore', timeout: 3000 }
+                    );
                     ready = true;
                     break;
                   } catch { await sleep(2000); }
                 }
 
                 if (ready) {
-                  execSync(`docker exec contexa-ollama ollama pull ${chatModel}`, { stdio: 'inherit' });
+                  execSync(`docker exec ${ollamaContainer} ollama pull ${chatModel}`,
+                    { stdio: 'inherit', timeout: 600000 });
                   s5.succeed(t('step.chatPulled', chatModel));
 
                   const s6 = ora(t('step.pullingEmbedding', embedModel)).start();
-                  execSync(`docker exec contexa-ollama ollama pull ${embedModel}`, { stdio: 'inherit' });
+                  execSync(`docker exec ${ollamaContainer} ollama pull ${embedModel}`,
+                    { stdio: 'inherit', timeout: 600000 });
                   s6.succeed(t('step.embeddingPulled'));
                 } else {
                   s5.warn(t('step.ollamaNotReady', chatModel));
+                  console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
                 }
               } catch (e) {
                 s5.warn(t('step.modelPullFailed', chatModel));
+                console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
               }
             }
           } catch (e) {
@@ -336,6 +504,31 @@ module.exports = function (program) {
       // 8. Done - show next steps
       console.log(chalk.green('\n  ' + t('init.done') + '\n'));
 
+      // Standalone mode: surface the one-line wiring the user must add to
+      // their own files. Shown right after init.done so operators do not miss
+      // it. Skipped in merge mode because there's nothing for the user to
+      // wire up.
+      if (standaloneResult) {
+        console.log(chalk.yellow('  ' + t('standalone.imports.title') + '\n'));
+        console.log(chalk.gray('  ' + t('standalone.imports.yml')));
+        console.log(chalk.cyan('     spring:'));
+        console.log(chalk.cyan('       config:'));
+        console.log(chalk.cyan('         import: "optional:file:./contexa/application.yml"'));
+        console.log('');
+        if (standaloneResult.importHints.isMaven) {
+          console.log(chalk.gray('  ' + t('standalone.imports.maven')));
+          console.log(chalk.cyan(`     ${standaloneResult.buildFragmentPath}`));
+          console.log(chalk.gray('  ' + t('standalone.imports.mavenNote')));
+        } else {
+          console.log(chalk.gray('  ' + t('standalone.imports.gradleGroovy')));
+          console.log(chalk.cyan("     apply from: 'contexa/contexa.gradle'"));
+          console.log('');
+          console.log(chalk.gray('  ' + t('standalone.imports.gradleKotlin')));
+          console.log(chalk.cyan('     apply(from = "contexa/contexa.gradle")'));
+        }
+        console.log('');
+      }
+
       // Surface the randomly generated seed password ONCE so the operator
       // can record it. After this run, contexa-cli has no record of it.
       if (seedPassword) {
@@ -343,6 +536,14 @@ module.exports = function (program) {
         console.log(chalk.cyan(`    ${seedPassword}`));
         console.log(chalk.gray('    ' + t('init.seedPassword.note1')));
         console.log(chalk.gray('    ' + t('init.seedPassword.note2') + '\n'));
+
+        // initdb/02-dml.sql contains the BCrypt hash of the password printed
+        // above. Committing that file would leak the hash to the repository
+        // history. Surface a one-line .gitignore hint right next to the
+        // password so the operator does not miss it.
+        console.log(chalk.yellow('  ' + t('init.initdb.gitignore.title')));
+        console.log(chalk.gray('    ' + t('init.initdb.gitignore.note1')));
+        console.log(chalk.gray('    ' + t('init.initdb.gitignore.note2') + '\n'));
       }
 
       console.log(chalk.white('  ' + t('next.steps') + '\n'));
@@ -362,6 +563,28 @@ module.exports = function (program) {
         console.log(chalk.cyan('     @SpringBootApplication'));
         console.log(chalk.cyan('     public class YourApplication { }'));
       }
+
+      // @EnableAISecurity unlocks the rag-vector + chat-model code paths in
+      // contexa-core. Those paths need Spring AI starters that contexa-cli
+      // INTENTIONALLY does not auto-add (auto-adding them on every customer
+      // breaks the customers who don't declare the annotation). Print the
+      // exact lines the operator must add by hand if they declare it.
+      console.log(chalk.gray('\n  ' + t('next.aiDeps.title') + '\n'));
+      const isMavenForHint = project.buildTool === 'maven';
+      if (isMavenForHint) {
+        console.log(chalk.cyan('     <dependency>'));
+        console.log(chalk.cyan('       <groupId>org.springframework.ai</groupId>'));
+        console.log(chalk.cyan('       <artifactId>spring-ai-starter-model-ollama</artifactId>'));
+        console.log(chalk.cyan('     </dependency>'));
+        console.log(chalk.cyan('     <dependency>'));
+        console.log(chalk.cyan('       <groupId>org.springframework.ai</groupId>'));
+        console.log(chalk.cyan('       <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>'));
+        console.log(chalk.cyan('     </dependency>'));
+      } else {
+        console.log(chalk.cyan("     implementation 'org.springframework.ai:spring-ai-starter-model-ollama'"));
+        console.log(chalk.cyan("     implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'"));
+      }
+      console.log(chalk.gray('  ' + t('next.aiDeps.providerNote')));
 
       console.log(chalk.gray('\n  ' + t('next.step2') + '\n'));
       console.log(chalk.cyan('     @Protectable'));
@@ -390,4 +613,34 @@ module.exports = function (program) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Restore application.yml and the build file from their .bak siblings when a
+// later step in the (yml + build) transaction fails. The .bak files are left
+// in place after restore so the operator can still inspect what we attempted.
+async function rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged) {
+  const restored = [];
+  if (buildChanged) {
+    const bak = buildPath + '.bak';
+    if (await fs.pathExists(bak)) {
+      try { await fs.copy(bak, buildPath, { overwrite: true }); restored.push(path.basename(buildPath)); }
+      catch (e) { console.log(chalk.red(`    Failed to restore ${path.basename(buildPath)}: ${e.message}`)); }
+    }
+  }
+  if (ymlChanged) {
+    const bak = ymlPath + '.bak';
+    if (await fs.pathExists(bak)) {
+      try { await fs.copy(bak, ymlPath, { overwrite: true }); restored.push(path.basename(ymlPath)); }
+      catch (e) { console.log(chalk.red(`    Failed to restore ${path.basename(ymlPath)}: ${e.message}`)); }
+    }
+  }
+  if (restored.length > 0) {
+    console.log(chalk.yellow('  ! Rolled back: ' + restored.join(', ')));
+    console.log(chalk.gray('    Your project files have been restored to their pre-init state.'));
+    console.log(chalk.gray('    The .bak files are kept on disk for reference.'));
+    console.log('');
+  } else {
+    console.log(chalk.yellow('  ! No automatic rollback was performed (no .bak files found or no changes made).'));
+    console.log('');
+  }
 }

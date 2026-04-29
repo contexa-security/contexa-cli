@@ -215,6 +215,63 @@ async function injectMavenDep(pomPath) {
   return true;
 }
 
+// Locate the top-level `dependencies {` block in a Gradle build script.
+//
+// Returns the character index immediately AFTER the opening `{` of the first
+// top-level (brace-depth 0) dependencies block, or -1 if none exists.
+//
+// Why not a plain `gradle.replace(/dependencies\s*\{/, ...)` ?
+//   That regex matches the FIRST occurrence, which in legacy buildscript-based
+//   build.gradle files is the dependencies block INSIDE
+//      buildscript { dependencies { classpath '...' } }
+//   Inserting `implementation '...'` there breaks the build because
+//   `implementation` is not a valid configuration in the buildscript scope.
+//   Same issue for `subprojects { dependencies { } }`,
+//   `allprojects { dependencies { } }`, `pluginManagement { ... }`.
+//
+// Strategy: scan all `dependencies\s*\{` candidates, count braces in the
+// preceding text (after stripping // line comments and /* block comments */),
+// and pick the first match whose depth is exactly 0. Strings are not parsed
+// because Gradle DSL rarely embeds raw `{`/`}` inside string literals; a
+// future refinement can add a real Groovy/Kotlin tokenizer if needed.
+function findTopLevelDependenciesInsertIndex(content) {
+  const re = /dependencies\s*\{/g;
+  let m;
+  while ((m = re.exec(content)) !== null) {
+    const before = content.slice(0, m.index);
+    const cleaned = before
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    let depth = 0;
+    for (let i = 0; i < cleaned.length; i++) {
+      const ch = cleaned.charAt(i);
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+    }
+    if (depth === 0) {
+      // Position right after the matched "dependencies {".
+      return m.index + m[0].length;
+    }
+  }
+  return -1;
+}
+
+// Insert one or more dependency lines at the start of the top-level
+// `dependencies { }` block. If no top-level block exists, append a new
+// block at the end of the file. Caller passes already-formatted line
+// strings (one per element). Idempotent if the caller filters out lines
+// that are already present.
+function insertIntoTopLevelDependencies(content, lines) {
+  const insertPos = findTopLevelDependenciesInsertIndex(content);
+  const block = '\n' + lines.join('\n');
+  if (insertPos === -1) {
+    // No top-level block - append a new one. Trailing newline normalized.
+    const trimmed = content.replace(/\s+$/, '');
+    return `${trimmed}\n\ndependencies {${block}\n}\n`;
+  }
+  return content.slice(0, insertPos) + block + content.slice(insertPos);
+}
+
 async function injectGradleDep(gradlePath) {
   if (!await fs.pathExists(gradlePath)) return false;
   let gradle = await fs.readFile(gradlePath, 'utf8');
@@ -230,18 +287,26 @@ async function injectGradleDep(gradlePath) {
     ? `    implementation("${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}")`
     : `    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`;
 
-  gradle = gradle.replace(
-    /dependencies\s*\{/,
-    `dependencies {\n${depLine}`
-  );
+  gradle = insertIntoTopLevelDependencies(gradle, [depLine]);
   await fs.writeFile(gradlePath, gradle);
   return true;
 }
 
-async function generateDockerCompose(projectDir, opts = {}) {
+// Generate a docker-compose.yml for the contexa-managed infrastructure stack.
+//
+// `infraDir` MUST be a contexa-owned directory (e.g. ~/.contexa/<projectName>),
+// NEVER the customer's project directory. Writing into the customer's project
+// directory would clobber any docker-compose.yml the customer may already have
+// for their own services, which is the #1 sideeffect we must avoid.
+//
+// The caller (init.js) resolves `infraDir` via core/project.js#resolveInfraDir.
+async function generateDockerCompose(infraDir, opts = {}) {
   const { infra = 'standalone' } = opts;
-  const composePath = path.join(projectDir, 'docker-compose.yml');
+  await fs.ensureDir(infraDir);
+  const composePath = path.join(infraDir, 'docker-compose.yml');
 
+  // Inside contexa-owned dir we still keep a .bak as a safety net for the
+  // unlikely case where the user manually edited the previous output.
   if (await fs.pathExists(composePath)) {
     await fs.copy(composePath, composePath + '.bak');
   }
@@ -389,8 +454,14 @@ volumes:
 // Generate database init scripts.
 // When seedPassword is omitted, a fresh random password is generated.
 // Returns { initdbDir, seedPassword } so the caller can show it to the user once.
-async function generateInitDbScripts(projectDir, opts = {}) {
-  const initdbDir = path.join(projectDir, 'initdb');
+// Generate Postgres docker-entrypoint-initdb.d scripts under
+// `<infraDir>/initdb/`. Same isolation rule as generateDockerCompose:
+// `infraDir` MUST be contexa-owned, never the customer's project directory.
+//
+// 02-dml.sql contains a freshly randomized BCrypt seed-password hash and must
+// stay out of git history; a defensive .gitignore is dropped beside it.
+async function generateInitDbScripts(infraDir, opts = {}) {
+  const initdbDir = path.join(infraDir, 'initdb');
   await fs.ensureDir(initdbDir);
 
   const seedPassword = opts.seedPassword || generateRandomPassword();
@@ -401,6 +472,24 @@ async function generateInitDbScripts(projectDir, opts = {}) {
 
   // 02-dml.sql with per-init randomized BCrypt hash for the four seed accounts.
   await fs.writeFile(path.join(initdbDir, '02-dml.sql'), getDmlScript(seedHash));
+
+  // Drop a defensive .gitignore inside initdb/ itself: 02-dml.sql contains a
+  // BCrypt hash of the freshly generated seed password and must never be
+  // committed. The "*" line gitignores everything, "!.gitignore" keeps the
+  // .gitignore file itself tracked so the protection stays intact across
+  // checkouts. Idempotent: do not overwrite a user-customized version.
+  const initdbGitignore = path.join(initdbDir, '.gitignore');
+  if (!await fs.pathExists(initdbGitignore)) {
+    await fs.writeFile(initdbGitignore, [
+      '# Generated by contexa-cli init.',
+      '# initdb/02-dml.sql contains a BCrypt hash of a freshly randomized seed',
+      '# password and must never be committed. Re-running "contexa init" produces',
+      '# a different hash every time.',
+      '*',
+      '!.gitignore',
+      '',
+    ].join('\n'));
+  }
 
   return { initdbDir, seedPassword };
 }
@@ -1703,74 +1792,18 @@ function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// Spring AI provider starters that supply a ChatModel/EmbeddingModel bean.
-// Versions are managed by the Spring AI BOM (api platform "spring-ai-bom" in
-// spring-boot-starter-contexa), so we never pin a version here.
-const AI_STARTER_BY_PROVIDER = {
-  ollama:    { groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-model-ollama' },
-  openai:    { groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-model-openai' },
-  anthropic: { groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-model-anthropic' },
-};
-
-// Vector store starter required by @EnableAISecurity. Without it, the contexa
-// runtime aborts at startup with "rag-vector capability unresolved" because
-// SecurityDecisionPostProcessor depends on UnifiedVectorService which depends
-// on a Spring AI VectorStore bean. Only the pgvector backend is supported by
-// the platform today (contexa-core/.../PgVectorStoreProperties).
-const VECTOR_STORE_STARTER = {
-  groupId: 'org.springframework.ai', artifactId: 'spring-ai-starter-vector-store-pgvector',
-};
-
-// Add Spring AI provider starters matching the chosen LLM providers, plus the
-// pgvector vector-store starter that the contexa runtime requires whenever
-// @EnableAISecurity is present (rag-vector capability). Without these, the
-// starter aborts at startup with either "No Spring AI ChatModel is configured
-// for CONTEXA" or "rag-vector capability unresolved". Idempotent.
-async function injectAiStarterDeps(buildPath, providers) {
-  if (!buildPath || !await fs.pathExists(buildPath)) return false;
-  if (!Array.isArray(providers) || providers.length === 0) return false;
-  const content = await fs.readFile(buildPath, 'utf8');
-  const wanted = [
-    ...providers.map(p => AI_STARTER_BY_PROVIDER[p]).filter(Boolean),
-    VECTOR_STORE_STARTER,
-  ];
-  const missing = wanted.filter(d => !content.includes(d.artifactId));
-  if (missing.length === 0) return false;
-
-  if (buildPath.endsWith('.xml')) {
-    // Locate project-level </dependencies>, skipping <dependencyManagement>.
-    const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
-    const mgmtRanges = [];
-    let m;
-    while ((m = mgmtRegex.exec(content)) !== null) mgmtRanges.push([m.index, m.index + m[0].length]);
-    const isInsideMgmt = (idx) => mgmtRanges.some(([a, b]) => idx >= a && idx < b);
-    let target = -1, cursor = 0;
-    while (true) {
-      const found = content.indexOf('</dependencies>', cursor);
-      if (found === -1) break;
-      if (!isInsideMgmt(found)) { target = found; break; }
-      cursor = found + 1;
-    }
-    if (target === -1) return false;
-    const block = missing.map(d =>
-      `        <dependency>\n` +
-      `            <groupId>${d.groupId}</groupId>\n` +
-      `            <artifactId>${d.artifactId}</artifactId>\n` +
-      `        </dependency>`).join('\n') + '\n    ';
-    const updated = content.slice(0, target) + block + content.slice(target);
-    await fs.writeFile(buildPath, updated);
-    return true;
-  }
-
-  // Gradle (Groovy or Kotlin DSL)
-  const isKts = buildPath.endsWith('.kts');
-  const lines = missing.map(d => isKts
-    ? `    implementation("${d.groupId}:${d.artifactId}")`
-    : `    implementation '${d.groupId}:${d.artifactId}'`);
-  const updated = content.replace(/dependencies\s*\{/, `dependencies {\n${lines.join('\n')}`);
-  await fs.writeFile(buildPath, updated);
-  return true;
-}
+// Spring AI provider starters and the pgvector vector-store starter are NOT
+// injected by contexa-cli on purpose. They are part of the customer's
+// dependency surface, not ours: they are only meaningful when the customer
+// declares @EnableAISecurity, and adding them automatically breaks every
+// other customer (PgVector / ChatModel beans get instantiated against
+// missing infrastructure and the application fails to start).
+//
+// Operators who declare @EnableAISecurity must add the starters themselves.
+// `contexa init`'s next.steps section prints the exact dependency lines to
+// copy. This is the same trade-off Spring Boot itself makes: starters are
+// opt-in, never auto-injected from a tool the operator did not invoke for
+// that purpose.
 
 // Inject Redis/Kafka client dependencies for the distributed PoC profile.
 // Idempotent — silently does nothing if any of the markers already exist.
@@ -1838,9 +1871,191 @@ async function injectDistributedDeps(buildPath) {
       : `    implementation 'org.redisson:redisson:${redissonVersion}'`);
   }
   if (lines.length === 0) return false;
-  const updated = content.replace(/dependencies\s*\{/, `dependencies {\n${lines.join('\n')}`);
+  const updated = insertIntoTopLevelDependencies(content, lines);
   await fs.writeFile(buildPath, updated);
   return true;
 }
 
-module.exports = { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps, injectAiStarterDeps, generateDockerCompose, generateInitDbScripts };
+// Mode 2 - Standalone integration.
+//
+// Writes contexa-only artifacts to a SEPARATE directory (default: <projectDir>/contexa/).
+// The customer's build.gradle / pom.xml / application.yml are NEVER touched - the
+// integration becomes a single-line opt-in for the customer:
+//
+//   Spring Boot config import (in customer's application.yml):
+//       spring:
+//         config:
+//           import: "optional:file:./contexa/application.yml"
+//
+//   Gradle Groovy DSL (in customer's build.gradle):
+//       apply from: 'contexa/contexa.gradle'
+//
+//   Gradle Kotlin DSL (in customer's build.gradle.kts):
+//       apply(from = "contexa/contexa.gradle")
+//
+//   Maven (in customer's pom.xml): copy the <dependency> entries from
+//       contexa/pom-fragment.xml into the project's <dependencies> block.
+//       Maven has no `apply from` equivalent, so this is the one limitation.
+//
+// Returns { ymlPath, buildFragmentPath, importHints }. The caller is responsible
+// for surfacing importHints to the operator. This function never throws on
+// pre-existing files; it overwrites them (the standalone dir is contexa-owned).
+async function injectStandalone(standaloneDir, project, opts = {}) {
+  const { infra = 'standalone', force = false } = opts;
+  const includeDistributed = infra === 'distributed';
+  const isMaven = project.buildTool === 'maven';
+  const isKotlinDsl = !isMaven && project.buildFilePath && project.buildFilePath.endsWith('.kts');
+
+  // contexa-cli writes ONE dependency line: spring-boot-starter-contexa.
+  // Spring AI provider starters (spring-ai-starter-model-*) and the pgvector
+  // vector-store starter are intentionally NOT generated here. They belong to
+  // the customer's dependency surface - they are only needed when the customer
+  // declares @EnableAISecurity, and forcing them on every customer triggers
+  // PgVector / ChatModel bean instantiation errors at startup for customers
+  // who use spring-boot-starter-contexa without that annotation.
+
+  // Collision check: if `standaloneDir` already exists as a FILE (not a
+  // directory), abort with an actionable message instead of letting fs-extra
+  // throw a raw EEXIST. Common case: the customer project has a top-level
+  // executable file named "contexa" - we must not overwrite it.
+  if (await fs.pathExists(standaloneDir)) {
+    const stat = await fs.lstat(standaloneDir);
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `Standalone target "${standaloneDir}" already exists and is not a directory. ` +
+        `Move or remove that file, or pick a different folder via the prompt.`
+      );
+    }
+    // Existing directory: warn the operator if it is non-empty AND looks
+    // like it does NOT belong to a previous contexa-cli run (no marker
+    // files inside). Without --force we fail-fast so we never clobber an
+    // unrelated folder. With --force we proceed and back up overwritten
+    // files individually below.
+    const entries = await fs.readdir(standaloneDir);
+    const ours = entries.includes('application.yml')
+              || entries.includes('contexa.gradle')
+              || entries.includes('pom-fragment.xml');
+    if (entries.length > 0 && !ours && !force) {
+      throw new Error(
+        `Standalone target "${standaloneDir}" already exists, is non-empty, and does ` +
+        `not look like a contexa-cli output folder. Refusing to write here. ` +
+        `Pick an empty folder via the prompt, or pass --force to overwrite.`
+      );
+    }
+  }
+
+  await fs.ensureDir(standaloneDir);
+
+  // 1. Standalone application.yml. Reuses the same contexa.* tree the merge
+  // mode produces, so behavior is identical between Mode 1 and Mode 2 once the
+  // operator wires up the spring.config.import line.
+  const cliTree = buildCliContexaTree(opts);
+  const root = { contexa: {} };
+  applyCliContexaTree(root, cliTree, opts);
+  const ymlPath = path.join(standaloneDir, 'application.yml');
+  const ymlOut = yaml.dump(root, {
+    lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"',
+  });
+  const ymlHeader = [
+    '# Generated by contexa-cli (standalone mode).',
+    '# To activate, add ONE of the following to your customer application:',
+    '#',
+    '# Option A - In your application.yml:',
+    '#   spring:',
+    '#     config:',
+    '#       import: "optional:file:./contexa/application.yml"',
+    '#',
+    '# Option B - On the command line at runtime:',
+    '#   --spring.config.additional-location=./contexa/application.yml',
+    '',
+    '',
+  ].join('\n');
+  // Per-file backup: an existing standalone application.yml is preserved
+  // as application.yml.bak so the operator can recover any local edits
+  // they made between init runs. Same pattern generateDockerCompose uses.
+  if (await fs.pathExists(ymlPath)) {
+    await fs.copy(ymlPath, ymlPath + '.bak');
+  }
+  await fs.writeFile(ymlPath, ymlHeader + ymlOut);
+
+  // 2. Build fragment.
+  let buildFragmentPath;
+  let buildHint;
+  if (isMaven) {
+    buildFragmentPath = path.join(standaloneDir, 'pom-fragment.xml');
+    const lines = [];
+    lines.push('<!--');
+    lines.push('  Generated by contexa-cli (standalone mode).');
+    lines.push('  Maven does not support `apply from` like Gradle, so copy the');
+    lines.push("  <dependency> entries below into your project's pom.xml");
+    lines.push('  <dependencies> block. The <dependencies> wrapper here is only');
+    lines.push('  for visual context - copy the inner <dependency> elements.');
+    lines.push('-->');
+    lines.push('<dependencies>');
+    lines.push('    <dependency>');
+    lines.push(`        <groupId>${CONTEXA_GROUP_ID}</groupId>`);
+    lines.push(`        <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>`);
+    lines.push(`        <version>${CONTEXA_VERSION}</version>`);
+    lines.push('    </dependency>');
+    if (includeDistributed) {
+      const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
+      lines.push('    <dependency>');
+      lines.push('        <groupId>org.springframework.kafka</groupId>');
+      lines.push('        <artifactId>spring-kafka</artifactId>');
+      lines.push('    </dependency>');
+      lines.push('    <dependency>');
+      lines.push('        <groupId>org.redisson</groupId>');
+      lines.push('        <artifactId>redisson</artifactId>');
+      lines.push(`        <version>${redissonVersion}</version>`);
+      lines.push('    </dependency>');
+    }
+    lines.push('</dependencies>');
+    if (await fs.pathExists(buildFragmentPath)) {
+      await fs.copy(buildFragmentPath, buildFragmentPath + '.bak');
+    }
+    await fs.writeFile(buildFragmentPath, lines.join('\n') + '\n');
+    buildHint = `Copy <dependency> entries from ${path.relative(process.cwd(), buildFragmentPath) || buildFragmentPath} into your pom.xml.`;
+  } else {
+    buildFragmentPath = path.join(standaloneDir, 'contexa.gradle');
+    const lines = [];
+    lines.push('// Generated by contexa-cli (standalone mode).');
+    lines.push('// Apply this script from your customer build:');
+    lines.push('//   Groovy DSL (build.gradle):       apply from: \'contexa/contexa.gradle\'');
+    lines.push('//   Kotlin DSL (build.gradle.kts):   apply(from = "contexa/contexa.gradle")');
+    lines.push('');
+    lines.push('dependencies {');
+    lines.push(`    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`);
+    if (includeDistributed) {
+      const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
+      lines.push(`    implementation 'org.springframework.kafka:spring-kafka'`);
+      lines.push(`    implementation 'org.redisson:redisson:${redissonVersion}'`);
+    }
+    lines.push('}');
+    if (await fs.pathExists(buildFragmentPath)) {
+      await fs.copy(buildFragmentPath, buildFragmentPath + '.bak');
+    }
+    await fs.writeFile(buildFragmentPath, lines.join('\n') + '\n');
+    buildHint = isKotlinDsl
+      ? `Add to build.gradle.kts: apply(from = "contexa/contexa.gradle")`
+      : `Add to build.gradle: apply from: 'contexa/contexa.gradle'`;
+  }
+
+  return {
+    ymlPath,
+    buildFragmentPath,
+    importHints: {
+      yml: 'Add to application.yml: spring.config.import: "optional:file:./contexa/application.yml"',
+      build: buildHint,
+      buildTool: project.buildTool,
+      isMaven,
+    },
+  };
+}
+
+module.exports = {
+  injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
+  injectStandalone,
+  generateDockerCompose, generateInitDbScripts,
+  // Exported for unit testing of the brace-aware Gradle insertion logic.
+  findTopLevelDependenciesInsertIndex, insertIntoTopLevelDependencies,
+};

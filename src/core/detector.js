@@ -94,11 +94,23 @@ async function detectSpringProject(dir = process.cwd()) {
       ]);
       if (parentSettings) {
         const settingsContent = await fs.readFile(parentSettings, 'utf8');
-        // Match include 'module-name' (Groovy) or include("module-name") (Kotlin DSL)
+        // Match include 'module-name' (Groovy) or include("module-name") (Kotlin DSL).
+        // Skip commented-out occurrences: a previous version matched
+        //   // include 'this-module'
+        // anywhere in the file, which led to false positives where init
+        // skipped the dependency add even though the module had been
+        // commented out of the parent settings.gradle. We strip block
+        // comments first and then strip line comments per line before
+        // applying the match so both forms are ignored.
+        const cleaned = settingsContent.replace(/\/\*[\s\S]*?\*\//g, '');
         const includeRegex = new RegExp(
-          `include[\\s(]*['"]:?${moduleName}['"]`
+          `\\binclude[\\s(]*['"]:?${escapeRegex(moduleName)}['"]`
         );
-        if (includeRegex.test(settingsContent)) {
+        const isIncluded = cleaned.split('\n').some(line => {
+          const noLineComment = line.replace(/\/\/.*$/, '');
+          return includeRegex.test(noLineComment);
+        });
+        if (isIncluded) {
           result.gradleRootDir = cur;
           const rootBuild = await firstExisting([
             path.join(cur, 'build.gradle'),
@@ -148,6 +160,10 @@ async function detectSpringProject(dir = process.cwd()) {
   }
 
   return result;
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function firstExisting(paths) {
