@@ -440,10 +440,19 @@ module.exports = function (program) {
           process.exit(1);
         }
 
+        // If preflight detected that EVERY required container is already on
+        // this host, skip "docker compose up -d" entirely and reuse what is
+        // running. The operator's intent is "I already have contexa infra
+        // up, just use it" - re-creating would lose the existing volumes.
+        const allContainersExist = issues.some(i => i.code === 'all-containers-exist');
+
         // 6. Start Docker
         // cwd is the contexa-owned infraDir so the docker-compose.yml that we
         // just generated is the one compose picks up - never the customer's.
-        if (answers.startDocker && project.hasDocker) {
+        if (allContainersExist) {
+          console.log(chalk.green('  v ' + 'Existing infrastructure reused; "docker compose up -d" skipped.'));
+        }
+        if (answers.startDocker && project.hasDocker && !allContainersExist) {
           const s4 = ora(t('step.startingDocker')).start();
           try {
             execSync('docker compose up -d', { cwd: infraDir, stdio: 'inherit' });

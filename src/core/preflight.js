@@ -2,15 +2,21 @@
 
 const net = require('net');
 const { execSync } = require('child_process');
+const { resolveProjectName, containerName } = require('./project');
 
 // Pre-flight checks for the docker-driven infrastructure init step.
-// Returns an array of { severity, message, hint } records. The caller decides
-// whether to abort, prompt, or proceed based on severity.
+// Returns an array of { severity, message, hint, code? } records.
 //
 // severity:
 //   error   - infrastructure cannot start (e.g. Docker daemon unreachable)
-//   warning - likely conflict but compose may still succeed
+//   warning - half-built state the operator must resolve
 //   info    - benign observation worth surfacing once
+//
+// code (optional): a stable token the caller can branch on programmatically.
+//   'all-containers-exist'     - every required container already exists,
+//                                init should auto-skip "docker compose up -d"
+//                                and reuse what is already running.
+//   'partial-containers-exist' - half-built state; init must NOT auto-up.
 async function inspectInfra(opts = {}) {
   const issues = [];
   const distributed = opts.infra === 'distributed';
@@ -81,27 +87,63 @@ async function inspectInfra(opts = {}) {
     }
   }
 
-  // Container name collisions. compose will REUSE a stopped container of the
-  // same name silently, which can mask config drift. Surface this so the user
-  // can decide whether to "docker rm -f" first.
-  const names = ['contexa-postgres', 'contexa-ollama'];
-  if (distributed) names.push('contexa-redis', 'contexa-zookeeper', 'contexa-kafka');
+  // Container reuse decision.
+  //
+  // The docker-compose.yml we generate pins each container_name to
+  // ${CONTEXA_PROJECT}-{postgres,ollama,...}. If those containers already
+  // exist on the host, "docker compose up -d" fails with a name conflict.
+  // The operator's intent in that situation is overwhelmingly: "I already
+  // have the infrastructure running, just use it." So our policy is:
+  //
+  //   - All required containers already exist (running or stopped)
+  //         -> auto-skip "docker compose up -d". Reuse what's there.
+  //
+  //   - SOME but not all required containers exist
+  //         -> half-built state. Surface as a warning so the operator can
+  //            either remove the stragglers and let init recreate, or finish
+  //            the missing ones manually. We do NOT auto-up because compose
+  //            would then conflict on the names that already exist.
+  //
+  //   - None of the required containers exist
+  //         -> normal path; init proceeds with "docker compose up -d".
+  const names = [containerName('postgres'), containerName('ollama')];
+  if (distributed) names.push(containerName('redis'), containerName('zookeeper'), containerName('kafka'));
   let existing = [];
   try {
     const out = execSync('docker ps -a --format "{{.Names}}"',
       { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString();
     existing = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   } catch { /* docker not reachable from this codepath - ignore */ }
-  for (const n of names) {
-    if (existing.includes(n)) {
-      issues.push({
-        severity: 'info',
-        message: `Container "${n}" already exists.`,
-        hint: [
-          `compose will reuse it. If its config has drifted, run "docker rm -f ${n}" before re-init.`,
-        ],
-      });
-    }
+  const present = names.filter(n => existing.includes(n));
+  const missing = names.filter(n => !existing.includes(n));
+  if (present.length === names.length) {
+    issues.push({
+      severity: 'info',
+      code: 'all-containers-exist',
+      message: `Existing infrastructure detected (${present.join(', ')}); reusing it.`,
+      hint: [
+        `"docker compose up -d" will be skipped this run.`,
+        `If the existing config has drifted from what contexa expects, run`,
+        `  docker rm -f ${present.join(' ')}`,
+        `and re-run "contexa init" to recreate them with fresh defaults.`,
+      ],
+    });
+  } else if (present.length > 0) {
+    issues.push({
+      severity: 'warning',
+      code: 'partial-containers-exist',
+      message: `Half-built infrastructure: ${present.length} container(s) exist, ${missing.length} are missing.`,
+      hint: [
+        `Existing : ${present.join(', ')}`,
+        `Missing  : ${missing.join(', ')}`,
+        `"docker compose up -d" would conflict on the existing names. Two options:`,
+        `  1) Remove the existing ones and let contexa recreate the full stack:`,
+        `       docker rm -f ${present.join(' ')}`,
+        `       (then re-run "contexa init")`,
+        `  2) Run side-by-side without touching them:`,
+        `       contexa init --simulate    (uses ctxa-sim-* containers on +20000 ports)`,
+      ],
+    });
   }
 
   return issues;
