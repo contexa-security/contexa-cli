@@ -9,7 +9,6 @@
   "files": [
     "src/",
     "sea-config.json",
-    "install.sh",
     "README.md"
   ],
   "engines": {

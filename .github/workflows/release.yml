@@ -78,8 +78,9 @@ jobs:
         with:
           path: dist/
 
-      # Generate SHA-256 sidecars next to each binary so install.sh can verify
-      # the download against a tamper-evident digest before chmod +x.
+      # Generate SHA-256 sidecars next to each binary so the install-ctxa
+      # installers (install.sh / install.ps1) can verify the download against
+      # a tamper-evident digest before chmod +x.
       - name: Generate SHA-256 checksums
         run: |
           set -e
