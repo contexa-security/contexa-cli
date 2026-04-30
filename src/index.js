@@ -15,6 +15,19 @@ for (let i = 0; i < argv.length; i++) {
 }
 setLocale(detectLocale(explicitLang));
 
+// Pin console output to UTF-8 for the banner's box-drawing glyphs. On Korean
+// Windows (PowerShell 5.x + conhost) the default OutputEncoding is cp949,
+// which mojibakes every byte > 0x7F (the user reported seeing 'â' instead of
+// '█'). We restore the original encoding right after printing the banner so
+// downstream commands keep their default expectations.
+let __originalConsoleEncoding = null;
+if (process.stdout && process.stdout.isTTY && process.platform === 'win32') {
+  try {
+    __originalConsoleEncoding = process.stdout.getDefaultEncoding && process.stdout.getDefaultEncoding();
+    if (process.stdout.setDefaultEncoding) process.stdout.setDefaultEncoding('utf8');
+  } catch { /* non-Win or restricted host - silently fall back */ }
+}
+
 const banner = `
 ${chalk.cyan('  ██████╗ ██████╗ ███╗   ██╗████████╗███████╗██╗  ██╗ █████╗ ')}
 ${chalk.cyan(' ██╔════╝██╔═══██╗████╗  ██║╚══██╔══╝██╔════╝╚██╗██╔╝██╔══██╗')}
