@@ -31,7 +31,7 @@ const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
-const { t } = require('../core/i18n');
+const { t, setLocale, getLocale } = require('../core/i18n');
 
 module.exports = function (program) {
   program
@@ -153,6 +153,7 @@ module.exports = function (program) {
       // non-trivial decision is asked by inquirer when running `contexa init`
       // without flags. Flags only exist as prompt-bypass for advanced users /
       // CI automation:
+      //   --lang ko|en                  bypass the language prompt
       //   --merge / --standalone        bypass the integration-mode prompt
       //   --standalone-dir <path>       bypass the standalone-folder prompt
       //   --infra-dir <path>            bypass the infra-folder prompt
@@ -160,6 +161,26 @@ module.exports = function (program) {
       //   --simulate                    explicit "isolated simulation" intent
       //   --no-docker                   explicit "do not start containers" intent
       //   --yes                         CI automation: skip every prompt
+      //
+      // Step 2a: language. Asked first so every subsequent prompt renders in
+      // the operator's preferred language. Skipped when --lang or --yes is
+      // explicitly given (CI / scripted runs).
+      const langFlagGiven = process.argv.includes('--lang');
+      if (!langFlagGiven && !opts.yes) {
+        console.log('');
+        const langAnswer = await inquirer.prompt([{
+          type: 'rawlist',
+          name: 'lang',
+          message: t('lang.choose') + '\n',
+          default: getLocale() === 'ko' ? 2 : 1,
+          choices: [
+            { name: t('lang.choice.en'), value: 'en' },
+            { name: t('lang.choice.ko'), value: 'ko' },
+          ],
+        }]);
+        setLocale(langAnswer.lang);
+      }
+
       const explicitIntegrationMode = opts.standalone ? 'standalone'
         : opts.merge ? 'merge'
         : null;
@@ -172,15 +193,19 @@ module.exports = function (program) {
         startDocker: opts.docker !== false,
       };
 
+      // Each prompt's message is prefixed with "\n" so that there is one blank
+      // line above every question. inquirer's rawlist also leaves a blank line
+      // after the answer naturally, giving a consistent breathing-room layout
+      // (asked for explicitly by the operator).
       const answers = opts.yes ? defaults : await inquirer.prompt([
         {
-          type: 'list', name: 'integrationMode',
-          message: t('prompt.integrationMode'),
+          type: 'rawlist', name: 'integrationMode',
+          message: '\n' + t('prompt.integrationMode'),
           // Merge is the default because most projects want a one-line install
           // and treat the contexa.* keys as part of their config. Standalone
           // is for projects that must keep the customer files byte-identical
           // (e.g. heavily reviewed monorepos, vendored builds).
-          default: 'merge',
+          default: 1,
           choices: [
             { name: t('prompt.integrationMode.merge'),      value: 'merge' },
             { name: t('prompt.integrationMode.standalone'), value: 'standalone' },
@@ -189,7 +214,7 @@ module.exports = function (program) {
         },
         {
           type: 'input', name: 'standaloneDir',
-          message: t('prompt.standaloneDir'),
+          message: '\n' + t('prompt.standaloneDir'),
           default: path.join(opts.dir, 'contexa'),
           when: a => {
             const mode = explicitIntegrationMode || a.integrationMode;
@@ -197,22 +222,28 @@ module.exports = function (program) {
           },
         },
         {
-          type: 'list', name: 'securityMode',
-          message: t('prompt.securityMode'),
+          type: 'rawlist', name: 'securityMode',
+          message: '\n' + t('prompt.securityMode'),
+          default: 1,
           choices: [
             { name: t('prompt.securityMode.full'), value: 'full' },
             { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
           ],
         },
         {
-          type: 'list', name: 'mode', message: t('prompt.mode'),
+          type: 'rawlist', name: 'mode',
+          message: '\n' + t('prompt.mode'),
+          default: 1,
           choices: [
             { name: t('prompt.mode.shadow'), value: 'shadow' },
             { name: t('prompt.mode.enforce'), value: 'enforce' },
           ],
         },
         {
-          type: 'checkbox', name: 'llmProviders', message: t('prompt.llm'),
+          // checkbox stays as-is because rawlist does not support multiple
+          // selection. Hint text in the bundle already explains space/enter.
+          type: 'checkbox', name: 'llmProviders',
+          message: '\n' + t('prompt.llm'),
           choices: [
             { name: t('prompt.llm.ollama'),    value: 'ollama',    checked: true },
             { name: t('prompt.llm.openai'),    value: 'openai' },
@@ -221,12 +252,13 @@ module.exports = function (program) {
           validate: a => a.length > 0 ? true : t('prompt.llm.atLeastOne'),
         },
         {
-          type: 'list', name: 'infra', message: t('prompt.infra'),
+          type: 'rawlist', name: 'infra',
+          message: '\n' + t('prompt.infra'),
           // Default = skip: never touch infrastructure unless the user opts in.
           // Distributed is the only auto-provisioning option (Postgres + Ollama +
           // Redis + Zookeeper + Kafka). Customers running their own stack should
           // accept the default.
-          default: opts.distributed ? 'distributed' : 'skip',
+          default: opts.distributed ? 2 : 1,
           choices: [
             { name: t('prompt.infra.skip'),       value: 'skip' },
             { name: t('prompt.infra.distributed') || 'Yes - install distributed (Postgres + Ollama + Redis + Kafka)', value: 'distributed' },
@@ -235,7 +267,7 @@ module.exports = function (program) {
         },
         {
           type: 'input', name: 'infraDir',
-          message: t('prompt.infraDir'),
+          message: '\n' + t('prompt.infraDir'),
           default: () => resolveInfraDir(resolveProjectName(), {}),
           when: a => {
             const infra = opts.distributed ? 'distributed' : a.infra;
@@ -244,7 +276,7 @@ module.exports = function (program) {
         },
         {
           type: 'confirm', name: 'startDocker',
-          message: t('prompt.startDocker'),
+          message: '\n' + t('prompt.startDocker'),
           default: true,
           when: a => {
             const infra = opts.distributed ? 'distributed' : a.infra;
