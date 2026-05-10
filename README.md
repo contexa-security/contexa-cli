@@ -151,6 +151,10 @@ variable fallbacks, so you can override credentials without editing the file:
 | `COMPOSE_BIND_HOST` | docker-compose port bind host | `127.0.0.1` |
 | `REDIS_HOST` / `REDIS_PORT` | Redis (distributed) | `localhost` / `6379` |
 | `KAFKA_BOOTSTRAP_SERVERS` | Kafka (distributed) | `localhost:9092` |
+| `CONTEXA_PGVECTOR_IMAGE_TAG` | pgvector image tag | `pg16` |
+| `CONTEXA_OLLAMA_IMAGE_TAG` | ollama image tag (**pin in production**) | `latest` |
+| `CONTEXA_REDIS_IMAGE_TAG` | redis image tag | `7.2-alpine` |
+| `CONTEXA_KAFKA_PLATFORM_VERSION` | confluentinc cp-* version | `7.4.0` |
 
 For production deployments, set the `CONTEXA_DB_*` variants explicitly and
 **never** rely on the embedded defaults.
@@ -257,11 +261,6 @@ docker compose up -d                     # ctxa-sim-postgres on 25432, ...
 docker compose -p ctxa-sim down -v
 docker compose -p ctxa-sim up -d
 ```
-
-The CLI also ships a ready-to-use test stack at
-[test-infra/docker-compose.test.yml](test-infra/docker-compose.test.yml)
-(`ctxa-test-*` containers on +10000 ports), which is what the integration
-matrix runner uses internally.
 
 ### Infrastructure (`--distributed`, Docker, ports)
 

@@ -1,10 +1,10 @@
 'use strict';
 
 const chalk = require('chalk');
-const { execSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs-extra');
 const { osDefaultInfraDir } = require('../core/project');
+const { dockerTry, dockerCompose: dockerComposeExec } = require('../core/docker');
 
 // `contexa simulate` is the lifecycle helper for the SIMULATION stack created
 // by `contexa init --simulate` (compose project name "ctxa-sim", containers
@@ -32,9 +32,10 @@ const { osDefaultInfraDir } = require('../core/project');
 
 const SIM_PROJECT = 'ctxa-sim';
 
+// `args` is an array of compose arguments (e.g. ['-p', 'ctxa-sim', 'up', '-d']).
+// No shell expansion: each entry is passed verbatim as a separate argv slot.
 function dockerCompose(args, cwd) {
-  const cmd = `docker compose ${args}`;
-  return spawnSync(cmd, { cwd, stdio: 'inherit', shell: true });
+  return dockerComposeExec(args, { cwd, stdio: 'inherit' });
 }
 
 function findCompose(infraDir) {
@@ -79,7 +80,7 @@ module.exports = function (program) {
       }
       console.log(chalk.cyan(`\n  Starting simulation stack "${projectName}"`));
       console.log(chalk.gray(`    Infra dir : ${infraDir}\n`));
-      dockerCompose(`-p ${projectName} up -d`, infraDir);
+      dockerCompose(['-p', projectName, 'up', '-d'], infraDir);
     });
 
   sim.command('down')
@@ -93,7 +94,7 @@ module.exports = function (program) {
         return;
       }
       console.log(chalk.cyan(`\n  Stopping simulation stack "${projectName}"\n`));
-      dockerCompose(`-p ${projectName} down`, infraDir);
+      dockerCompose(['-p', projectName, 'down'], infraDir);
     });
 
   sim.command('reset')
@@ -108,8 +109,8 @@ module.exports = function (program) {
         process.exit(1);
       }
       console.log(chalk.yellow(`\n  Resetting simulation stack "${projectName}" (down -v + up -d)...\n`));
-      dockerCompose(`-p ${projectName} down -v`, infraDir);
-      dockerCompose(`-p ${projectName} up -d`,   infraDir);
+      dockerCompose(['-p', projectName, 'down', '-v'], infraDir);
+      dockerCompose(['-p', projectName, 'up', '-d'],   infraDir);
     });
 
   sim.command('ps')
@@ -117,11 +118,14 @@ module.exports = function (program) {
     .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
     .action((opts) => {
       const { projectName } = buildContext(opts);
-      try {
-        execSync(
-          `docker ps -a --filter "label=com.docker.compose.project=${projectName}" --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"`,
-          { stdio: 'inherit' });
-      } catch {
+      // Array-arg invocation: --filter / --format values include user-derived
+      // text (projectName) and template tokens like {{.Names}}. Passing as
+      // argv slots keeps both safe against shell metacharacter expansion.
+      const r = dockerTry(['ps', '-a',
+        '--filter', `label=com.docker.compose.project=${projectName}`,
+        '--format', 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'],
+        { stdio: 'inherit' });
+      if (r.error || r.status !== 0) {
         console.log(chalk.red('  x Docker not reachable.'));
       }
     });
@@ -137,7 +141,8 @@ module.exports = function (program) {
         notReadyHint(infraDir);
         process.exit(1);
       }
-      const svc = service ? ` ${service}` : '';
-      dockerCompose(`-p ${projectName} logs -f${svc}`, infraDir);
+      const args = ['-p', projectName, 'logs', '-f'];
+      if (service) args.push(service);
+      dockerCompose(args, infraDir);
     });
 };

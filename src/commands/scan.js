@@ -49,7 +49,8 @@ module.exports = function (program) {
       console.log(chalk.cyan('\n  ' + t('scan.title') + '\n'));
 
       const s = ora('...').start();
-      const project = await detectSpringProject(opts.dir);
+      // scan is read-only; do not probe docker (lazy detector).
+      const project = await detectSpringProject(opts.dir, { probeDocker: false });
       await new Promise(r => setTimeout(r, 200));
       s.stop();
 

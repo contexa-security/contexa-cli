@@ -1,8 +1,8 @@
 'use strict';
 
 const net = require('net');
-const { execSync } = require('child_process');
-const { resolveProjectName, containerName } = require('./project');
+const { containerName } = require('./project');
+const { dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('./docker');
 
 // Pre-flight checks for the docker-driven infrastructure init step.
 // Returns an array of { severity, message, hint, code? } records.
@@ -24,13 +24,7 @@ async function inspectInfra(opts = {}) {
   // Step 1: is the docker CLI even installed? Distinguish "not installed" from
   // "installed but daemon stopped" - the user-visible fix is very different.
   if (opts.startDocker !== false) {
-    let cliInstalled = true;
-    try {
-      execSync('docker --version', { stdio: 'ignore', timeout: 3000 });
-    } catch {
-      cliInstalled = false;
-    }
-    if (!cliInstalled) {
+    if (!isDockerCliInstalled()) {
       issues.push({
         severity: 'error',
         message: 'Docker is not installed on this machine.',
@@ -49,9 +43,7 @@ async function inspectInfra(opts = {}) {
 
     // Step 2: CLI is present - is the daemon actually running?
     // `docker info` hits the daemon and surfaces "Cannot connect to the Docker daemon" early.
-    try {
-      execSync('docker info', { stdio: 'ignore', timeout: 5000 });
-    } catch {
+    if (!isDockerDaemonRunning()) {
       issues.push({
         severity: 'error',
         message: 'Docker is installed but the daemon is not running.',
@@ -109,11 +101,13 @@ async function inspectInfra(opts = {}) {
   const names = [containerName('postgres'), containerName('ollama')];
   if (distributed) names.push(containerName('redis'), containerName('zookeeper'), containerName('kafka'));
   let existing = [];
-  try {
-    const out = execSync('docker ps -a --format "{{.Names}}"',
-      { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).toString();
-    existing = out.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  } catch { /* docker not reachable from this codepath - ignore */ }
+  // dockerTry: array-arg invocation, no shell. {{.Names}} is a literal Go
+  // template string and never reaches a shell parser this way.
+  const psResult = dockerTry(['ps', '-a', '--format', '{{.Names}}'],
+    { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+  if (!psResult.error && psResult.status === 0 && psResult.stdout) {
+    existing = psResult.stdout.toString().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  }
   const present = names.filter(n => existing.includes(n));
   const missing = names.filter(n => !existing.includes(n));
   if (present.length === names.length) {

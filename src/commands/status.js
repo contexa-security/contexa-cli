@@ -23,7 +23,8 @@ module.exports = function (program) {
     .action(async (opts) => {
       console.log(chalk.cyan('\n  ' + t('status.title') + '\n'));
 
-      const project = await detectSpringProject(opts.dir);
+      // status is read-only; do not probe docker (lazy detector).
+      const project = await detectSpringProject(opts.dir, { probeDocker: false });
 
       console.log(`  ${t('status.spring')}   : ${project.isSpring  ? chalk.green('v') : chalk.red('x')}`);
       console.log(`  ${t('status.contexa')}  : ${project.hasContexta ? chalk.green(t('status.installed')) : chalk.red(t('status.notInstalled'))}`);

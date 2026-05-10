@@ -23,7 +23,8 @@ module.exports = function (program) {
 
       const target = opts.enforce ? 'enforce' : 'shadow';
       const targetUpper = target.toUpperCase();
-      const project = await detectSpringProject(opts.dir);
+      // mode only mutates application.yml; no docker probe needed.
+      const project = await detectSpringProject(opts.dir, { probeDocker: false });
 
       if (!project.appYmlPath || !await fs.pathExists(project.appYmlPath)) {
         console.log(chalk.red('\n  x ' + t('mode.notInstalled') + '\n'));

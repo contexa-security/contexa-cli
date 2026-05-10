@@ -6,8 +6,8 @@ const inquirer = require('inquirer');
 const path  = require('path');
 const os    = require('os');
 const fs    = require('fs-extra');
-const { execSync } = require('child_process');
 const { Option } = require('commander');
+const { dockerSync, dockerTry, dockerCompose } = require('../core/docker');
 
 // Normalize a user-entered path so that:
 //   1) "~" or "~/..." is expanded to the OS home directory (shells do this
@@ -487,7 +487,9 @@ module.exports = function (program) {
         if (answers.startDocker && project.hasDocker && !allContainersExist) {
           const s4 = ora(t('step.startingDocker')).start();
           try {
-            execSync('docker compose up -d', { cwd: infraDir, stdio: 'inherit' });
+            const upResult = dockerCompose(['up', '-d'], { cwd: infraDir, stdio: 'inherit' });
+            if (upResult.error) throw upResult.error;
+            if (upResult.status !== 0) throw new Error(`docker compose up exited with status ${upResult.status}`);
             s4.succeed(t('step.dockerStarted'));
 
             // 7. Pull Ollama models
@@ -500,6 +502,13 @@ module.exports = function (program) {
               const ollamaContainer = containerName('ollama');
               const chatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
               const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
+              // Validate user-controlled model strings before they reach docker
+              // exec. Even though dockerSync passes args as an array (not via a
+              // shell), an obviously malformed value should be rejected up-front
+              // so the failure mode is a clear CLI error, not an opaque
+              // "ollama pull" stderr from inside the container.
+              if (!isValidOllamaModel(chatModel)) throw new Error(`Invalid OLLAMA_CHAT_MODEL value: ${chatModel}`);
+              if (!isValidOllamaModel(embedModel)) throw new Error(`Invalid OLLAMA_EMBEDDING_MODEL value: ${embedModel}`);
               const s5 = ora(t('step.pullingChat', chatModel)).start();
               try {
                 // Wait for Ollama to be ready - bounded by both per-call timeout
@@ -508,23 +517,21 @@ module.exports = function (program) {
                 let ready = false;
                 const deadlineMs = Date.now() + 90000; // 90s absolute cap
                 while (!ready && Date.now() < deadlineMs) {
-                  try {
-                    execSync(
-                      `docker exec ${ollamaContainer} curl -sf http://localhost:11434/api/tags`,
-                      { stdio: 'ignore', timeout: 3000 }
-                    );
-                    ready = true;
-                    break;
-                  } catch { await sleep(2000); }
+                  const probe = dockerTry(
+                    ['exec', ollamaContainer, 'curl', '-sf', 'http://localhost:11434/api/tags'],
+                    { stdio: 'ignore', timeout: 3000 }
+                  );
+                  if (!probe.error && probe.status === 0) { ready = true; break; }
+                  await sleep(2000);
                 }
 
                 if (ready) {
-                  execSync(`docker exec ${ollamaContainer} ollama pull ${chatModel}`,
+                  dockerSync(['exec', ollamaContainer, 'ollama', 'pull', chatModel],
                     { stdio: 'inherit', timeout: 600000 });
                   s5.succeed(t('step.chatPulled', chatModel));
 
                   const s6 = ora(t('step.pullingEmbedding', embedModel)).start();
-                  execSync(`docker exec ${ollamaContainer} ollama pull ${embedModel}`,
+                  dockerSync(['exec', ollamaContainer, 'ollama', 'pull', embedModel],
                     { stdio: 'inherit', timeout: 600000 });
                   s6.succeed(t('step.embeddingPulled'));
                 } else {
@@ -654,6 +661,15 @@ module.exports = function (program) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Ollama model identifiers follow the pattern <name>[:tag] where name segments
+// are alphanumerics with limited punctuation (`-`, `_`, `.`, `/`). Values come
+// from OLLAMA_CHAT_MODEL / OLLAMA_EMBEDDING_MODEL env vars and end up as a
+// docker exec argv entry. We pass via spawnSync (no shell) but still reject
+// obviously malformed input so the failure mode is a clean CLI error.
+function isValidOllamaModel(s) {
+  return typeof s === 'string' && s.length > 0 && s.length <= 200 && /^[A-Za-z0-9._:/\-]+$/.test(s);
 }
 
 // Restore application.yml and the build file from their .bak siblings when a

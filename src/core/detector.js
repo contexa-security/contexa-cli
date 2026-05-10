@@ -5,7 +5,7 @@ const path = require('path');
 
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
 
-async function detectSpringProject(dir = process.cwd()) {
+async function detectSpringProject(dir = process.cwd(), opts = {}) {
   const result = {
     isSpring: false,
     buildTool: null,
@@ -150,12 +150,14 @@ async function detectSpringProject(dir = process.cwd()) {
       /@EnableAISecurity\b|io\.contexa\.[\w.]*EnableAISecurity\b/);
   }
 
-  // Docker detection
-  try {
-    const { execSync } = require('child_process');
-    execSync('docker --version', { stdio: 'ignore' });
-    result.hasDocker = true;
-  } catch {
+  // Docker detection. Lazy: only probe when the caller asks for it. status,
+  // scan, and mode commands do not need this signal, and probing on every
+  // detector call adds a noticeable startup cost (and can spawn a child
+  // process the user did not expect for a read-only command).
+  if (opts.probeDocker !== false) {
+    const { isDockerCliInstalled } = require('./docker');
+    result.hasDocker = isDockerCliInstalled();
+  } else {
     result.hasDocker = false;
   }
 
