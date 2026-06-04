@@ -20,6 +20,7 @@ const { dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('./do
 async function inspectInfra(opts = {}) {
   const issues = [];
   const distributed = opts.infra === 'distributed';
+  const includeOllama = !!opts.includeOllama;
 
   // Step 1: is the docker CLI even installed? Distinguish "not installed" from
   // "installed but daemon stopped" - the user-visible fix is very different.
@@ -34,7 +35,7 @@ async function inspectInfra(opts = {}) {
           '  Linux           : https://docs.docker.com/engine/install/',
           'After installation, open a new terminal and re-run "contexa init".',
           'If you cannot install Docker, re-run with "--no-infra" to skip',
-          'infrastructure provisioning - you will need to run PostgreSQL, Ollama',
+          'infrastructure provisioning - you will need to run PostgreSQL',
           '(and Redis/Kafka if --distributed) yourself before starting the app.',
         ],
       });
@@ -59,47 +60,53 @@ async function inspectInfra(opts = {}) {
     }
   }
 
+  const skippedServices = [];
+
   // Local TCP port collisions. We bind to 127.0.0.1 to mirror the compose
   // bind host. A port already bound (EADDRINUSE) signals an existing service
   // that may belong to another contexa-cli run, a host postgres, etc.
-  const ports = [['PostgreSQL', 5432], ['Ollama', 11434]];
+  const postgresPort = parseInt(process.env.CONTEXA_POSTGRES_PORT || '5432', 10);
+  const ollamaPort = parseInt(process.env.CONTEXA_OLLAMA_PORT || '11434', 10);
+  const redisPort = parseInt(process.env.CONTEXA_REDIS_PORT || '6379', 10);
+  const zookeeperPort = parseInt(process.env.CONTEXA_ZOOKEEPER_PORT || '2181', 10);
+  const kafkaPort = parseInt(process.env.CONTEXA_KAFKA_PORT || '9092', 10);
+
+  const ports = [['PostgreSQL', postgresPort, 'postgres']];
+  if (includeOllama) ports.push(['Ollama', ollamaPort, 'ollama']);
   if (distributed) {
-    ports.push(['Redis', 6379], ['Zookeeper', 2181], ['Kafka', 9092]);
+    ports.push(
+      ['Redis', redisPort, 'redis'],
+      ['Zookeeper', zookeeperPort, 'zookeeper'],
+      ['Kafka', kafkaPort, 'kafka']
+    );
   }
-  for (const [name, port] of ports) {
+  for (const [name, port, serviceKey] of ports) {
     if (await isPortBound(port)) {
+      skippedServices.push(serviceKey);
       issues.push({
         severity: 'warning',
         message: `Port ${port} (${name}) is already in use on 127.0.0.1.`,
         hint: [
-          `Stop the conflicting service, OR set COMPOSE_BIND_HOST=0.0.0.0 to bind elsewhere,`,
-          `OR re-run with --no-docker and start compose manually after resolving the conflict.`,
+          `Local service ${name} is already running on host. Contexa will skip starting this docker container and reuse the host service.`,
         ],
       });
     }
   }
 
   // Container reuse decision.
-  //
-  // The docker-compose.yml we generate pins each container_name to
-  // ${CONTEXA_PROJECT}-{postgres,ollama,...}. If those containers already
-  // exist on the host, "docker compose up -d" fails with a name conflict.
-  // The operator's intent in that situation is overwhelmingly: "I already
-  // have the infrastructure running, just use it." So our policy is:
-  //
-  //   - All required containers already exist (running or stopped)
-  //         -> auto-skip "docker compose up -d". Reuse what's there.
-  //
-  //   - SOME but not all required containers exist
-  //         -> half-built state. Surface as a warning so the operator can
-  //            either remove the stragglers and let init recreate, or finish
-  //            the missing ones manually. We do NOT auto-up because compose
-  //            would then conflict on the names that already exist.
-  //
-  //   - None of the required containers exist
-  //         -> normal path; init proceeds with "docker compose up -d".
-  const names = [containerName('postgres'), containerName('ollama')];
-  if (distributed) names.push(containerName('redis'), containerName('zookeeper'), containerName('kafka'));
+  const services = [
+    { key: 'postgres', container: containerName('postgres') }
+  ];
+  if (includeOllama) services.push({ key: 'ollama', container: containerName('ollama') });
+  if (distributed) {
+    services.push(
+      { key: 'redis', container: containerName('redis') },
+      { key: 'zookeeper', container: containerName('zookeeper') },
+      { key: 'kafka', container: containerName('kafka') }
+    );
+  }
+
+  const names = services.map(s => s.container);
   let existing = [];
   // dockerTry: array-arg invocation, no shell. {{.Names}} is a literal Go
   // template string and never reaches a shell parser this way.
@@ -108,6 +115,16 @@ async function inspectInfra(opts = {}) {
   if (!psResult.error && psResult.status === 0 && psResult.stdout) {
     existing = psResult.stdout.toString().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   }
+
+  // If a container already exists, skip it to avoid conflicts and data loss
+  for (const svc of services) {
+    if (existing.includes(svc.container)) {
+      if (!skippedServices.includes(svc.key)) {
+        skippedServices.push(svc.key);
+      }
+    }
+  }
+
   const present = names.filter(n => existing.includes(n));
   const missing = names.filter(n => !existing.includes(n));
   if (present.length === names.length) {
@@ -124,21 +141,21 @@ async function inspectInfra(opts = {}) {
     });
   } else if (present.length > 0) {
     issues.push({
-      severity: 'warning',
+      severity: 'info',
       code: 'partial-containers-exist',
-      message: `Half-built infrastructure: ${present.length} container(s) exist, ${missing.length} are missing.`,
+      message: `Existing container(s) detected: ${present.join(', ')}. Remaining missing container(s): ${missing.join(', ')}.`,
       hint: [
-        `Existing : ${present.join(', ')}`,
-        `Missing  : ${missing.join(', ')}`,
-        `"docker compose up -d" would conflict on the existing names. Two options:`,
-        `  1) Remove the existing ones and let contexa recreate the full stack:`,
-        `       docker rm -f ${present.join(' ')}`,
-        `       (then re-run "contexa init")`,
-        `  2) Run side-by-side without touching them:`,
-        `       contexa init --simulate    (uses ctxa-sim-* containers on +20000 ports)`,
+        `Contexa will skip recreating existing containers and only start the missing ones.`,
       ],
     });
   }
+
+  const allServices = services.map(s => s.key);
+  const servicesToUp = allServices.filter(s => !skippedServices.includes(s));
+
+  // Attach properties to the issues array for backward compatibility
+  issues.servicesToUp = servicesToUp;
+  issues.skippedServices = skippedServices;
 
   return issues;
 }

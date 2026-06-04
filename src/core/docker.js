@@ -3,10 +3,9 @@
 // Centralized docker / docker-compose execution helpers.
 //
 // Every docker invocation in the CLI MUST go through this module. The
-// previous code spread execSync(`docker exec ${container} ollama pull ${model}`)
-// across init.js / preflight.js / simulate.js, which interpolated arbitrary
-// values (container name, model name from OLLAMA_CHAT_MODEL env var) into a
-// shell command. Two problems:
+// previous code spread execSync(`docker ...`) calls across init.js /
+// preflight.js / simulate.js, which interpolated arbitrary values into
+// a shell command. Two problems:
 //
 //   1. Shell injection surface. A model name like "a;rm -rf /" would expand
 //      into the shell unmodified. This module passes args as an array to

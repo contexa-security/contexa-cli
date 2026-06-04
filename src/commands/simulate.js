@@ -8,7 +8,7 @@ const { dockerTry, dockerCompose: dockerComposeExec } = require('../core/docker'
 
 // `contexa simulate` is the lifecycle helper for the SIMULATION stack created
 // by `contexa init --simulate` (compose project name "ctxa-sim", containers
-// ctxa-sim-postgres / ctxa-sim-ollama / ..., on +20000 ports).
+// ctxa-sim-postgres / ctxa-sim-redis / ..., on +20000 ports).
 //
 // Design rule: the user is NOT expected to know any flag names, environment
 // variables, or directory paths. `contexa simulate <subcommand>` MUST work
@@ -52,13 +52,25 @@ function buildContext(opts = {}) {
   const infraDir = explicit
     ? path.resolve(String(explicit))
     : osDefaultInfraDir(SIM_PROJECT);
+
+  const setIfAbsent = (k, v) => { if (!process.env[k]) process.env[k] = v; };
+  setIfAbsent('CONTEXA_PROJECT',          'ctxa-sim');
+  setIfAbsent('CONTEXA_POSTGRES_PORT',    '25432');
+  setIfAbsent('CONTEXA_OLLAMA_PORT',      '31434');
+  setIfAbsent('CONTEXA_REDIS_PORT',       '26379');
+  setIfAbsent('CONTEXA_ZOOKEEPER_PORT',   '22181');
+  setIfAbsent('CONTEXA_KAFKA_PORT',       '29092');
+  setIfAbsent('CONTEXA_DB_NAME',          'contexa_sim');
+  setIfAbsent('CONTEXA_DB_USERNAME',      'contexa_sim');
+  setIfAbsent('CONTEXA_DB_PASSWORD',      'contexa_sim_pw');
+
   return { projectName: SIM_PROJECT, infraDir };
 }
 
 function notReadyHint(infraDir) {
   console.log(chalk.gray(`    Expected location  : ${infraDir}`));
   console.log(chalk.gray('    To create it, run  : contexa init --simulate'));
-  console.log(chalk.gray('    (this prepares an isolated PostgreSQL + Ollama + Redis + Kafka stack'));
+  console.log(chalk.gray('    (this prepares an isolated PostgreSQL + Redis + Kafka stack'));
   console.log(chalk.gray('     that does NOT collide with any production stack on the same host)\n'));
 }
 

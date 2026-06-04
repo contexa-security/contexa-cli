@@ -10,7 +10,7 @@
 //                                  consistent across the entire CLI.
 //
 //   - containerName(svc)        : build a docker container name for a given short service id
-//                                  (e.g. "ollama" -> "contexa-ollama" or "ctxa-sim-ollama").
+//                                  (e.g. "postgres" -> "contexa-postgres" or "ctxa-sim-postgres").
 //
 //   - osDefaultInfraDir(name)   : platform-appropriate default location for the contexa-owned
 //                                  infrastructure files (docker-compose.yml + initdb/*).

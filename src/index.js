@@ -49,6 +49,8 @@ require('./commands/mode')(program);
 require('./commands/status')(program);
 require('./commands/scan')(program);
 require('./commands/simulate')(program);
+require('./commands/doctor')(program);
+require('./commands/reset')(program);
 
 program.parse(process.argv);
 

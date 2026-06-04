@@ -74,12 +74,12 @@ module.exports = function (program) {
         if (buildPath && await fs.pathExists(buildPath)) {
           const buildText = await fs.readFile(buildPath, 'utf8');
           const hasAnyAiStarter =
-            buildText.includes('spring-ai-starter-model-ollama') ||
             buildText.includes('spring-ai-starter-model-openai') ||
-            buildText.includes('spring-ai-starter-model-anthropic');
+            buildText.includes('spring-ai-starter-model-anthropic') ||
+            buildText.includes('spring-ai-starter-model-ollama');
           if (!hasAnyAiStarter) {
             issues.push('@EnableAISecurity is declared but no Spring AI provider starter is on the build file. ' +
-              'Add at least one of spring-ai-starter-model-{ollama,openai,anthropic}, or run "contexa init" again.');
+              'Add at least one of spring-ai-starter-model-{openai,anthropic,ollama}, or run "contexa init" again.');
           }
           const hasVectorStarter = buildText.includes('spring-ai-starter-vector-store-pgvector');
           if (!hasVectorStarter) {
@@ -96,9 +96,9 @@ module.exports = function (program) {
         if (buildPath && await fs.pathExists(buildPath)) {
           const buildText = await fs.readFile(buildPath, 'utf8');
           const hasAnyAiStarter =
-            buildText.includes('spring-ai-starter-model-ollama') ||
             buildText.includes('spring-ai-starter-model-openai') ||
-            buildText.includes('spring-ai-starter-model-anthropic');
+            buildText.includes('spring-ai-starter-model-anthropic') ||
+            buildText.includes('spring-ai-starter-model-ollama');
           const hasVectorStarter = buildText.includes('spring-ai-starter-vector-store-pgvector');
           if (hasAnyAiStarter || hasVectorStarter) {
             warnings.push('Spring AI / vector starter is on the build file but @EnableAISecurity is NOT declared. ' +

@@ -24,17 +24,22 @@ const LEGACY_MARKER_END   = '# --- End Contexa ---';
 // The shape mirrors the @ConfigurationProperties surface in the platform.
 // Returned tree is a fresh object the caller can mutate freely.
 function buildCliContexaTree(opts) {
-  const { mode = 'shadow', llmProviders = ['ollama'], infra = 'standalone' } = opts;
+  const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone' } = opts;
   const priority = llmProviders.join(',');
-  const embeddingPriority = llmProviders.filter(p => p !== 'anthropic').join(',') || 'ollama';
+  // Embedding priority excludes both 'anthropic' (no embedding model in Spring AI)
+  // and 'ollama' (default Ollama embedding models are 1024 / 768 dim and would
+  // mismatch the pgvector 1536 schema). Fallback to 'openai' keeps the embedding
+  // path on a single 1536-dim provider regardless of which chat providers the
+  // operator selected.
+  const embeddingPriority = llmProviders.filter(p => p !== 'anthropic' && p !== 'ollama').join(',') || 'openai';
 
   const tree = {
     llm: {
       // Use the non-deprecated selection API. Deprecated chatModelPriority/
       // embeddingModelPriority on contexa.llm.* are intentionally NOT written.
       selection: {
-        chat: { priority },
-        embedding: { priority: embeddingPriority },
+        chat: { mode: 'dynamic-priority', priority },
+        embedding: { mode: 'dynamic-priority', priority: embeddingPriority },
       },
     },
     datasource: {
@@ -103,8 +108,12 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     opts.mode === 'enforce' ? 'ENFORCE' : 'SHADOW');
   setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
   setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
+  setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
+    cliTree.llm.selection.chat.mode);
   setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
     cliTree.llm.selection.chat.priority);
+  setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
+    cliTree.llm.selection.embedding.mode);
   setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
     cliTree.llm.selection.embedding.priority);
 

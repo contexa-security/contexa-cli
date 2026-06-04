@@ -16,7 +16,7 @@ const fs = require('fs-extra');
 const path = require('path');
 
 async function generateDockerCompose(infraDir, opts = {}) {
-  const { infra = 'standalone' } = opts;
+  const { infra = 'standalone', includeOllama = false } = opts;
   await fs.ensureDir(infraDir);
   const composePath = path.join(infraDir, 'docker-compose.yml');
 
@@ -36,7 +36,7 @@ async function generateDockerCompose(infraDir, opts = {}) {
 #   CONTEXA_PROJECT                compose project name + container prefix (default "contexa")
 #   COMPOSE_BIND_HOST              bind host on the docker host  (default 127.0.0.1)
 #   CONTEXA_POSTGRES_PORT          Postgres host port            (default 5432)
-#   CONTEXA_OLLAMA_PORT            Ollama host port              (default 11434)
+#   CONTEXA_OLLAMA_PORT            Ollama host port              (default 11434)  [include-ollama]
 #   CONTEXA_REDIS_PORT             Redis host port               (default 6379)  [distributed]
 #   CONTEXA_ZOOKEEPER_PORT         Zookeeper host port           (default 2181)  [distributed]
 #   CONTEXA_KAFKA_PORT             Kafka host port               (default 9092)  [distributed]
@@ -67,8 +67,11 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+`;
 
-  # Ollama - Local LLM for AI security analysis.
+  if (includeOllama) {
+    content += `
+  # Ollama - Local LLM runtime for offline / no-API-key operation.
   # Default tag is "latest" for evaluation. Production deployments MUST set
   # CONTEXA_OLLAMA_IMAGE_TAG to a specific version for reproducibility.
   ollama:
@@ -88,6 +91,7 @@ services:
       retries: 5
     restart: unless-stopped
 `;
+  }
 
   if (infra === 'distributed') {
     content += `
@@ -159,8 +163,11 @@ services:
   // Volumes
   content += `
 volumes:
-  pgdata:
+  pgdata:`;
+  if (includeOllama) {
+    content += `
   ollama-data:`;
+  }
   if (infra === 'distributed') {
     content += `
   redis-data:
