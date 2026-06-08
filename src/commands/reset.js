@@ -134,6 +134,24 @@ module.exports = function (program) {
       // 2. Restore Backup Files (.bak)
       if (runCode) {
         const s2 = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
+        
+        // properties 기반 프로젝트에서 init으로 인해 신규 생성된 application.yml 자동 제거
+        const ymlPath = path.join(projectDir, 'src/main/resources/application.yml');
+        const ymlBakPath = ymlPath + '.bak';
+        const propsPath = path.join(projectDir, 'src/main/resources/application.properties');
+        const propsBakPath = propsPath + '.bak';
+
+        if (fs.existsSync(ymlPath) && !fs.existsSync(ymlBakPath)) {
+          if (fs.existsSync(propsPath) || fs.existsSync(propsBakPath)) {
+            try {
+              fs.removeSync(ymlPath);
+              console.log(chalk.gray(`    - Removed newly created application.yml to restore properties-only state.`));
+            } catch (err) {
+              console.log(chalk.red(`    x Failed to remove application.yml: ${err.message}`));
+            }
+          }
+        }
+
         const backupFiles = findBackupFiles(projectDir);
         
         if (backupFiles.length > 0) {
