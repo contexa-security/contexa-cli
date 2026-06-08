@@ -5,8 +5,10 @@ const ora = require('ora');
 const path = require('path');
 const fs = require('fs-extra');
 const inquirer = require('inquirer');
+const yaml = require('js-yaml');
 const { dockerCompose, isDockerCliInstalled } = require('../core/docker');
 const { resolveProjectName, osDefaultInfraDir, resolveInfraDir } = require('../core/project');
+const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
 // Recursively find specific backup files in the directory, excluding node_modules and .git
@@ -38,6 +40,58 @@ function findBackupFiles(dir, filesList = []) {
   return filesList;
 }
 
+// Clean up spring-boot-starter-contexa dependency from build file (gradle/maven) without relying on .bak
+async function cleanupBuildFile(buildPath) {
+  if (!buildPath || !fs.existsSync(buildPath)) return;
+  let content = await fs.readFile(buildPath, 'utf8');
+  let changed = false;
+
+  if (buildPath.endsWith('.xml')) {
+    // Maven pom.xml
+    const regex = /<dependency>\s*<groupId>ai\.ctxa<\/groupId>\s*<artifactId>spring-boot-starter-contexa<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (regex.test(content)) {
+      content = content.replace(regex, '');
+      changed = true;
+    }
+  } else {
+    // Gradle build.gradle / build.gradle.kts
+    const regex = /\s*implementation\s*\(?\s*['"]ai\.ctxa:spring-boot-starter-contexa:[^'"]+['"]\s*\)?\s*/g;
+    if (regex.test(content)) {
+      content = content.replace(regex, '\n');
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await fs.writeFile(buildPath, content, 'utf8');
+    console.log(chalk.gray(`    - Cleaned contexa dependency from ${path.basename(buildPath)}`));
+  }
+}
+
+// Clean up 'contexa:' configuration block from application.yml without relying on .bak
+async function cleanupYmlFile(ymlPath) {
+  if (!ymlPath || !fs.existsSync(ymlPath)) return;
+  try {
+    const text = await fs.readFile(ymlPath, 'utf8');
+    const rootObj = yaml.load(text);
+    if (rootObj && typeof rootObj === 'object' && rootObj.contexa) {
+      delete rootObj.contexa;
+      
+      // If the object becomes completely empty, remove the file entirely
+      if (Object.keys(rootObj).length === 0) {
+        await fs.remove(ymlPath);
+        console.log(chalk.gray(`    - Removed empty application.yml after cleaning contexa settings`));
+      } else {
+        const out = yaml.dump(rootObj, { lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"' });
+        await fs.writeFile(ymlPath, out, 'utf8');
+        console.log(chalk.gray(`    - Cleaned contexa configuration block from application.yml`));
+      }
+    }
+  } catch (err) {
+    // Ignore parse errors on corrupted files
+  }
+}
+
 module.exports = function (program) {
   program
     .command('reset')
@@ -54,6 +108,7 @@ module.exports = function (program) {
 
       const projectDir = path.resolve(opts.dir);
       const projectName = resolveProjectName();
+      const project = await detectSpringProject(projectDir);
 
       let runSimulate = !!opts.simulate;
       let runInfra = !!opts.infra;
@@ -116,7 +171,7 @@ module.exports = function (program) {
               // Ignore
             }
           }
-          // 프로젝트 루트 디렉토리에서 docker-compose.yml 검색 및 종료
+          // 프로젝트 루트 디렉토리에서 docker-compose.yml 검색 및 종료 (디렉토리 프로젝트 자동 매핑)
           if (fs.existsSync(path.join(projectDir, 'docker-compose.yml'))) {
             try {
               dockerCompose(['down', '-v'], { cwd: projectDir, stdio: 'ignore' });
@@ -170,6 +225,16 @@ module.exports = function (program) {
           s2.succeed(t('reset.restoringFiles') || 'Backup files restored.');
         } else {
           s2.info(t('reset.noBackup') || 'No backup files found.');
+        }
+
+        // --- 백업본이 없어도 의존성과 설정 코드를 강제 클린업(Clean)하는 Idempotent Cleanup 단계 ---
+        const buildPath = project.buildFilePath 
+          || (fs.existsSync(path.join(projectDir, 'pom.xml')) ? path.join(projectDir, 'pom.xml')
+             : path.join(projectDir, 'build.gradle'));
+
+        await cleanupBuildFile(buildPath);
+        if (fs.existsSync(ymlPath)) {
+          await cleanupYmlFile(ymlPath);
         }
       }
 
