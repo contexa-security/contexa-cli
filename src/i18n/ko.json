@@ -141,5 +141,8 @@
   "reset.noBackup": "복원할 백업 파일(.bak)이 발견되지 않았습니다.",
   "prompt.setupMode": "통합 설정을 어떻게 시작하시겠습니까?",
   "prompt.setupMode.quick": "퀵 스타트 (Quick Start)    - 가장 안전한 권장 기본값으로 초고속 셋업 (기본값)",
-  "prompt.setupMode.advanced": "고급 커스텀 (Advanced Setup) - LLM, 통합모드, 인프라 등 모든 옵션 직접 선택"
+  "prompt.setupMode.advanced": "고급 커스텀 (Advanced Setup) - LLM, 통합모드, 인프라 등 모든 옵션 직접 선택",
+  "prompt.ollama.quick": "로컬 Ollama LLM을 사용하시겠습니까? (API 키 불필요, 별도 설치 필요)",
+  "prompt.ollama.quick.no":  "아니오 - OpenAI / Anthropic 클라우드 API 사용 (기본)",
+  "prompt.ollama.quick.yes": "예     - Ollama 로컬 LLM 추가  → 설치 후 'contexa ollama pull' 실행"
 }

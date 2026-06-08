@@ -262,6 +262,11 @@ module.exports = function (program) {
       // line above every question. inquirer's rawlist also leaves a blank line
       // after the answer naturally, giving a consistent breathing-room layout
       // (asked for explicitly by the operator).
+      if (opts.simulate) {
+        console.log(chalk.cyan('\n  i --simulate 플래그가 감지되었습니다. 인프라 설정이 자동으로 결정됩니다.'));
+        console.log(chalk.gray('    분산 인프라 (PostgreSQL + Redis + Kafka + Ollama) 를 설치합니다.\n'));
+      }
+
       const answers = opts.yes ? defaults : await inquirer.prompt([
         {
           type: 'rawlist', name: 'setupMode',
@@ -271,6 +276,7 @@ module.exports = function (program) {
             { name: t('prompt.setupMode.quick'),    value: 'quick' },
             { name: t('prompt.setupMode.advanced'), value: 'advanced' },
           ],
+          when: !opts.simulate,
         },
         {
           type: 'rawlist', name: 'integrationMode',
@@ -363,14 +369,29 @@ module.exports = function (program) {
             return infra !== 'skip' && project.hasDocker && opts.docker !== false;
           },
         },
+        // Quick Start 전용: Ollama 사용 여부 한 줄 질문
+        // Advanced 모드는 기존 llmProviders checkbox 에서 Ollama를 직접 선택.
+        // --simulate / --include-ollama 플래그가 이미 있으면 묻지 않는다.
+        {
+          type: 'rawlist', name: 'includeOllamaQuick',
+          message: '\n' + t('prompt.ollama.quick'),
+          default: 1,
+          choices: [
+            { name: t('prompt.ollama.quick.no'),  value: false },
+            { name: t('prompt.ollama.quick.yes'), value: true  },
+          ],
+          when: a => a.setupMode === 'quick' && !opts.simulate && !opts.includeOllama,
+        },
       ]);
 
       // Resolve final setup configuration based on chosen track
-      if (answers.setupMode === 'quick' || opts.yes) {
+      if (answers.setupMode === 'quick' || opts.yes || opts.simulate) {
         answers.integrationMode = explicitIntegrationMode || 'merge';
         answers.securityMode = 'full';
         answers.mode = 'shadow';
-        answers.llmProviders = opts.includeOllama ? ['openai', 'anthropic', 'ollama'] : ['openai', 'anthropic'];
+        // Quick Start: --include-ollama 플래그 > 프롬프트 답변 > 기본값(없음) 순으로 결정
+        const wantsOllama = opts.includeOllama || answers.includeOllamaQuick === true;
+        answers.llmProviders = wantsOllama ? ['openai', 'anthropic', 'ollama'] : ['openai', 'anthropic'];
         answers.infra = opts.distributed ? 'distributed' : 'skip';
         answers.startDocker = opts.docker !== false;
       } else {
@@ -612,34 +633,59 @@ module.exports = function (program) {
               const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
               if (!isValidOllamaModel(chatModel)) throw new Error(`Invalid OLLAMA_CHAT_MODEL value: ${chatModel}`);
               if (!isValidOllamaModel(embedModel)) throw new Error(`Invalid OLLAMA_EMBEDDING_MODEL value: ${embedModel}`);
-              const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
-              const s5 = ora(t('step.pullingChat', chatModel)).start();
-              try {
-                let ready = false;
-                const deadlineMs = Date.now() + 90000; // 90s absolute cap
-                while (!ready && Date.now() < deadlineMs) {
-                  const probe = dockerTry(
-                    ['exec', ollamaContainer, 'curl', '-sf', 'http://localhost:11434/api/tags'],
-                    { stdio: 'ignore', timeout: 3000 }
-                  );
-                  if (!probe.error && probe.status === 0) { ready = true; break; }
-                  await sleep(2000);
-                }
 
-                if (ready) {
-                  await pullOllamaModelWithProgress(ollamaPort, chatModel, s5, t('step.pullingChat', chatModel).replace('...', ''));
-                  s5.succeed(t('step.chatPulled', chatModel));
+              // Ollama 모델 다운로드 확인 — 수 분~수십 분 소요될 수 있음
+              let shouldPullOllama = true;
+              if (!opts.yes) {
+                const ollamaAns = await inquirer.prompt([{
+                  type: 'confirm',
+                  name: 'pullOllama',
+                  message:
+                    `\n  Ollama LLM 모델을 지금 다운로드하시겠습니까?\n` +
+                    `    · ${chatModel} (약 4.7 GB)\n` +
+                    `    · ${embedModel} (약 670 MB)\n` +
+                    chalk.yellow(`    소요 시간: 네트워크 속도에 따라 수 분 ~ 수십 분 소요\n`) +
+                    chalk.gray(`    나중에 수동 실행: docker exec ${ollamaContainer} ollama pull ${chatModel}`),
+                  default: true,
+                }]);
+                shouldPullOllama = ollamaAns.pullOllama;
+              }
 
-                  const s6 = ora(t('step.pullingEmbedding', embedModel)).start();
-                  await pullOllamaModelWithProgress(ollamaPort, embedModel, s6, t('step.pullingEmbedding', embedModel).replace('...', ''));
-                  s6.succeed(t('step.embeddingPulled'));
-                } else {
-                  s5.warn(t('step.ollamaNotReady', chatModel));
+              if (!shouldPullOllama) {
+                console.log(chalk.yellow('\n  ! Ollama 모델 다운로드를 건너뜁니다.'));
+                console.log(chalk.gray('    나중에 아래 명령어로 실행하세요:'));
+                console.log(chalk.cyan('    contexa ollama pull'));
+                console.log(chalk.gray('    (실행 중인 Ollama 컨테이너를 자동 감지하여 모델을 다운로드합니다)'));
+              } else {
+                const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
+                const s5 = ora(t('step.pullingChat', chatModel)).start();
+                try {
+                  let ready = false;
+                  const deadlineMs = Date.now() + 90000; // 90s absolute cap
+                  while (!ready && Date.now() < deadlineMs) {
+                    const probe = dockerTry(
+                      ['exec', ollamaContainer, 'curl', '-sf', 'http://localhost:11434/api/tags'],
+                      { stdio: 'ignore', timeout: 3000 }
+                    );
+                    if (!probe.error && probe.status === 0) { ready = true; break; }
+                    await sleep(2000);
+                  }
+
+                  if (ready) {
+                    await pullOllamaModelWithProgress(ollamaPort, chatModel, s5, t('step.pullingChat', chatModel).replace('...', ''));
+                    s5.succeed(t('step.chatPulled', chatModel));
+
+                    const s6 = ora(t('step.pullingEmbedding', embedModel)).start();
+                    await pullOllamaModelWithProgress(ollamaPort, embedModel, s6, t('step.pullingEmbedding', embedModel).replace('...', ''));
+                    s6.succeed(t('step.embeddingPulled'));
+                  } else {
+                    s5.warn(t('step.ollamaNotReady', chatModel));
+                    console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
+                  }
+                } catch (e) {
+                  s5.warn(t('step.modelPullFailed', chatModel));
                   console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
                 }
-              } catch (e) {
-                s5.warn(t('step.modelPullFailed', chatModel));
-                console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
               }
             }
           } catch (e) {

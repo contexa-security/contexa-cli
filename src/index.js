@@ -51,6 +51,7 @@ require('./commands/scan')(program);
 require('./commands/simulate')(program);
 require('./commands/doctor')(program);
 require('./commands/reset')(program);
+require('./commands/ollama')(program);
 
 program.parse(process.argv);
 

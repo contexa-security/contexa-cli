@@ -141,5 +141,8 @@
   "reset.noBackup": "No backup files (.bak) found.",
   "prompt.setupMode": "Choose setup mode:",
   "prompt.setupMode.quick": "Quick Start    - Setup in seconds with recommended defaults (Default)",
-  "prompt.setupMode.advanced": "Advanced Setup - Select LLM, integration mode, and infra manually"
+  "prompt.setupMode.advanced": "Advanced Setup - Select LLM, integration mode, and infra manually",
+  "prompt.ollama.quick": "Use local Ollama LLM? (No API key required, requires separate installation)",
+  "prompt.ollama.quick.no":  "No  - Use OpenAI / Anthropic cloud APIs (Default)",
+  "prompt.ollama.quick.yes": "Yes - Add local Ollama  → run 'contexa ollama pull' after install"
 }
