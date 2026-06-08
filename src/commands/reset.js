@@ -4,7 +4,7 @@ const chalk = require('chalk');
 const ora = require('ora');
 const path = require('path');
 const fs = require('fs-extra');
-const { Option } = require('commander');
+const inquirer = require('inquirer');
 const { dockerCompose, isDockerCliInstalled } = require('../core/docker');
 const { resolveProjectName, osDefaultInfraDir, resolveInfraDir } = require('../core/project');
 const { t } = require('../core/i18n');
@@ -43,6 +43,10 @@ module.exports = function (program) {
     .command('reset')
     .description(t('reset.description') || 'Reset Contexa configuration, container stack, and restore backed-up files')
     .option('--dir <path>', 'Project directory', process.cwd())
+    .option('-s, --simulate', 'Reset only simulation (ctxa-sim) Docker stack and cache')
+    .option('-i, --infra', 'Reset only project-specific Docker stack')
+    .option('-c, --code', 'Restore only project source code and settings from backups')
+    .option('-a, --all', 'Force reset all components (code, project infra, and simulation stack)')
     .action(async (opts) => {
       console.log(chalk.cyan(`\n  =============================================`));
       console.log(chalk.cyan(`  ${t('reset.starting') || 'Starting Contexa Reset...'}`));
@@ -51,84 +55,140 @@ module.exports = function (program) {
       const projectDir = path.resolve(opts.dir);
       const projectName = resolveProjectName();
 
+      let runSimulate = !!opts.simulate;
+      let runInfra = !!opts.infra;
+      let runCode = !!opts.code;
+      let runAll = !!opts.all;
+
+      // 옵션이 전혀 지정되지 않은 경우 대화형 체크박스 질문 노출
+      if (!runSimulate && !runInfra && !runCode && !runAll) {
+        const answers = await inquirer.prompt([
+          {
+            type: 'checkbox',
+            name: 'targets',
+            message: t('reset.prompt.targets') || 'Choose targets to reset:',
+            choices: [
+              { name: t('reset.target.code') || 'Restore project source code & settings from backups', value: 'code', checked: true },
+              { name: t('reset.target.infra') || 'Remove project-specific Docker infrastructure', value: 'infra', checked: true },
+              { name: t('reset.target.simulate') || 'Remove simulation (ctxa-sim) Docker infrastructure', value: 'simulate', checked: false }
+            ]
+          }
+        ]);
+
+        if (!answers.targets || answers.targets.length === 0) {
+          console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget') || 'No targets selected. Aborting reset.'}`));
+          console.log('');
+          process.exit(0);
+        }
+
+        runCode = answers.targets.includes('code');
+        runInfra = answers.targets.includes('infra');
+        runSimulate = answers.targets.includes('simulate');
+      } else if (runAll) {
+        runCode = true;
+        runInfra = true;
+        runSimulate = true;
+      }
+
       // 1. Stop and Remove Docker containers
-      if (isDockerCliInstalled()) {
+      if (isDockerCliInstalled() && (runSimulate || runInfra)) {
         const s1 = ora(t('reset.stoppingContainers') || 'Stopping and removing Docker containers...').start();
         
         // 1a. Clean simulation project (ctxa-sim)
-        const simInfraDir = resolveInfraDir('ctxa-sim');
-        if (fs.existsSync(path.join(simInfraDir, 'docker-compose.yml'))) {
-          try {
-            dockerCompose(['-p', 'ctxa-sim', 'down', '-v'], { cwd: simInfraDir, stdio: 'ignore' });
-          } catch (e) {
-            // Ignore down failures if container already stopped/removed
+        if (runSimulate) {
+          const simInfraDir = resolveInfraDir('ctxa-sim');
+          if (fs.existsSync(path.join(simInfraDir, 'docker-compose.yml'))) {
+            try {
+              dockerCompose(['-p', 'ctxa-sim', 'down', '-v'], { cwd: simInfraDir, stdio: 'ignore' });
+            } catch (e) {
+              // Ignore down failures if container already stopped/removed
+            }
           }
         }
 
         // 1b. Clean default project contexa stack
-        const defaultInfraDir = resolveInfraDir(projectName);
-        if (fs.existsSync(path.join(defaultInfraDir, 'docker-compose.yml'))) {
-          try {
-            dockerCompose(['-p', projectName, 'down', '-v'], { cwd: defaultInfraDir, stdio: 'ignore' });
-          } catch (e) {
-            // Ignore
+        if (runInfra) {
+          const defaultInfraDir = resolveInfraDir(projectName);
+          if (fs.existsSync(path.join(defaultInfraDir, 'docker-compose.yml'))) {
+            try {
+              dockerCompose(['-p', projectName, 'down', '-v'], { cwd: defaultInfraDir, stdio: 'ignore' });
+            } catch (e) {
+              // Ignore
+            }
+          }
+          // 프로젝트 루트 디렉토리에서 docker-compose.yml 검색 및 종료
+          if (fs.existsSync(path.join(projectDir, 'docker-compose.yml'))) {
+            try {
+              dockerCompose(['down', '-v'], { cwd: projectDir, stdio: 'ignore' });
+            } catch (e) {
+              // Ignore
+            }
           }
         }
         
         s1.succeed(t('reset.stoppingContainers') || 'Docker containers stopped and removed.');
-      } else {
+      } else if (runSimulate || runInfra) {
         console.log(chalk.gray(`  i ${t('reset.noContainers') || 'Docker CLI not found. Skipping container cleanup.'}`));
       }
 
       // 2. Restore Backup Files (.bak)
-      const s2 = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
-      const backupFiles = findBackupFiles(projectDir);
-      
-      if (backupFiles.length > 0) {
-        for (const bakFile of backupFiles) {
-          const originalFile = bakFile.slice(0, -4); // Remove '.bak'
-          try {
-            if (fs.existsSync(bakFile)) {
-              fs.copySync(bakFile, originalFile, { overwrite: true });
-              fs.removeSync(bakFile);
-              console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
+      if (runCode) {
+        const s2 = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
+        const backupFiles = findBackupFiles(projectDir);
+        
+        if (backupFiles.length > 0) {
+          for (const bakFile of backupFiles) {
+            const originalFile = bakFile.slice(0, -4); // Remove '.bak'
+            try {
+              if (fs.existsSync(bakFile)) {
+                fs.copySync(bakFile, originalFile, { overwrite: true });
+                fs.removeSync(bakFile);
+                console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
+              }
+            } catch (err) {
+              console.log(chalk.red(`    x Failed to restore ${path.basename(originalFile)}: ${err.message}`));
             }
-          } catch (err) {
-            console.log(chalk.red(`    x Failed to restore ${path.basename(originalFile)}: ${err.message}`));
           }
+          s2.succeed(t('reset.restoringFiles') || 'Backup files restored.');
+        } else {
+          s2.info(t('reset.noBackup') || 'No backup files found.');
         }
-        s2.succeed(t('reset.restoringFiles') || 'Backup files restored.');
-      } else {
-        s2.info(t('reset.noBackup') || 'No backup files found.');
       }
 
       // 3. Remove Standalone folder if exists
-      const standalonePath = path.join(projectDir, 'contexa');
-      if (fs.existsSync(standalonePath)) {
-        const s3 = ora(t('reset.removingDir') || 'Removing Contexa directories...').start();
-        try {
-          fs.removeSync(standalonePath);
-          s3.succeed(`${t('reset.restoredStandalone') || 'Removed Standalone output folder'}: ${standalonePath}`);
-        } catch (err) {
-          s3.fail(`Failed to remove standalone folder: ${err.message}`);
+      if (runCode) {
+        const standalonePath = path.join(projectDir, 'contexa');
+        if (fs.existsSync(standalonePath)) {
+          const s3 = ora(t('reset.removingDir') || 'Removing Contexa directories...').start();
+          try {
+            fs.removeSync(standalonePath);
+            s3.succeed(`${t('reset.restoredStandalone') || 'Removed Standalone output folder'}: ${standalonePath}`);
+          } catch (err) {
+            s3.fail(`Failed to remove standalone folder: ${err.message}`);
+          }
         }
       }
 
       // 4. Remove infrastructure cache/config directories (Contexa owned)
-      const s4 = ora(t('reset.removingDir') || 'Cleaning Contexa owned cache/config...').start();
-      try {
-        const simCacheDir = osDefaultInfraDir('ctxa-sim');
-        const defaultCacheDir = osDefaultInfraDir(projectName);
-        
-        if (fs.existsSync(simCacheDir)) {
-          fs.removeSync(simCacheDir);
+      if (runSimulate || runInfra) {
+        const s4 = ora(t('reset.removingDir') || 'Cleaning Contexa owned cache/config...').start();
+        try {
+          if (runSimulate) {
+            const simCacheDir = osDefaultInfraDir('ctxa-sim');
+            if (fs.existsSync(simCacheDir)) {
+              fs.removeSync(simCacheDir);
+            }
+          }
+          if (runInfra) {
+            const defaultCacheDir = osDefaultInfraDir(projectName);
+            if (fs.existsSync(defaultCacheDir)) {
+              fs.removeSync(defaultCacheDir);
+            }
+          }
+          s4.succeed(t('reset.removingDir') || 'Contexa directories cleaned.');
+        } catch (err) {
+          s4.fail(`Failed to clean Contexa directories: ${err.message}`);
         }
-        if (fs.existsSync(defaultCacheDir)) {
-          fs.removeSync(defaultCacheDir);
-        }
-        s4.succeed(t('reset.removingDir') || 'Contexa directories cleaned.');
-      } catch (err) {
-        s4.fail(`Failed to clean Contexa directories: ${err.message}`);
       }
 
       console.log(chalk.green(`\n  v ${t('reset.success') || 'Contexa reset successfully completed.'}\n`));

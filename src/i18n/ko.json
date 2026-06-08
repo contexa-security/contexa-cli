@@ -144,5 +144,10 @@
   "prompt.setupMode.advanced": "고급 커스텀 (Advanced Setup) - LLM, 통합모드, 인프라 등 모든 옵션 직접 선택",
   "prompt.ollama.quick": "로컬 Ollama LLM을 사용하시겠습니까? (API 키 불필요, 별도 설치 필요)",
   "prompt.ollama.quick.no":  "아니오 - OpenAI / Anthropic 클라우드 API 사용 (기본)",
-  "prompt.ollama.quick.yes": "예     - Ollama 로컬 LLM 추가  → 설치 후 'contexa ollama pull' 실행"
+  "prompt.ollama.quick.yes": "예     - Ollama 로컬 LLM 추가  → 설치 후 'contexa ollama pull' 실행",
+  "reset.prompt.targets": "초기화(리셋)할 대상을 선택하세요:",
+  "reset.target.code": "프로젝트 소스코드 및 설정 원복",
+  "reset.target.infra": "프로젝트 전용 Docker 인프라 삭제",
+  "reset.target.simulate": "격리 시뮬레이션(ctxa-sim) Docker 인프라 삭제",
+  "reset.error.noTarget": "선택된 리셋 대상이 없습니다. 작업을 취소합니다."
 }
