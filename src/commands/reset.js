@@ -203,30 +203,83 @@ async function cleanupYmlFile(ymlPath) {
 
       // Cleanup spring.data.redis configurations injected by contexa
       if (rootObj.spring && rootObj.spring.data && rootObj.spring.data.redis) {
-        deleteIfMatch(rootObj, ['spring', 'data', 'redis', 'host'], val => val === '${CONTEXA_REDIS_HOST:localhost}');
-        deleteIfMatch(rootObj, ['spring', 'data', 'redis', 'port'], val => val === '${CONTEXA_REDIS_PORT:26379}' || val === '${CONTEXA_REDIS_PORT:6379}');
-        changed = true;
+        const redis = rootObj.spring.data.redis;
+        const host = String(redis.host || '').toLowerCase();
+        const port = String(redis.port || '');
+        if (
+          host.includes('localhost') || 
+          host.includes('contexa') || 
+          port === '6379' || 
+          port === '26379' || 
+          port.includes('CONTEXA_REDIS_PORT')
+        ) {
+          delete rootObj.spring.data.redis;
+          if (Object.keys(rootObj.spring.data).length === 0) {
+            delete rootObj.spring.data;
+          }
+          changed = true;
+        }
       }
 
       // Cleanup spring.kafka configurations injected by contexa
       if (rootObj.spring && rootObj.spring.kafka) {
-        deleteIfMatch(rootObj, ['spring', 'kafka', 'bootstrap-servers'], val => typeof val === 'string' && val.includes('CONTEXA_KAFKA_SERVERS'));
-        changed = true;
+        const kafka = rootObj.spring.kafka;
+        const servers = String(kafka['bootstrap-servers'] || '');
+        if (
+          servers.includes('localhost:9092') ||
+          servers.includes('localhost:29092') ||
+          servers.includes('CONTEXA_KAFKA_SERVERS')
+        ) {
+          delete rootObj.spring.kafka;
+          changed = true;
+        }
       }
 
       // Cleanup spring.ai configurations injected by contexa
       if (rootObj.spring && rootObj.spring.ai) {
-        deleteIfMatch(rootObj, ['spring', 'ai', 'retry', 'max-attempts'], val => val === 1);
-        deleteIfMatch(rootObj, ['spring', 'ai', 'openai', 'api-key'], val => val === '${OPENAI_API_KEY:disabled}');
-        deleteIfMatch(rootObj, ['spring', 'ai', 'openai'], val => Object.keys(val).length === 0 || (val.chat && val.chat.options && val.chat.options.model === 'gpt-5-nano'));
-        deleteIfMatch(rootObj, ['spring', 'ai', 'anthropic', 'api-key'], val => val === '${ANTHROPIC_API_KEY:disabled}');
-        deleteIfMatch(rootObj, ['spring', 'ai', 'anthropic'], val => Object.keys(val).length === 0 || (val.chat && val.chat.options && val.chat.options.model === 'claude-3-sonnet-20240229'));
+        delete rootObj.spring.ai;
         changed = true;
+      }
+
+      // Cleanup spring.datasource & spring.jpa configurations if they match contexa
+      if (rootObj.spring && rootObj.spring.datasource) {
+        const ds = rootObj.spring.datasource;
+        const url = String(ds.url || '');
+        const username = String(ds.username || '');
+        if (
+          url.includes('contexa') || 
+          url.includes('contexa_sim') || 
+          url.includes('5432') || 
+          url.includes('25432') ||
+          username.includes('contexa') ||
+          username.includes('contexa_sim')
+        ) {
+          delete rootObj.spring.datasource;
+          if (rootObj.spring.jpa) {
+            delete rootObj.spring.jpa;
+          }
+          changed = true;
+        }
       }
 
       // Cleanup management.metrics.enable.lettuce configurations injected by contexa
       if (rootObj.management && rootObj.management.metrics) {
         deleteIfMatch(rootObj, ['management', 'metrics', 'enable', 'lettuce'], val => val === false);
+        if (rootObj.management.prometheus && rootObj.management.prometheus.metrics) {
+          deleteIfMatch(rootObj, ['management', 'prometheus', 'metrics', 'export', 'exemplars', 'enabled'], val => val === false);
+        }
+        if (rootObj.management.metrics.enable && Object.keys(rootObj.management.metrics.enable).length === 0) {
+          delete rootObj.management.metrics.enable;
+        }
+        if (Object.keys(rootObj.management.metrics).length === 0) {
+          delete rootObj.management.metrics;
+        }
+        if (rootObj.management.prometheus && rootObj.management.prometheus.metrics && Object.keys(rootObj.management.prometheus.metrics).length === 0) {
+          delete rootObj.management.prometheus.metrics;
+        }
+        if (rootObj.management.prometheus && Object.keys(rootObj.management.prometheus).length === 0) {
+          delete rootObj.management.prometheus;
+        }
         changed = true;
       }
 
@@ -254,6 +307,48 @@ async function cleanupYmlFile(ymlPath) {
     }
   } catch (err) {
     // Ignore parse errors on corrupted files
+  }
+}
+// Clean up @EnableAISecurity annotation and its imports from java source files
+async function cleanupJavaFiles(projectDir) {
+  const javaDir = path.join(projectDir, 'src/main/java');
+  if (!fs.existsSync(javaDir)) return;
+
+  async function walk(dir) {
+    const list = await fs.readdir(dir);
+    for (const file of list) {
+      const fullPath = path.join(dir, file);
+      const stat = await fs.stat(fullPath);
+      if (stat.isDirectory()) {
+        await walk(fullPath);
+      } else if (file.endsWith('.java')) {
+        let content = await fs.readFile(fullPath, 'utf8');
+        let changed = false;
+
+        const importRegex = /import\s+io\.contexa\.[\w.]*EnableAISecurity\s*;\r?\n?/g;
+        if (importRegex.test(content)) {
+          content = content.replace(importRegex, '');
+          changed = true;
+        }
+
+        const annotationRegex = /@EnableAISecurity(\s*\([^)]*\))?\r?\n?/g;
+        if (annotationRegex.test(content)) {
+          content = content.replace(annotationRegex, '');
+          changed = true;
+        }
+
+        if (changed) {
+          await fs.writeFile(fullPath, content, 'utf8');
+          console.log(chalk.gray(`    - Removed @EnableAISecurity and imports from ${path.basename(fullPath)}`));
+        }
+      }
+    }
+  }
+
+  try {
+    await walk(javaDir);
+  } catch (err) {
+    // Ignore walk errors
   }
 }
 
@@ -478,6 +573,7 @@ module.exports = function (program) {
         if (fs.existsSync(ymlPath) && !restoredOriginals.has(path.resolve(ymlPath))) {
           await cleanupYmlFile(ymlPath);
         }
+        await cleanupJavaFiles(projectDir);
       }
 
       // 3. Remove Standalone folder if exists
