@@ -88,6 +88,41 @@ async function cleanupBuildFile(buildPath) {
       content = content.replace(redisRegex, '');
       changed = true;
     }
+    // 5. spring-ai-bom
+    const bomRegex = /<dependency>\s*<groupId>org\.springframework\.ai<\/groupId>\s*<artifactId>spring-ai-bom<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (bomRegex.test(content)) {
+      content = content.replace(bomRegex, '');
+      changed = true;
+    }
+    const emptyMgmtRegex = /<dependencyManagement>\s*<dependencies>\s*<\/dependencies>\s*<\/dependencyManagement>\s*/gi;
+    if (emptyMgmtRegex.test(content)) {
+      content = content.replace(emptyMgmtRegex, '');
+      changed = true;
+    }
+    // 6. spring-ai-starter-model-openai
+    const aiOpenaiRegex = /<dependency>\s*<groupId>org\.springframework\.ai<\/groupId>\s*<artifactId>spring-ai-starter-model-openai<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (aiOpenaiRegex.test(content)) {
+      content = content.replace(aiOpenaiRegex, '');
+      changed = true;
+    }
+    // 7. spring-ai-starter-model-anthropic
+    const aiAnthropicRegex = /<dependency>\s*<groupId>org\.springframework\.ai<\/groupId>\s*<artifactId>spring-ai-starter-model-anthropic<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (aiAnthropicRegex.test(content)) {
+      content = content.replace(aiAnthropicRegex, '');
+      changed = true;
+    }
+    // 8. spring-ai-starter-model-ollama
+    const aiOllamaRegex = /<dependency>\s*<groupId>org\.springframework\.ai<\/groupId>\s*<artifactId>spring-ai-starter-model-ollama<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (aiOllamaRegex.test(content)) {
+      content = content.replace(aiOllamaRegex, '');
+      changed = true;
+    }
+    // 9. spring-ai-starter-vector-store-pgvector
+    const aiPgvectorRegex = /<dependency>\s*<groupId>org\.springframework\.ai<\/groupId>\s*<artifactId>spring-ai-starter-vector-store-pgvector<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (aiPgvectorRegex.test(content)) {
+      content = content.replace(aiPgvectorRegex, '');
+      changed = true;
+    }
   } else {
     // Gradle build.gradle / build.gradle.kts
     // 1. spring-boot-starter-contexa
@@ -112,6 +147,36 @@ async function cleanupBuildFile(buildPath) {
     const redisRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.boot:spring-boot-starter-data-redis[^'"]*['"]\s*\)?\s*/g;
     if (redisRegex.test(content)) {
       content = content.replace(redisRegex, '\n');
+      changed = true;
+    }
+    // 5. spring-ai-bom
+    const bomRegex = /\s*implementation\s*\(?\s*platform\s*\(?\s*['"]org\.springframework\.ai:spring-ai-bom:[^'"]+['"]\s*\)?\s*\)?\s*/g;
+    if (bomRegex.test(content)) {
+      content = content.replace(bomRegex, '\n');
+      changed = true;
+    }
+    // 6. spring-ai-starter-model-openai
+    const aiOpenaiRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.ai:spring-ai-starter-model-openai[^'"]*['"]\s*\)?\s*/g;
+    if (aiOpenaiRegex.test(content)) {
+      content = content.replace(aiOpenaiRegex, '\n');
+      changed = true;
+    }
+    // 7. spring-ai-starter-model-anthropic
+    const aiAnthropicRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.ai:spring-ai-starter-model-anthropic[^'"]*['"]\s*\)?\s*/g;
+    if (aiAnthropicRegex.test(content)) {
+      content = content.replace(aiAnthropicRegex, '\n');
+      changed = true;
+    }
+    // 8. spring-ai-starter-model-ollama
+    const aiOllamaRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.ai:spring-ai-starter-model-ollama[^'"]*['"]\s*\)?\s*/g;
+    if (aiOllamaRegex.test(content)) {
+      content = content.replace(aiOllamaRegex, '\n');
+      changed = true;
+    }
+    // 9. spring-ai-starter-vector-store-pgvector
+    const aiPgvectorRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.ai:spring-ai-starter-vector-store-pgvector[^'"]*['"]\s*\)?\s*/g;
+    if (aiPgvectorRegex.test(content)) {
+      content = content.replace(aiPgvectorRegex, '\n');
       changed = true;
     }
   }
