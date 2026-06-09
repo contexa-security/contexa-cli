@@ -403,6 +403,7 @@ module.exports = function (program) {
         answers.startDocker = opts.docker !== false && answers.startDocker !== false;
       }
 
+      answers.simulate = !!opts.simulate;
       answers.injectDep = true;
       if (opts.distributed) answers.infra = 'distributed';
       if (opts.docker === false) answers.startDocker = false;

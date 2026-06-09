@@ -23,8 +23,8 @@ const LEGACY_MARKER_END   = '# --- End Contexa ---';
 // Build the contexa.* sub-tree this CLI version is responsible for.
 // The shape mirrors the @ConfigurationProperties surface in the platform.
 // Returned tree is a fresh object the caller can mutate freely.
-function buildCliContexaTree(opts) {
-  const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone' } = opts;
+function buildCliContexaTree(opts = {}) {
+  const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone', simulate = false } = opts;
   const priority = llmProviders.join(',');
   // Embedding priority excludes both 'anthropic' (no embedding model in Spring AI)
   // and 'ollama' (default Ollama embedding models are 1024 / 768 dim and would
@@ -32,6 +32,13 @@ function buildCliContexaTree(opts) {
   // path on a single 1536-dim provider regardless of which chat providers the
   // operator selected.
   const embeddingPriority = llmProviders.filter(p => p !== 'anthropic' && p !== 'ollama').join(',') || 'openai';
+
+  const isSimulate = !!simulate;
+  const dbPort = isSimulate ? '25432' : '5432';
+  const dbName = isSimulate ? 'contexa_sim' : 'contexa';
+  const dbUser = isSimulate ? 'contexa_sim' : 'contexa';
+  const dbPass = isSimulate ? 'contexa_sim_pw' : 'contexa1234!@#';
+  const ollamaPort = isSimulate ? '31434' : '11434';
 
   const tree = {
     llm: {
@@ -43,9 +50,9 @@ function buildCliContexaTree(opts) {
       },
     },
     datasource: {
-      url: '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}',
-      username: '${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa}}',
-      password: '${CONTEXA_DB_PASSWORD:${DB_PASSWORD:contexa1234!@#}}',
+      url: `\${CONTEXA_DB_URL:\${DB_URL:jdbc:postgresql://localhost:${dbPort}/${dbName}}}`,
+      username: `\${CONTEXA_DB_USERNAME:\${DB_USERNAME:${dbUser}}}`,
+      password: `\${CONTEXA_DB_PASSWORD:\${DB_PASSWORD:${dbPass}}}`,
       'driver-class-name': '${CONTEXA_DB_DRIVER:org.postgresql.Driver}',
       isolation: { 'contexa-owned-application': true },
     },
@@ -56,6 +63,24 @@ function buildCliContexaTree(opts) {
       geoip: { enabled: true, dbPath: 'data/GeoLite2-City.mmdb' },
     },
   };
+
+  if (llmProviders.includes('ollama')) {
+    tree.llm.chat = {
+      ollama: {
+        baseUrl: `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
+        model: '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}',
+        keepAlive: '${CONTEXA_OLLAMA_CHAT_KEEP_ALIVE:30m}',
+      }
+    };
+    tree.llm.embedding = {
+      ollama: {
+        dedicatedRuntimeEnabled: false,
+        model: '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}',
+        dimensions: '${CONTEXA_EMBEDDING_OLLAMA_DIMENSIONS:1024}',
+      }
+    };
+  }
+
   if (infra === 'distributed') {
     tree.infrastructure = { mode: 'DISTRIBUTED' };
   }
@@ -119,6 +144,47 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
 
   if (opts.infra === 'distributed') {
     setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
+  }
+
+  // Inject spring.ai configurations for openai/anthropic if selected and not already configured
+  const { llmProviders = ['openai', 'anthropic'] } = opts;
+  if (llmProviders.includes('openai') || llmProviders.includes('anthropic')) {
+    if (!rootObj.spring) rootObj.spring = {};
+    if (!rootObj.spring.ai) rootObj.spring.ai = {};
+
+    if (!rootObj.spring.ai.retry) rootObj.spring.ai.retry = {};
+    if (rootObj.spring.ai.retry['max-attempts'] === undefined) {
+      rootObj.spring.ai.retry['max-attempts'] = 1;
+    }
+
+    if (llmProviders.includes('openai') && !rootObj.spring.ai.openai) {
+      rootObj.spring.ai.openai = {
+        'api-key': '${OPENAI_API_KEY:disabled}',
+        'base-url': 'https://api.openai.com',
+        chat: {
+          options: {
+            model: 'gpt-5-nano'
+          }
+        },
+        embedding: {
+          options: {
+            model: 'text-embedding-3-small',
+            dimensions: 1024
+          }
+        }
+      };
+    }
+
+    if (llmProviders.includes('anthropic') && !rootObj.spring.ai.anthropic) {
+      rootObj.spring.ai.anthropic = {
+        'api-key': '${ANTHROPIC_API_KEY:disabled}',
+        chat: {
+          options: {
+            model: 'claude-3-sonnet-20240229'
+          }
+        }
+      };
+    }
   }
 }
 
