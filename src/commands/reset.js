@@ -201,17 +201,24 @@ module.exports = function (program) {
     .option('-i, --infra', 'Reset only project-specific Docker stack')
     .option('-c, --code', 'Restore only project source code and settings from backups')
     .option('-a, --all', 'Force reset all components (code, project infra, and simulation stack)')
+    .option('-y, --yes', 'Skip prompts, use defaults')
     .action(async (opts) => {
-      const confirmAnswer = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'proceed',
-          message: 'reset 명령어 실행 시 설치 전 상태로 모두 초기화 됩니다. 진행하시겠습니까?',
-          default: false
-        }
-      ]);
+      let proceed = false;
+      if (opts.yes) {
+        proceed = true;
+      } else {
+        const confirmAnswer = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'proceed',
+            message: 'reset 명령어 실행 시 설치 전 상태로 모두 초기화 됩니다. 진행하시겠습니까?',
+            default: false
+          }
+        ]);
+        proceed = confirmAnswer.proceed;
+      }
 
-      if (!confirmAnswer.proceed) {
+      if (!proceed) {
         console.log(chalk.yellow('\n  ! 작업을 취소했습니다.'));
         console.log('');
         process.exit(0);
@@ -230,30 +237,73 @@ module.exports = function (program) {
       let runCode = !!opts.code;
       let runAll = !!opts.all;
 
-      // 옵션이 전혀 지정되지 않은 경우 대화형 체크박스 질문 노출
+      // 옵션이 전혀 지정되지 않은 경우
       if (!runSimulate && !runInfra && !runCode && !runAll) {
-        const answers = await inquirer.prompt([
-          {
-            type: 'checkbox',
-            name: 'targets',
-            message: t('reset.prompt.targets') || 'Choose targets to reset:',
-            choices: [
-              { name: t('reset.target.code') || 'Restore project source code & settings from backups', value: 'code', checked: true },
-              { name: t('reset.target.infra') || 'Remove project-specific Docker infrastructure', value: 'infra', checked: true },
-              { name: t('reset.target.simulate') || 'Remove simulation (ctxa-sim) Docker infrastructure', value: 'simulate', checked: false }
-            ]
+        if (opts.yes) {
+          // 비대화형 옵션이 주어졌을 경우 프로젝트를 분석하여 안전하게 감지된 대상을 초기화합니다.
+          runCode = true;
+          
+          let isSimulateProject = false;
+          const ymlPath = path.join(projectDir, 'src/main/resources/application.yml');
+          if (fs.existsSync(ymlPath)) {
+            try {
+              const content = fs.readFileSync(ymlPath, 'utf8');
+              const rootObj = yaml.load(content);
+              if (rootObj && typeof rootObj === 'object') {
+                const dbUrl = (rootObj.contexa && rootObj.contexa.datasource && rootObj.contexa.datasource.url) || '';
+                const dbUsername = (rootObj.contexa && rootObj.contexa.datasource && rootObj.contexa.datasource.username) || '';
+                if (dbUrl.includes('25432') || dbUrl.includes('contexa_sim') || dbUsername === 'contexa_sim') {
+                  isSimulateProject = true;
+                }
+                const springDbUrl = (rootObj.spring && rootObj.spring.datasource && rootObj.spring.datasource.url) || '';
+                const springDbUsername = (rootObj.spring && rootObj.spring.datasource && rootObj.spring.datasource.username) || '';
+                if (springDbUrl.includes('25432') || springDbUrl.includes('contexa_sim') || springDbUsername === 'contexa_sim') {
+                  isSimulateProject = true;
+                }
+                const redisPort = (rootObj.spring && rootObj.spring.data && rootObj.spring.data.redis && rootObj.spring.data.redis.port) || '';
+                if (redisPort.toString().includes('26379')) {
+                  isSimulateProject = true;
+                }
+              }
+            } catch (e) {
+              // Ignore
+            }
           }
-        ]);
 
-        if (!answers.targets || answers.targets.length === 0) {
-          console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget') || 'No targets selected. Aborting reset.'}`));
-          console.log('');
-          process.exit(0);
+          if (isSimulateProject) {
+            runSimulate = true;
+            runInfra = false;
+            console.log(chalk.yellow('  i 시뮬레이션 설정이 감지되었습니다. 시뮬레이션 인프라(ctxa-sim)만 리셋합니다.'));
+          } else {
+            runSimulate = false;
+            runInfra = true;
+            console.log(chalk.cyan('  i 일반 환경 설정이 감지되었습니다. 일반 인프라만 리셋합니다.'));
+          }
+        } else {
+          // 대화형 일반 모드인 경우 사용자가 선택할 수 있는 체크박스를 띄웁니다.
+          const answers = await inquirer.prompt([
+            {
+              type: 'checkbox',
+              name: 'targets',
+              message: t('reset.prompt.targets') || 'Choose targets to reset:',
+              choices: [
+                { name: t('reset.target.code') || 'Restore project source code & settings from backups', value: 'code', checked: true },
+                { name: t('reset.target.infra') || 'Remove project-specific Docker infrastructure', value: 'infra', checked: true },
+                { name: t('reset.target.simulate') || 'Remove simulation (ctxa-sim) Docker infrastructure', value: 'simulate', checked: false }
+              ]
+            }
+          ]);
+
+          if (!answers.targets || answers.targets.length === 0) {
+            console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget') || 'No targets selected. Aborting reset.'}`));
+            console.log('');
+            process.exit(0);
+          }
+
+          runCode = answers.targets.includes('code');
+          runInfra = answers.targets.includes('infra');
+          runSimulate = answers.targets.includes('simulate');
         }
-
-        runCode = answers.targets.includes('code');
-        runInfra = answers.targets.includes('infra');
-        runSimulate = answers.targets.includes('simulate');
       } else if (runAll) {
         runCode = true;
         runInfra = true;
