@@ -423,6 +423,7 @@ module.exports = function (program) {
       }
 
       answers.simulate = !!opts.simulate;
+      answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
       answers.injectDep = true;
       if (opts.distributed) answers.infra = 'distributed';
       if (opts.docker === false) answers.startDocker = false;

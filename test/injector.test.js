@@ -106,7 +106,8 @@ test('injectYml: backs up existing file before modifying', async () => {
     const ymlPath = path.join(dir, 'application.yml');
     await fs.writeFile(ymlPath, 'server:\n  port: 8080\n');
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
-    assert.ok(await fs.pathExists(ymlPath + '.bak'));
+    const backupDest = path.join(dir, 'contexa', 'bak', 'application.yml');
+    assert.ok(await fs.pathExists(backupDest));
   } finally { await fs.remove(dir); }
 });
 
@@ -206,7 +207,7 @@ test('injectYml: emits contexa.hcad.geoip.enabled = true alongside dbPath', asyn
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.hcad.geoip.enabled, true,
       'enabled must be true so the dbPath actually takes effect (default in core is false)');
-    assert.equal(root.contexa.hcad.geoip.dbPath, 'data/GeoLite2-City.mmdb');
+    assert.equal(root.contexa.hcad.geoip.dbPath, 'contexa/data/GeoLite2-City.mmdb');
   } finally { await fs.remove(dir); }
 });
 
@@ -217,7 +218,7 @@ test('injectYml: emits contexa.llm.selection.* (new API) instead of deprecated c
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai');
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama,openai');
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'openai');
     assert.equal(root.contexa.llm.chatModelPriority, undefined,
       'deprecated key must not be re-introduced');
   } finally { await fs.remove(dir); }
@@ -365,7 +366,7 @@ test('generateInitDbScripts: legacy hardcoded 1234 hash is no longer present', a
 test('generateDockerCompose: binds ports to 127.0.0.1 by default', async () => {
   const dir = await tempDir();
   try {
-    await generateDockerCompose(dir, { infra: 'standalone' });
+    await generateDockerCompose(dir, { infra: 'standalone', includeOllama: true });
     const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
     assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_POSTGRES_PORT:-5432}:5432'));
     assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_OLLAMA_PORT:-11434}:11434'));
@@ -375,7 +376,7 @@ test('generateDockerCompose: binds ports to 127.0.0.1 by default', async () => {
 test('generateDockerCompose: container names and project name use CONTEXA_PROJECT prefix', async () => {
   const dir = await tempDir();
   try {
-    await generateDockerCompose(dir, { infra: 'distributed' });
+    await generateDockerCompose(dir, { infra: 'distributed', includeOllama: true });
     const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
     assert.ok(yml.includes('name: ${CONTEXA_PROJECT:-contexa}'));
     assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-postgres'));

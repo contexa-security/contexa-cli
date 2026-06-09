@@ -105,8 +105,8 @@ test('A6: triple LLM providers concatenate priorities in declared order', async 
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai', 'anthropic'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai,anthropic');
-    // anthropic has no embedding model in this CLI's curated list
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama,openai');
+    // anthropic and ollama have no embedding models in this CLI's curated list for embedding priority
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'openai');
   } finally { await fs.remove(dir); }
 });
 
@@ -383,7 +383,8 @@ test('F1: malformed yml fails with friendly multi-line guidance', async () => {
     assert.ok(caught, 'must throw on malformed yml');
     assert.match(caught.message, /How to fix/);
     assert.match(caught.message, /\.bak/);
-    assert.ok(await fs.pathExists(ymlPath + '.bak'), 'backup must still be created');
+    const backupDest = path.join(dir, 'contexa', 'bak', 'app.yml');
+    assert.ok(await fs.pathExists(backupDest), 'backup must still be created');
   } finally { await fs.remove(dir); }
 });
 
@@ -545,7 +546,7 @@ test('H1: distributed deps add redisson + spring-kafka to Maven', async () => {
 
 test('H2: distributed deps idempotent on Maven (already present)', async () => {
   const dir = await makeProject({
-    'pom.xml': `<project><dependencies>\n<dependency><groupId>org.springframework.kafka</groupId><artifactId>spring-kafka</artifactId></dependency>\n<dependency><groupId>org.redisson</groupId><artifactId>redisson</artifactId><version>3.48.0</version></dependency>\n</dependencies></project>`,
+    'pom.xml': `<project><dependencies>\n<dependency><groupId>org.springframework.kafka</groupId><artifactId>spring-kafka</artifactId></dependency>\n<dependency><groupId>org.redisson</groupId><artifactId>redisson</artifactId><version>3.48.0</version></dependency>\n<dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId></dependency>\n</dependencies></project>`,
   });
   try {
     const added = await injectDistributedDeps(path.join(dir, 'pom.xml'));

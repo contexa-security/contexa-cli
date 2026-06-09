@@ -159,7 +159,7 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
 
   // Inject spring.ai configurations for openai/anthropic if selected and not already configured
   const { llmProviders = ['openai', 'anthropic'] } = opts;
-  if (llmProviders.includes('openai') || llmProviders.includes('anthropic')) {
+  if ((opts.simulate || opts.hasEnableAiSecurity) && (llmProviders.includes('openai') || llmProviders.includes('anthropic'))) {
     if (!rootObj.spring) rootObj.spring = {};
     if (!rootObj.spring.ai) rootObj.spring.ai = {};
 
