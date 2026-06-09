@@ -551,15 +551,13 @@ module.exports = function (program) {
             ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
 
             // Spring AI provider starters and the pgvector vector-store starter
-            // are automatically added if the application declares @EnableAISecurity.
-            if (project.hasEnableAiSecurity) {
-              const startAiDep = process.hrtime.bigint();
-              const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
-              const addedAi = await injectSpringAiDeps(buildPath);
-              if (addedAi) buildChanged = true;
-              const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
-              addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
-            }
+            // are automatically added.
+            const startAiDep = process.hrtime.bigint();
+            const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
+            const addedAi = await injectSpringAiDeps(buildPath);
+            if (addedAi) buildChanged = true;
+            const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
+            addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
 
             if (answers.infra === 'distributed') {
               const startDistDep = process.hrtime.bigint();
