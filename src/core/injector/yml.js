@@ -46,7 +46,6 @@ function buildCliContexaTree(opts = {}) {
       // embeddingModelPriority on contexa.llm.* are intentionally NOT written.
       selection: {
         chat: { mode: 'dynamic-priority', priority },
-        embedding: { mode: 'dynamic-priority', priority: embeddingPriority },
       },
     },
     datasource: {
@@ -57,12 +56,16 @@ function buildCliContexaTree(opts = {}) {
       isolation: { 'contexa-owned-application': true },
     },
     security: {
-      zerotrust: { mode: mode === 'enforce' ? 'ENFORCE' : 'SHADOW' },
+      zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
     },
     hcad: {
       geoip: { enabled: true, dbPath: 'data/GeoLite2-City.mmdb' },
     },
   };
+
+  if (!isSimulate) {
+    tree.llm.selection.embedding = { mode: 'dynamic-priority', priority: embeddingPriority };
+  }
 
   if (llmProviders.includes('ollama')) {
     tree.llm.chat = {
@@ -130,17 +133,24 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
   fillOnly(rootObj.contexa, cliTree);
 
   setPath(rootObj.contexa, ['security', 'zerotrust', 'mode'],
-    opts.mode === 'enforce' ? 'ENFORCE' : 'SHADOW');
+    (opts.simulate || opts.mode === 'enforce') ? 'ENFORCE' : 'SHADOW');
   setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
   setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
   setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
     cliTree.llm.selection.chat.mode);
   setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
     cliTree.llm.selection.chat.priority);
-  setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
-    cliTree.llm.selection.embedding.mode);
-  setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
-    cliTree.llm.selection.embedding.priority);
+
+  if (opts.simulate) {
+    if (rootObj.contexa.llm && rootObj.contexa.llm.selection) {
+      delete rootObj.contexa.llm.selection.embedding;
+    }
+  } else {
+    setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
+      cliTree.llm.selection.embedding.mode);
+    setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
+      cliTree.llm.selection.embedding.priority);
+  }
 
   if (opts.infra === 'distributed') {
     setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
