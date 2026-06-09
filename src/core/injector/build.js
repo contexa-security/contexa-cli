@@ -220,10 +220,156 @@ async function injectDistributedDeps(buildPath) {
   return true;
 }
 
+async function injectSpringAiDeps(buildPath) {
+  if (!buildPath || !await fs.pathExists(buildPath)) return false;
+  const content = await fs.readFile(buildPath, 'utf8');
+
+  if (buildPath.endsWith('.xml')) {
+    // Maven pom.xml
+    let changed = false;
+    let updated = content;
+
+    // 1. Dependency Management에 spring-ai-bom 추가
+    if (!content.includes('spring-ai-bom')) {
+      const mgmtTag = '</dependencyManagement>';
+      const mgmtIndex = content.indexOf(mgmtTag);
+      if (mgmtIndex !== -1) {
+        const bomDep = 
+          `            <dependency>\n` +
+          `                <groupId>org.springframework.ai</groupId>\n` +
+          `                <artifactId>spring-ai-bom</artifactId>\n` +
+          `                <version>1.1.2</version>\n` +
+          `                <type>pom</type>\n` +
+          `                <scope>import</scope>\n` +
+          `            </dependency>\n        `;
+        const innerDepsTag = content.slice(0, mgmtIndex).lastIndexOf('<dependencies>');
+        if (innerDepsTag !== -1) {
+          updated = updated.slice(0, mgmtIndex) + bomDep + updated.slice(mgmtIndex);
+          changed = true;
+        }
+      } else {
+        const projectEndTag = '</project>';
+        const endIdx = content.indexOf(projectEndTag);
+        if (endIdx !== -1) {
+          const bomBlock = 
+            `    <dependencyManagement>\n` +
+            `        <dependencies>\n` +
+            `            <dependency>\n` +
+            `                <groupId>org.springframework.ai</groupId>\n` +
+            `                <artifactId>spring-ai-bom</artifactId>\n` +
+            `                <version>1.1.2</version>\n` +
+            `                <type>pom</type>\n` +
+            `                <scope>import</scope>\n` +
+            `            </dependency>\n` +
+            `        </dependencies>\n` +
+            `    </dependencyManagement>\n\n`;
+          updated = updated.slice(0, endIdx) + bomBlock + updated.slice(endIdx);
+          changed = true;
+        }
+      }
+    }
+
+    // 2. <dependencies> 블록에 모델 스타터 추가
+    const additions = [];
+    if (!content.includes('spring-ai-starter-model-openai')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.ai</groupId>\n` +
+        `            <artifactId>spring-ai-starter-model-openai</artifactId>\n` +
+        `        </dependency>`);
+    }
+    if (!content.includes('spring-ai-starter-model-anthropic')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.ai</groupId>\n` +
+        `            <artifactId>spring-ai-starter-model-anthropic</artifactId>\n` +
+        `        </dependency>`);
+    }
+    if (!content.includes('spring-ai-starter-model-ollama')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.ai</groupId>\n` +
+        `            <artifactId>spring-ai-starter-model-ollama</artifactId>\n` +
+        `        </dependency>`);
+    }
+    if (!content.includes('spring-ai-starter-vector-store-pgvector')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.ai</groupId>\n` +
+        `            <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>\n` +
+        `        </dependency>`);
+    }
+
+    if (additions.length > 0) {
+      const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
+      const mgmtRanges = [];
+      let m;
+      while ((m = mgmtRegex.exec(updated)) !== null) mgmtRanges.push([m.index, m.index + m[0].length]);
+      const isInsideMgmt = (idx) => mgmtRanges.some(([a, b]) => idx >= a && idx < b);
+      let target = -1, cursor = 0;
+      while (true) {
+        const found = updated.indexOf('</dependencies>', cursor);
+        if (found === -1) break;
+        if (!isInsideMgmt(found)) { target = found; break; }
+        cursor = found + 1;
+      }
+      if (target !== -1) {
+        const block = additions.join('\n') + '\n    ';
+        updated = updated.slice(0, target) + block + updated.slice(target);
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await backupFile(buildPath);
+      await fs.writeFile(buildPath, updated);
+      return true;
+    }
+    return false;
+  } else {
+    // Gradle (Groovy or Kotlin DSL)
+    const isKts = buildPath.endsWith('.kts');
+    const lines = [];
+
+    if (!content.includes('spring-ai-bom')) {
+      lines.push(isKts
+        ? `    implementation(platform("org.springframework.ai:spring-ai-bom:1.1.2"))`
+        : `    implementation platform('org.springframework.ai:spring-ai-bom:1.1.2')`);
+    }
+    if (!content.includes('spring-ai-starter-model-openai')) {
+      lines.push(isKts
+        ? `    implementation("org.springframework.ai:spring-ai-starter-model-openai")`
+        : `    implementation 'org.springframework.ai:spring-ai-starter-model-openai'`);
+    }
+    if (!content.includes('spring-ai-starter-model-anthropic')) {
+      lines.push(isKts
+        ? `    implementation("org.springframework.ai:spring-ai-starter-model-anthropic")`
+        : `    implementation 'org.springframework.ai:spring-ai-starter-model-anthropic'`);
+    }
+    if (!content.includes('spring-ai-starter-model-ollama')) {
+      lines.push(isKts
+        ? `    implementation("org.springframework.ai:spring-ai-starter-model-ollama")`
+        : `    implementation 'org.springframework.ai:spring-ai-starter-model-ollama'`);
+    }
+    if (!content.includes('spring-ai-starter-vector-store-pgvector')) {
+      lines.push(isKts
+        ? `    implementation("org.springframework.ai:spring-ai-starter-vector-store-pgvector")`
+        : `    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'`);
+    }
+
+    if (lines.length === 0) return false;
+    await backupFile(buildPath);
+    const updated = insertIntoTopLevelDependencies(content, lines);
+    await fs.writeFile(buildPath, updated);
+    return true;
+  }
+}
+
 module.exports = {
   injectMavenDep,
   injectGradleDep,
   injectDistributedDeps,
+  injectSpringAiDeps,
   findTopLevelDependenciesInsertIndex,
   insertIntoTopLevelDependencies,
 };

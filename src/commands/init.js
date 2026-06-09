@@ -48,7 +48,7 @@ function downloadFile(url, dest) {
 
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
-        injectStandalone,
+        injectSpringAiDeps, injectStandalone,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
@@ -551,15 +551,15 @@ module.exports = function (program) {
             ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
 
             // Spring AI provider starters and the pgvector vector-store starter
-            // are intentionally NOT added by contexa-cli. They are only needed
-            // when the application declares @EnableAISecurity, and even then
-            // they belong to the customer's dependency surface - automatically
-            // adding them blindly to a customer app without @EnableAISecurity
-            // triggers PgVector / ChatModel bean instantiation errors at start.
-            // contexa-cli's contract: "we add ONE dependency line and merge
-            // contexa.* into your yml. Nothing else." The next.steps section
-            // tells the operator which extra deps to add by hand if they
-            // declare @EnableAISecurity.
+            // are automatically added if the application declares @EnableAISecurity.
+            if (project.hasEnableAiSecurity) {
+              const startAiDep = process.hrtime.bigint();
+              const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
+              const addedAi = await injectSpringAiDeps(buildPath);
+              if (addedAi) buildChanged = true;
+              const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
+              addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
+            }
 
             if (answers.infra === 'distributed') {
               const startDistDep = process.hrtime.bigint();

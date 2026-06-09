@@ -24,6 +24,7 @@ module.exports = {
   injectMavenDep: build.injectMavenDep,
   injectGradleDep: build.injectGradleDep,
   injectDistributedDeps: build.injectDistributedDeps,
+  injectSpringAiDeps: build.injectSpringAiDeps,
   // Exported for unit testing of the brace-aware Gradle insertion logic.
   findTopLevelDependenciesInsertIndex: build.findTopLevelDependenciesInsertIndex,
   insertIntoTopLevelDependencies: build.insertIntoTopLevelDependencies,

@@ -197,6 +197,35 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
       };
     }
   }
+
+  // Inject spring.data.redis and spring.kafka configurations if simulate mode
+  if (opts.simulate) {
+    if (!rootObj.spring) rootObj.spring = {};
+
+    // spring.data.redis
+    if (!rootObj.spring.data) rootObj.spring.data = {};
+    if (!rootObj.spring.data.redis) rootObj.spring.data.redis = {};
+    if (rootObj.spring.data.redis.host === undefined) {
+      rootObj.spring.data.redis.host = '${CONTEXA_REDIS_HOST:localhost}';
+    }
+    if (rootObj.spring.data.redis.port === undefined) {
+      rootObj.spring.data.redis.port = '${CONTEXA_REDIS_PORT:26379}';
+    }
+
+    // spring.kafka
+    if (!rootObj.spring.kafka) rootObj.spring.kafka = {};
+    if (rootObj.spring.kafka['bootstrap-servers'] === undefined) {
+      rootObj.spring.kafka['bootstrap-servers'] = '${CONTEXA_KAFKA_SERVERS:localhost:29092}';
+    }
+  }
+
+  // Disable Lettuce latency metrics to avoid deadlock during startup between Lettuce and Actuator MeterRegistry
+  if (!rootObj.management) rootObj.management = {};
+  if (!rootObj.management.metrics) rootObj.management.metrics = {};
+  if (!rootObj.management.metrics.enable) rootObj.management.metrics.enable = {};
+  if (rootObj.management.metrics.enable.lettuce === undefined) {
+    rootObj.management.metrics.enable.lettuce = false;
+  }
 }
 
 // Strip a marker block written by older CLI versions. Idempotent on input
