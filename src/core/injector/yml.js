@@ -202,21 +202,15 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
   if (opts.simulate) {
     if (!rootObj.spring) rootObj.spring = {};
 
-    // spring.data.redis
+    // spring.data.redis (Force overwrite in simulate mode to route to simulated ports)
     if (!rootObj.spring.data) rootObj.spring.data = {};
     if (!rootObj.spring.data.redis) rootObj.spring.data.redis = {};
-    if (rootObj.spring.data.redis.host === undefined) {
-      rootObj.spring.data.redis.host = '${CONTEXA_REDIS_HOST:localhost}';
-    }
-    if (rootObj.spring.data.redis.port === undefined) {
-      rootObj.spring.data.redis.port = '${CONTEXA_REDIS_PORT:26379}';
-    }
+    rootObj.spring.data.redis.host = '${CONTEXA_REDIS_HOST:localhost}';
+    rootObj.spring.data.redis.port = '${CONTEXA_REDIS_PORT:26379}';
 
-    // spring.kafka
+    // spring.kafka (Force overwrite in simulate mode to route to simulated ports)
     if (!rootObj.spring.kafka) rootObj.spring.kafka = {};
-    if (rootObj.spring.kafka['bootstrap-servers'] === undefined) {
-      rootObj.spring.kafka['bootstrap-servers'] = '${CONTEXA_KAFKA_SERVERS:localhost:29092}';
-    }
+    rootObj.spring.kafka['bootstrap-servers'] = '${CONTEXA_KAFKA_SERVERS:localhost:29092}';
   }
 
   // Disable Lettuce latency metrics to avoid deadlock during startup between Lettuce and Actuator MeterRegistry
