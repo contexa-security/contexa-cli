@@ -805,10 +805,11 @@ module.exports = function (program) {
       console.log(chalk.cyan('       public class YourApplication { }'));
       console.log(chalk.cyan('       ----------------------------------------------------'));
 
-      console.log(chalk.white(`    2. ${isKo ? '애플리케이션에 필요한 Spring AI 의존성 추가 (선언 시 필수)' : 'Add Spring AI dependencies (Required if annotation is declared)'}:`));
+      console.log(chalk.white(`    2. ${isKo ? 'Spring AI 의존성 확인 (Contexa가 자동으로 빌드 파일에 삽입 완료함)' : 'Spring AI dependencies verification (Contexa has automatically injected them)'}:`));
       const isMavenForHint = project.buildTool === 'maven';
       console.log(chalk.cyan('       ----------------------------------------------------'));
       if (isMavenForHint) {
+        console.log(chalk.gray(`       ${isKo ? '(이미 pom.xml에 아래 의존성 및 spring-ai-bom이 추가되었습니다)' : '(The following dependencies and spring-ai-bom have already been added to pom.xml)'}`));
         console.log(chalk.cyan('       <dependency>'));
         console.log(chalk.cyan('         <groupId>org.springframework.ai</groupId>'));
         console.log(chalk.cyan('         <artifactId>spring-ai-starter-model-openai</artifactId>'));
@@ -818,6 +819,7 @@ module.exports = function (program) {
         console.log(chalk.cyan('         <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>'));
         console.log(chalk.cyan('       </dependency>'));
       } else {
+        console.log(chalk.gray(`       ${isKo ? '(이미 build.gradle에 아래 의존성 및 platform(spring-ai-bom)이 추가되었습니다)' : '(The following dependencies and spring-ai-bom have already been added to build.gradle)'}`));
         console.log(chalk.cyan("       implementation 'org.springframework.ai:spring-ai-starter-model-openai'"));
         console.log(chalk.cyan("       implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'"));
       }
