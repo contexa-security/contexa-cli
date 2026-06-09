@@ -32,6 +32,30 @@ function findBackupFiles(backupsDir, currentDir = backupsDir, filesList = []) {
   return filesList;
 }
 
+// Helper to delete nested object properties and clean up empty parent objects recursively
+function deleteIfMatch(obj, pathArr, matchFn) {
+  let cur = obj;
+  const pathStack = [];
+  for (let i = 0; i < pathArr.length - 1; i++) {
+    const k = pathArr[i];
+    if (!cur[k] || typeof cur[k] !== 'object' || Array.isArray(cur[k])) return;
+    pathStack.push({ parent: cur, key: k });
+    cur = cur[k];
+  }
+  const lastKey = pathArr[pathArr.length - 1];
+  if (cur[lastKey] !== undefined && (!matchFn || matchFn(cur[lastKey]))) {
+    delete cur[lastKey];
+  }
+  // Clean up empty parent objects backwards
+  for (let i = pathStack.length - 1; i >= 0; i--) {
+    const node = pathStack[i];
+    const parentObj = node.parent[node.key];
+    if (Object.keys(parentObj).length === 0) {
+      delete node.parent[node.key];
+    }
+  }
+}
+
 // Clean up contexa and its auto-provisioned dependencies from build file (gradle/maven) without relying on .bak
 async function cleanupBuildFile(buildPath) {
   if (!buildPath || !fs.existsSync(buildPath)) return;
@@ -104,17 +128,63 @@ async function cleanupYmlFile(ymlPath) {
   try {
     const text = await fs.readFile(ymlPath, 'utf8');
     const rootObj = yaml.load(text);
-    if (rootObj && typeof rootObj === 'object' && rootObj.contexa) {
-      delete rootObj.contexa;
-      
-      // If the object becomes completely empty, remove the file entirely
-      if (Object.keys(rootObj).length === 0) {
-        await fs.remove(ymlPath);
-        console.log(chalk.gray(`    - Removed empty application.yml after cleaning contexa settings`));
-      } else {
-        const out = yaml.dump(rootObj, { lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"' });
-        await fs.writeFile(ymlPath, out, 'utf8');
-        console.log(chalk.gray(`    - Cleaned contexa configuration block from application.yml`));
+    if (rootObj && typeof rootObj === 'object') {
+      let changed = false;
+
+      if (rootObj.contexa) {
+        delete rootObj.contexa;
+        changed = true;
+      }
+
+      // Cleanup spring.data.redis configurations injected by contexa
+      if (rootObj.spring && rootObj.spring.data && rootObj.spring.data.redis) {
+        deleteIfMatch(rootObj, ['spring', 'data', 'redis', 'host'], val => val === '${CONTEXA_REDIS_HOST:localhost}');
+        deleteIfMatch(rootObj, ['spring', 'data', 'redis', 'port'], val => val === '${CONTEXA_REDIS_PORT:26379}' || val === '${CONTEXA_REDIS_PORT:6379}');
+        changed = true;
+      }
+
+      // Cleanup spring.kafka configurations injected by contexa
+      if (rootObj.spring && rootObj.spring.kafka) {
+        deleteIfMatch(rootObj, ['spring', 'kafka', 'bootstrap-servers'], val => typeof val === 'string' && val.includes('CONTEXA_KAFKA_SERVERS'));
+        changed = true;
+      }
+
+      // Cleanup spring.ai configurations injected by contexa
+      if (rootObj.spring && rootObj.spring.ai) {
+        deleteIfMatch(rootObj, ['spring', 'ai', 'retry', 'max-attempts'], val => val === 1);
+        deleteIfMatch(rootObj, ['spring', 'ai', 'openai', 'api-key'], val => val === '${OPENAI_API_KEY:disabled}');
+        deleteIfMatch(rootObj, ['spring', 'ai', 'openai'], val => Object.keys(val).length === 0 || (val.chat && val.chat.options && val.chat.options.model === 'gpt-5-nano'));
+        deleteIfMatch(rootObj, ['spring', 'ai', 'anthropic', 'api-key'], val => val === '${ANTHROPIC_API_KEY:disabled}');
+        deleteIfMatch(rootObj, ['spring', 'ai', 'anthropic'], val => Object.keys(val).length === 0 || (val.chat && val.chat.options && val.chat.options.model === 'claude-3-sonnet-20240229'));
+        changed = true;
+      }
+
+      // Cleanup management.metrics.enable.lettuce configurations injected by contexa
+      if (rootObj.management && rootObj.management.metrics) {
+        deleteIfMatch(rootObj, ['management', 'metrics', 'enable', 'lettuce'], val => val === false);
+        changed = true;
+      }
+
+      // Cleanup empty top-level spring or management keys
+      if (rootObj.spring && Object.keys(rootObj.spring).length === 0) {
+        delete rootObj.spring;
+        changed = true;
+      }
+      if (rootObj.management && Object.keys(rootObj.management).length === 0) {
+        delete rootObj.management;
+        changed = true;
+      }
+
+      if (changed) {
+        // If the object becomes completely empty, remove the file entirely
+        if (Object.keys(rootObj).length === 0) {
+          await fs.remove(ymlPath);
+          console.log(chalk.gray(`    - Removed empty application.yml after cleaning contexa settings`));
+        } else {
+          const out = yaml.dump(rootObj, { lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"' });
+          await fs.writeFile(ymlPath, out, 'utf8');
+          console.log(chalk.gray(`    - Cleaned contexa configuration block from application.yml`));
+        }
       }
     }
   } catch (err) {

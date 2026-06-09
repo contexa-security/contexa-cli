@@ -39,8 +39,13 @@ async function backupFile(filePath) {
   const relativePath = path.relative(projectRoot, filePath);
   const backupDest = path.join(projectRoot, 'contexa', 'bak', relativePath);
   
+  // Preserve the initial clean state. If backup already exists, do not overwrite it.
+  if (await fs.pathExists(backupDest)) {
+    return;
+  }
+  
   await fs.ensureDir(path.dirname(backupDest));
-  await fs.copy(filePath, backupDest, { overwrite: true });
+  await fs.copy(filePath, backupDest, { overwrite: false });
 }
 
 module.exports = {
