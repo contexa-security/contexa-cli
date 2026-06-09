@@ -10,6 +10,7 @@ const { Option } = require('commander');
 const { dockerSync, dockerTry, dockerCompose, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
 const { execSync } = require('child_process');
 const http = require('http');
+const https = require('https');
 
 // Normalize a user-entered path so that:
 //   1) "~" or "~/..." is expanded to the OS home directory (shells do this
@@ -27,6 +28,24 @@ function normalizePath(input, baseDir) {
   }
   return path.isAbsolute(p) ? path.resolve(p) : path.resolve(baseDir, p);
 }
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close(resolve);
+      });
+    }).on('error', (err) => {
+      fs.unlink(dest, () => reject(err));
+    });
+  });
+}
+
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
         injectStandalone,
@@ -420,6 +439,33 @@ module.exports = function (program) {
         || normalizePath(answers.infraDir, opts.dir)
         || null;
 
+      // Provision GeoLite2-City.mmdb (common for all modes)
+      const startGeo = process.hrtime.bigint();
+      const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
+      try {
+        const targetDataDir = path.join(opts.dir, 'data');
+        const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
+        await fs.ensureDir(targetDataDir);
+
+        if (!(await fs.pathExists(targetMmdbPath))) {
+          // 1. Try to copy from local contexa directory if in dev/eval workspace
+          const localSource = 'E:\\projects\\contexa\\data\\GeoLite2-City.mmdb';
+          if (await fs.pathExists(localSource)) {
+            await fs.copy(localSource, targetMmdbPath);
+            sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+          } else {
+            // 2. Download from public fallback URL
+            const downloadUrl = 'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb';
+            await downloadFile(downloadUrl, targetMmdbPath);
+            sGeo.succeed(`GeoLite2-City.mmdb downloaded successfully (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+          }
+        } else {
+          sGeo.succeed('GeoLite2-City.mmdb already present in data directory');
+        }
+      } catch (err) {
+        sGeo.warn(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
+      }
+
       console.log('');
 
       // 3 + 4. Apply contexa configuration to the customer project.
@@ -481,6 +527,7 @@ module.exports = function (program) {
           console.log('');
           process.exit(1);
         }
+
 
         // application.properties + application.yml coexistence is a load-order
         // hazard in Spring Boot. Surface a single-line resolution hint here so
