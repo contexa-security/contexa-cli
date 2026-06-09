@@ -11,36 +11,28 @@ const { resolveProjectName, osDefaultInfraDir, resolveInfraDir } = require('../c
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
-// Recursively find specific backup files in the directory, excluding node_modules and .git
-function findBackupFiles(dir, filesList = []) {
-  if (!fs.existsSync(dir)) return filesList;
+// Recursively find backup files inside .contexa/backups/ returning relative paths
+function findBackupFiles(backupsDir, currentDir = backupsDir, filesList = []) {
+  if (!fs.existsSync(currentDir)) return filesList;
   
-  const files = fs.readdirSync(dir);
+  const files = fs.readdirSync(currentDir);
   for (const file of files) {
-    const fullPath = path.join(dir, file);
-    
-    // Skip common ignored directories
-    if (file === 'node_modules' || file === '.git' || file === '.gradle' || file === '.idea' || file === 'build' || file === 'target') {
-      continue;
-    }
-    
+    const fullPath = path.join(currentDir, file);
     const stat = fs.statSync(fullPath);
     if (stat.isDirectory()) {
-      findBackupFiles(fullPath, filesList);
-    } else if (file.endsWith('.bak') && (
-      file === 'application.yml.bak' || 
-      file === 'application.properties.bak' || 
-      file === 'pom.xml.bak' || 
-      file === 'build.gradle.bak' || 
-      file === 'build.gradle.kts.bak'
-    )) {
-      filesList.push(fullPath);
+      findBackupFiles(backupsDir, fullPath, filesList);
+    } else {
+      const relative = path.relative(backupsDir, fullPath);
+      filesList.push({
+        backupPath: fullPath,
+        relativePath: relative
+      });
     }
   }
   return filesList;
 }
 
-// Clean up spring-boot-starter-contexa dependency from build file (gradle/maven) without relying on .bak
+// Clean up contexa and its auto-provisioned dependencies from build file (gradle/maven) without relying on .bak
 async function cleanupBuildFile(buildPath) {
   if (!buildPath || !fs.existsSync(buildPath)) return;
   let content = await fs.readFile(buildPath, 'utf8');
@@ -48,23 +40,61 @@ async function cleanupBuildFile(buildPath) {
 
   if (buildPath.endsWith('.xml')) {
     // Maven pom.xml
-    const regex = /<dependency>\s*<groupId>ai\.ctxa<\/groupId>\s*<artifactId>spring-boot-starter-contexa<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
-    if (regex.test(content)) {
-      content = content.replace(regex, '');
+    // 1. spring-boot-starter-contexa
+    const contexaRegex = /<dependency>\s*<groupId>ai\.ctxa<\/groupId>\s*<artifactId>spring-boot-starter-contexa<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (contexaRegex.test(content)) {
+      content = content.replace(contexaRegex, '');
+      changed = true;
+    }
+    // 2. spring-kafka
+    const kafkaRegex = /<dependency>\s*<groupId>org\.springframework\.kafka<\/groupId>\s*<artifactId>spring-kafka<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (kafkaRegex.test(content)) {
+      content = content.replace(kafkaRegex, '');
+      changed = true;
+    }
+    // 3. redisson
+    const redissonRegex = /<dependency>\s*<groupId>org\.redisson<\/groupId>\s*<artifactId>redisson<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (redissonRegex.test(content)) {
+      content = content.replace(redissonRegex, '');
+      changed = true;
+    }
+    // 4. spring-boot-starter-data-redis
+    const redisRegex = /<dependency>\s*<groupId>org\.springframework\.boot<\/groupId>\s*<artifactId>spring-boot-starter-data-redis<\/artifactId>[\s\S]*?<\/dependency>\s*/gi;
+    if (redisRegex.test(content)) {
+      content = content.replace(redisRegex, '');
       changed = true;
     }
   } else {
     // Gradle build.gradle / build.gradle.kts
-    const regex = /\s*implementation\s*\(?\s*['"]ai\.ctxa:spring-boot-starter-contexa:[^'"]+['"]\s*\)?\s*/g;
-    if (regex.test(content)) {
-      content = content.replace(regex, '\n');
+    // 1. spring-boot-starter-contexa
+    const contexaRegex = /\s*implementation\s*\(?\s*['"]ai\.ctxa:spring-boot-starter-contexa:[^'"]+['"]\s*\)?\s*/g;
+    if (contexaRegex.test(content)) {
+      content = content.replace(contexaRegex, '\n');
+      changed = true;
+    }
+    // 2. spring-kafka
+    const kafkaRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.kafka:spring-kafka[^'"]*['"]\s*\)?\s*/g;
+    if (kafkaRegex.test(content)) {
+      content = content.replace(kafkaRegex, '\n');
+      changed = true;
+    }
+    // 3. redisson
+    const redissonRegex = /\s*implementation\s*\(?\s*['"]org\.redisson:redisson:[^'"]+['"]\s*\)?\s*/g;
+    if (redissonRegex.test(content)) {
+      content = content.replace(redissonRegex, '\n');
+      changed = true;
+    }
+    // 4. spring-boot-starter-data-redis
+    const redisRegex = /\s*implementation\s*\(?\s*['"]org\.springframework\.boot:spring-boot-starter-data-redis[^'"]*['"]\s*\)?\s*/g;
+    if (redisRegex.test(content)) {
+      content = content.replace(redisRegex, '\n');
       changed = true;
     }
   }
 
   if (changed) {
     await fs.writeFile(buildPath, content, 'utf8');
-    console.log(chalk.gray(`    - Cleaned contexa dependency from ${path.basename(buildPath)}`));
+    console.log(chalk.gray(`    - Cleaned contexa and its auto-provisioned dependencies from ${path.basename(buildPath)}`));
   }
 }
 
@@ -102,6 +132,21 @@ module.exports = function (program) {
     .option('-c, --code', 'Restore only project source code and settings from backups')
     .option('-a, --all', 'Force reset all components (code, project infra, and simulation stack)')
     .action(async (opts) => {
+      const confirmAnswer = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'proceed',
+          message: 'reset 명령어 실행 시 설치 전 상태로 모두 초기화 됩니다. 진행하시겠습니까?',
+          default: false
+        }
+      ]);
+
+      if (!confirmAnswer.proceed) {
+        console.log(chalk.yellow('\n  ! 작업을 취소했습니다.'));
+        console.log('');
+        process.exit(0);
+      }
+
       console.log(chalk.cyan(`\n  =============================================`));
       console.log(chalk.cyan(`  ${t('reset.starting') || 'Starting Contexa Reset...'}`));
       console.log(chalk.cyan(`  =============================================\n`));
@@ -192,12 +237,13 @@ module.exports = function (program) {
         
         // properties 기반 프로젝트에서 init으로 인해 신규 생성된 application.yml 자동 제거
         const ymlPath = path.join(projectDir, 'src/main/resources/application.yml');
-        const ymlBakPath = ymlPath + '.bak';
+        const backupsDir = path.join(projectDir, 'contexa', 'bak');
+        const ymlBackupPath = path.join(backupsDir, 'src/main/resources/application.yml');
         const propsPath = path.join(projectDir, 'src/main/resources/application.properties');
-        const propsBakPath = propsPath + '.bak';
+        const propsBackupPath = path.join(backupsDir, 'src/main/resources/application.properties');
 
-        if (fs.existsSync(ymlPath) && !fs.existsSync(ymlBakPath)) {
-          if (fs.existsSync(propsPath) || fs.existsSync(propsBakPath)) {
+        if (fs.existsSync(ymlPath) && !fs.existsSync(ymlBackupPath)) {
+          if (fs.existsSync(propsPath) || fs.existsSync(propsBackupPath)) {
             try {
               fs.removeSync(ymlPath);
               console.log(chalk.gray(`    - Removed newly created application.yml to restore properties-only state.`));
@@ -207,20 +253,29 @@ module.exports = function (program) {
           }
         }
 
-        const backupFiles = findBackupFiles(projectDir);
+        const backupFiles = fs.existsSync(backupsDir) ? findBackupFiles(backupsDir) : [];
+        const restoredOriginals = new Set();
         
         if (backupFiles.length > 0) {
-          for (const bakFile of backupFiles) {
-            const originalFile = bakFile.slice(0, -4); // Remove '.bak'
+          for (const item of backupFiles) {
+            const originalFile = path.join(projectDir, item.relativePath);
             try {
-              if (fs.existsSync(bakFile)) {
-                fs.copySync(bakFile, originalFile, { overwrite: true });
-                fs.removeSync(bakFile);
-                console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
-              }
+              fs.copySync(item.backupPath, originalFile, { overwrite: true });
+              restoredOriginals.add(path.resolve(originalFile));
+              console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
             } catch (err) {
               console.log(chalk.red(`    x Failed to restore ${path.basename(originalFile)}: ${err.message}`));
             }
+          }
+          // Clean up the backups directory
+          try {
+            fs.removeSync(backupsDir);
+            const parentContexa = path.join(projectDir, 'contexa');
+            if (fs.existsSync(parentContexa) && fs.readdirSync(parentContexa).length === 0) {
+              fs.removeSync(parentContexa);
+            }
+          } catch (e) {
+            // Ignore
           }
           s2.succeed(t('reset.restoringFiles') || 'Backup files restored.');
         } else {
@@ -232,8 +287,10 @@ module.exports = function (program) {
           || (fs.existsSync(path.join(projectDir, 'pom.xml')) ? path.join(projectDir, 'pom.xml')
              : path.join(projectDir, 'build.gradle'));
 
-        await cleanupBuildFile(buildPath);
-        if (fs.existsSync(ymlPath)) {
+        if (buildPath && !restoredOriginals.has(path.resolve(buildPath))) {
+          await cleanupBuildFile(buildPath);
+        }
+        if (fs.existsSync(ymlPath) && !restoredOriginals.has(path.resolve(ymlPath))) {
           await cleanupYmlFile(ymlPath);
         }
       }
@@ -248,6 +305,25 @@ module.exports = function (program) {
             s3.succeed(`${t('reset.restoredStandalone') || 'Removed Standalone output folder'}: ${standalonePath}`);
           } catch (err) {
             s3.fail(`Failed to remove standalone folder: ${err.message}`);
+          }
+        }
+
+        // Remove provisioned GeoLite2-City.mmdb and data folder
+        const targetMmdbPath = path.join(projectDir, 'contexa', 'data', 'GeoLite2-City.mmdb');
+        if (fs.existsSync(targetMmdbPath)) {
+          try {
+            fs.removeSync(targetMmdbPath);
+            const dataDir = path.join(projectDir, 'contexa', 'data');
+            if (fs.existsSync(dataDir) && fs.readdirSync(dataDir).length === 0) {
+              fs.removeSync(dataDir);
+            }
+            const parentContexa = path.join(projectDir, 'contexa');
+            if (fs.existsSync(parentContexa) && fs.readdirSync(parentContexa).length === 0) {
+              fs.removeSync(parentContexa);
+            }
+            console.log(chalk.gray(`    - Removed provisioned GeoLite2-City.mmdb and empty data directory.`));
+          } catch (err) {
+            console.log(chalk.red(`    x Failed to remove mmdb: ${err.message}`));
           }
         }
       }

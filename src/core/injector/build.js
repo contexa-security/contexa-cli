@@ -18,7 +18,7 @@
 // at startup).
 
 const fs = require('fs-extra');
-const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION } = require('./common');
+const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION, backupFile } = require('./common');
 
 async function injectMavenDep(pomPath) {
   if (!await fs.pathExists(pomPath)) return false;
@@ -47,7 +47,7 @@ async function injectMavenDep(pomPath) {
   if (target === -1) return false;
 
   // Backup
-  await fs.copy(pomPath, pomPath + '.bak');
+  await backupFile(pomPath);
 
   const dep =
     `        <dependency>\n` +
@@ -123,7 +123,7 @@ async function injectGradleDep(gradlePath) {
   if (gradle.includes(CONTEXA_ARTIFACT_ID)) return false;
 
   // Backup
-  await fs.copy(gradlePath, gradlePath + '.bak');
+  await backupFile(gradlePath);
 
   // Kotlin DSL uses double-quoted, parenthesized form: implementation("group:artifact:version")
   // Groovy DSL uses single-quoted form: implementation 'group:artifact:version'

@@ -443,7 +443,7 @@ module.exports = function (program) {
       const startGeo = process.hrtime.bigint();
       const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
       try {
-        const targetDataDir = path.join(opts.dir, 'data');
+        const targetDataDir = path.join(opts.dir, 'contexa', 'data');
         const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
         await fs.ensureDir(targetDataDir);
 

@@ -12,7 +12,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const yaml = require('js-yaml');
-const { escapeRegex } = require('./common');
+const { escapeRegex, backupFile } = require('./common');
 
 // Legacy marker block written by pre-1.1 versions. Kept here only so that
 // re-running init on an older project strips and rewrites the block as a
@@ -59,7 +59,7 @@ function buildCliContexaTree(opts = {}) {
       zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
     },
     hcad: {
-      geoip: { enabled: true, dbPath: 'data/GeoLite2-City.mmdb' },
+      geoip: { enabled: true, dbPath: 'contexa/data/GeoLite2-City.mmdb' },
     },
   };
 
@@ -135,6 +135,7 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
   setPath(rootObj.contexa, ['security', 'zerotrust', 'mode'],
     (opts.simulate || opts.mode === 'enforce') ? 'ENFORCE' : 'SHADOW');
   setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
+  setPath(rootObj.contexa, ['hcad', 'geoip', 'dbPath'], 'contexa/data/GeoLite2-City.mmdb');
   setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
   setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
     cliTree.llm.selection.chat.mode);
@@ -213,7 +214,7 @@ async function injectYml(ymlPath, opts = {}) {
 
   let rootObj = {};
   if (await fs.pathExists(ymlPath)) {
-    await fs.copy(ymlPath, ymlPath + '.bak');
+    await backupFile(ymlPath);
     const content = await fs.readFile(ymlPath, 'utf8');
     const stripped = stripLegacyMarker(content);
     try {
