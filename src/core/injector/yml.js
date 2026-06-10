@@ -25,15 +25,22 @@ const LEGACY_MARKER_END   = '# --- End Contexa ---';
 // Returned tree is a fresh object the caller can mutate freely.
 function buildCliContexaTree(opts = {}) {
   const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone', simulate = false } = opts;
-  const priority = llmProviders.join(',');
-  // Embedding priority: RAG requires a fixed provider and dimension.
-  // If Ollama is selected as a provider, it can be used for fixed embedding.
-  let embeddingPriority = 'openai';
+  
+  // Sort providers so that 'ollama' comes first if it exists (for seamless offline out-of-the-box testing without API keys)
+  let sortedProviders = [...llmProviders];
   if (llmProviders.includes('ollama')) {
-    embeddingPriority = 'ollama';
+    sortedProviders = ['ollama', ...llmProviders.filter(p => p !== 'ollama')];
+  }
+  const priority = sortedProviders.join(',');
+
+  // Embedding priority: RAG requires a fixed provider and dimension.
+  // Respect the order of user preference by selecting the first non-anthropic provider from sorted list.
+  let embeddingPriority = 'openai';
+  const embeddingPriorityList = sortedProviders.filter(p => p !== 'anthropic');
+  if (embeddingPriorityList.length > 0) {
+    embeddingPriority = embeddingPriorityList[0];
   } else {
-    const embeddingPriorityList = llmProviders.filter(p => p !== 'anthropic');
-    embeddingPriority = embeddingPriorityList.length > 0 ? embeddingPriorityList[0] : 'openai';
+    embeddingPriority = 'openai';
   }
 
   const isSimulate = !!simulate;
@@ -68,6 +75,24 @@ function buildCliContexaTree(opts = {}) {
 
   if (!isSimulate) {
     tree.llm.selection.embedding = { mode: 'fixed', priority: embeddingPriority };
+  }
+
+  if (llmProviders.includes('ollama')) {
+    tree.llm.chat = {
+      ollama: {
+        baseUrl: `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
+        model: '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}',
+        keepAlive: '${CONTEXA_OLLAMA_CHAT_KEEP_ALIVE:30m}',
+      }
+    };
+    if (!tree.llm.embedding) {
+      tree.llm.embedding = {};
+    }
+    tree.llm.embedding.ollama = {
+      dedicatedRuntimeEnabled: false,
+      model: '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}',
+      dimensions: '${CONTEXA_EMBEDDING_OLLAMA_DIMENSIONS:1024}',
+    };
   }
 
   if (infra === 'distributed') {
@@ -157,8 +182,20 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     }
   }
   if (rootObj.contexa && rootObj.contexa.llm) {
-    delete rootObj.contexa.llm.chat;
-    delete rootObj.contexa.llm.embedding;
+    if (!llmProviders.includes('ollama')) {
+      if (rootObj.contexa.llm.chat) {
+        delete rootObj.contexa.llm.chat.ollama;
+        if (Object.keys(rootObj.contexa.llm.chat).length === 0) {
+          delete rootObj.contexa.llm.chat;
+        }
+      }
+      if (rootObj.contexa.llm.embedding) {
+        delete rootObj.contexa.llm.embedding.ollama;
+        if (Object.keys(rootObj.contexa.llm.embedding).length === 0) {
+          delete rootObj.contexa.llm.embedding;
+        }
+      }
+    }
   }
 
   // Inject spring.ai configurations for openai/anthropic/ollama if selected and not already configured
