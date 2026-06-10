@@ -75,8 +75,8 @@ test('S2: generateInitDbScripts writes ONLY to <infraDir>/initdb, never to the c
       'customer initdb file must not be modified');
     assert.equal(await fs.pathExists(path.join(infraDir, 'initdb', '01-core-ddl.sql')), true,
       'CLI must write 01-core-ddl.sql under infraDir');
-    assert.equal(await fs.pathExists(path.join(infraDir, 'initdb', '02-dml.sql')), true,
-      'CLI must write 02-dml.sql under infraDir');
+    assert.equal(await fs.pathExists(path.join(infraDir, 'initdb', '02-dml.sql')), false,
+      'CLI must not write 02-dml.sql under infraDir');
   } finally { await fs.remove(root); }
 });
 

@@ -797,15 +797,7 @@ module.exports = function (program) {
       }
 
       // Show seed password and gitignore instructions
-      if (seedPassword) {
-        console.log(chalk.yellow(`\n  [${isKo ? '시드 계정 비밀번호 (중요)' : 'Seed Account Password (Important)'}]:`));
-        console.log(chalk.cyan(`    ${seedPassword}`));
-        console.log(chalk.gray(`    * ${isKo ? '이 비밀번호는 한 번만 표시되니 꼭 기록해 두세요.' : 'Record this password - it is shown only once.'}`));
-        
-        console.log(chalk.yellow(`\n  [${isKo ? '보안 조치 권장' : 'Recommended Security Step'}]:`));
-        console.log(chalk.gray(`    ${isKo ? '비밀번호 해시 유출 방지를 위해 .gitignore 에 다음 항목을 추가하세요:' : 'To prevent seed hash leak, add this to your .gitignore:'}`));
-        console.log(chalk.cyan('      /initdb/'));
-      }
+
 
       console.log(chalk.yellow(`\n  [${isKo ? '사용자 수동 필수 조치' : 'Manual Actions Required'}]:`));
       console.log(chalk.white(`    1. ${isKo ? '메인 애플리케이션 클래스 상단에 @EnableAISecurity 추가' : 'Add @EnableAISecurity to your main Application class'}:`));

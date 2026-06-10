@@ -67,7 +67,6 @@ function restore(moduleDir, snap) {
   const newFiles = [
     'docker-compose.yml', 'docker-compose.yml.bak',
     path.join('initdb', '01-core-ddl.sql'),
-    path.join('initdb', '02-dml.sql'),
   ];
   for (const rel of newFiles) {
     const f = path.join(moduleDir, rel);

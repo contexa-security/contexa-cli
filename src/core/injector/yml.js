@@ -237,23 +237,6 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
         }
       };
     }
-
-    if (llmProviders.includes('ollama') && !rootObj.spring.ai.ollama) {
-      const ollamaPort = opts.simulate ? '31434' : '11434';
-      rootObj.spring.ai.ollama = {
-        'base-url': `\${OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
-        chat: {
-          options: {
-            model: '${OLLAMA_CHAT_MODEL:qwen2.5:7b}'
-          }
-        },
-        embedding: {
-          options: {
-            model: '${OLLAMA_EMBEDDING_MODEL:mxbai-embed-large}'
-          }
-        }
-      };
-    }
   }
 
   // Inject spring.data.redis and spring.kafka configurations if simulate mode

@@ -323,39 +323,12 @@ test('injectGradleDep: idempotent when artifact already present', async () => {
 // generateInitDbScripts - seed password randomization
 // ============================================================
 
-test('generateInitDbScripts: returns a non-empty seed password', async () => {
-  const dir = await tempDir();
-  try {
-    const r = await generateInitDbScripts(dir);
-    assert.ok(typeof r.seedPassword === 'string');
-    assert.ok(r.seedPassword.length >= 12, 'seed password should be at least 12 chars');
-  } finally { await fs.remove(dir); }
-});
-
-test('generateInitDbScripts: each call produces a different seed password and different hash', async () => {
-  const dir1 = await tempDir();
-  const dir2 = await tempDir();
-  try {
-    const r1 = await generateInitDbScripts(dir1);
-    const r2 = await generateInitDbScripts(dir2);
-    assert.notEqual(r1.seedPassword, r2.seedPassword);
-    const dml1 = await fs.readFile(path.join(dir1, 'initdb', '02-dml.sql'), 'utf8');
-    const dml2 = await fs.readFile(path.join(dir2, 'initdb', '02-dml.sql'), 'utf8');
-    const hash1 = dml1.match(/\{bcrypt\}([^']+)/)[1];
-    const hash2 = dml2.match(/\{bcrypt\}([^']+)/)[1];
-    assert.notEqual(hash1, hash2);
-  } finally { await fs.remove(dir1); await fs.remove(dir2); }
-});
-
-test('generateInitDbScripts: legacy hardcoded 1234 hash is no longer present', async () => {
+test('generateInitDbScripts: writes 01-core-ddl.sql successfully', async () => {
   const dir = await tempDir();
   try {
     await generateInitDbScripts(dir);
-    const dml = await fs.readFile(path.join(dir, 'initdb', '02-dml.sql'), 'utf8');
-    // The pre-randomization hash for password '1234' must not appear anywhere.
-    assert.equal(dml.includes('8zyaQFyvO1gn1gbPp.bjrumKfRFif3CiDgpqK4aB4n8Gl2cbTOxJy'), false);
-    // No leftover token marker either.
-    assert.equal(dml.includes('__SEED_BCRYPT_HASH__'), false);
+    const ddlExists = await fs.pathExists(path.join(dir, 'initdb', '01-core-ddl.sql'));
+    assert.equal(ddlExists, true, '01-core-ddl.sql should be generated');
   } finally { await fs.remove(dir); }
 });
 

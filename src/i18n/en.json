@@ -90,7 +90,7 @@
   "warn.security.title": "Security checklist before exposing this deployment:",
   "warn.security.envVars": "Set CONTEXA_DB_PASSWORD / DB_PASSWORD before deploying outside this machine.",
   "warn.security.gitignore": "Verify application.yml is not committed with default credentials.",
-  "warn.security.demoUsers": "Rotate seed account passwords (admin / kim_manager / park_user / dev_lead).",
+  "warn.security.demoUsers": "Rotate seed account passwords (admin / manager / developer / user / finance).",
   "warn.security.shadowMode": "SHADOW mode logs threats only. Run 'contexa mode --enforce' to actively block.",
   "mode.notInstalled": "Contexa not initialized. Run: contexa init",
   "mode.noBlock": "Contexa-managed block not found in application.yml.",

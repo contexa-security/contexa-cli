@@ -985,7 +985,9 @@ create table password_policy
     require_lowercase        boolean      not null,
     require_special_char     boolean      not null,
     require_uppercase        boolean      not null,
-    updated_at               timestamp(6)
+    updated_at               timestamp(6),
+    ip_max_failed_attempts   integer default 30 not null,
+    ip_window_minutes        integer default 15 not null
 );
 
 create table behavior_anomaly_events
