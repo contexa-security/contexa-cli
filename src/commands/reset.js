@@ -241,26 +241,7 @@ async function cleanupYmlFile(ymlPath) {
         changed = true;
       }
 
-      // Cleanup spring.datasource & spring.jpa configurations if they match contexa
-      if (rootObj.spring && rootObj.spring.datasource) {
-        const ds = rootObj.spring.datasource;
-        const url = String(ds.url || '');
-        const username = String(ds.username || '');
-        if (
-          url.includes('contexa') || 
-          url.includes('contexa_sim') || 
-          url.includes('5432') || 
-          url.includes('25432') ||
-          username.includes('contexa') ||
-          username.includes('contexa_sim')
-        ) {
-          delete rootObj.spring.datasource;
-          if (rootObj.spring.jpa) {
-            delete rootObj.spring.jpa;
-          }
-          changed = true;
-        }
-      }
+
 
       // Cleanup management.metrics.enable.lettuce configurations injected by contexa
       if (rootObj.management && rootObj.management.metrics) {
