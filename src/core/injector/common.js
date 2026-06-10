@@ -19,7 +19,7 @@ async function backupFile(filePath) {
   let currentDir = path.dirname(filePath);
   let projectRoot = null;
   
-  for (let depth = 0; depth < 5; depth++) {
+  for (let depth = 0; depth < 10; depth++) {
     if (await fs.pathExists(path.join(currentDir, 'build.gradle')) ||
         await fs.pathExists(path.join(currentDir, 'build.gradle.kts')) ||
         await fs.pathExists(path.join(currentDir, 'pom.xml')) ||

@@ -26,12 +26,15 @@ const LEGACY_MARKER_END   = '# --- End Contexa ---';
 function buildCliContexaTree(opts = {}) {
   const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone', simulate = false } = opts;
   const priority = llmProviders.join(',');
-  // Embedding priority excludes both 'anthropic' (no embedding model in Spring AI)
-  // and 'ollama' (default Ollama embedding models are 1024 / 768 dim and would
-  // mismatch the pgvector 1536 schema). Fallback to 'openai' keeps the embedding
-  // path on a single 1536-dim provider regardless of which chat providers the
-  // operator selected.
-  const embeddingPriority = llmProviders.filter(p => p !== 'anthropic' && p !== 'ollama').join(',') || 'openai';
+  // Embedding priority: RAG requires a fixed provider and dimension.
+  // If Ollama is selected as a provider, it can be used for fixed embedding.
+  let embeddingPriority = 'openai';
+  if (llmProviders.includes('ollama')) {
+    embeddingPriority = 'ollama';
+  } else {
+    const embeddingPriorityList = llmProviders.filter(p => p !== 'anthropic');
+    embeddingPriority = embeddingPriorityList.length > 0 ? embeddingPriorityList[0] : 'openai';
+  }
 
   const isSimulate = !!simulate;
   const dbPort = isSimulate ? '25432' : '5432';
@@ -64,24 +67,7 @@ function buildCliContexaTree(opts = {}) {
   };
 
   if (!isSimulate) {
-    tree.llm.selection.embedding = { mode: 'dynamic-priority', priority: embeddingPriority };
-  }
-
-  if (llmProviders.includes('ollama')) {
-    tree.llm.chat = {
-      ollama: {
-        baseUrl: `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
-        model: '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}',
-        keepAlive: '${CONTEXA_OLLAMA_CHAT_KEEP_ALIVE:30m}',
-      }
-    };
-    tree.llm.embedding = {
-      ollama: {
-        dedicatedRuntimeEnabled: false,
-        model: '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}',
-        dimensions: '${CONTEXA_EMBEDDING_OLLAMA_DIMENSIONS:1024}',
-      }
-    };
+    tree.llm.selection.embedding = { mode: 'fixed', priority: embeddingPriority };
   }
 
   if (infra === 'distributed') {
@@ -127,6 +113,7 @@ function setPath(obj, pathArr, value) {
 //       * contexa.llm.selection.{chat,embedding}.priority
 //   - --distributed additionally forces contexa.infrastructure.mode = DISTRIBUTED.
 function applyCliContexaTree(rootObj, cliTree, opts) {
+  const { llmProviders = ['openai', 'anthropic'] } = opts || {};
   if (!rootObj.contexa || typeof rootObj.contexa !== 'object' || Array.isArray(rootObj.contexa)) {
     rootObj.contexa = {};
   }
@@ -157,9 +144,26 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
   }
 
-  // Inject spring.ai configurations for openai/anthropic if selected and not already configured
-  const { llmProviders = ['openai', 'anthropic'] } = opts;
-  if ((opts.simulate || opts.hasEnableAiSecurity) && (llmProviders.includes('openai') || llmProviders.includes('anthropic'))) {
+  // Clean up unselected LLM provider configs in spring.ai and contexa.llm
+  if (rootObj.spring && rootObj.spring.ai) {
+    if (!llmProviders.includes('openai')) {
+      delete rootObj.spring.ai.openai;
+    }
+    if (!llmProviders.includes('anthropic')) {
+      delete rootObj.spring.ai.anthropic;
+    }
+    if (!llmProviders.includes('ollama')) {
+      delete rootObj.spring.ai.ollama;
+    }
+  }
+  if (rootObj.contexa && rootObj.contexa.llm) {
+    delete rootObj.contexa.llm.chat;
+    delete rootObj.contexa.llm.embedding;
+  }
+
+  // Inject spring.ai configurations for openai/anthropic/ollama if selected and not already configured
+  const willHaveEnableAiSecurity = opts.simulate || opts.hasEnableAiSecurity || (opts.integrationMode === 'merge');
+  if (willHaveEnableAiSecurity) {
     if (!rootObj.spring) rootObj.spring = {};
     if (!rootObj.spring.ai) rootObj.spring.ai = {};
 
@@ -192,6 +196,23 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
         chat: {
           options: {
             model: 'claude-3-sonnet-20240229'
+          }
+        }
+      };
+    }
+
+    if (llmProviders.includes('ollama') && !rootObj.spring.ai.ollama) {
+      const ollamaPort = opts.simulate ? '31434' : '11434';
+      rootObj.spring.ai.ollama = {
+        'base-url': `\${OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
+        chat: {
+          options: {
+            model: '${OLLAMA_CHAT_MODEL:qwen2.5:7b}'
+          }
+        },
+        embedding: {
+          options: {
+            model: '${OLLAMA_EMBEDDING_MODEL:mxbai-embed-large}'
           }
         }
       };

@@ -48,7 +48,7 @@ function downloadFile(url, dest) {
 
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
-        injectSpringAiDeps, injectStandalone,
+        injectSpringAiDeps, injectEnableAiSecurity, injectStandalone,
         generateDockerCompose, generateInitDbScripts } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
@@ -542,6 +542,21 @@ module.exports = function (program) {
         // 4. Inject dependency (rolls back yml on failure)
         if (answers.injectDep) {
           try {
+            // 3.5. Inject @EnableAISecurity into main class
+            try {
+              const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
+              const injected = await injectEnableAiSecurity(opts.dir);
+              if (injected) {
+                sAnnot.succeed('@EnableAISecurity injected into main class');
+                // Force project flag to true so that Spring AI dependencies get injected in this run
+                project.hasEnableAiSecurity = true;
+              } else {
+                sAnnot.info('@EnableAISecurity already present or main class not found');
+              }
+            } catch (err) {
+              console.log(chalk.yellow(`  ! Could not automatically inject @EnableAISecurity: ${err.message}`));
+            }
+
             const startDep = process.hrtime.bigint();
             const s2 = ora(t('step.addingDep')).start();
             const ok = project.buildTool === 'maven'
@@ -552,13 +567,15 @@ module.exports = function (program) {
             ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
 
             // Spring AI provider starters and the pgvector vector-store starter
-            // are automatically added.
-            const startAiDep = process.hrtime.bigint();
-            const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
-            const addedAi = await injectSpringAiDeps(buildPath);
-            if (addedAi) buildChanged = true;
-            const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
-            addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
+            // are automatically added only if @EnableAISecurity is present.
+            if (project.hasEnableAiSecurity) {
+              const startAiDep = process.hrtime.bigint();
+              const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
+              const addedAi = await injectSpringAiDeps(buildPath, answers.llmProviders);
+              if (addedAi) buildChanged = true;
+              const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
+              addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
+            }
 
             if (answers.infra === 'distributed') {
               const startDistDep = process.hrtime.bigint();

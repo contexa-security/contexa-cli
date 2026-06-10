@@ -105,8 +105,8 @@ test('A6: triple LLM providers concatenate priorities in declared order', async 
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai', 'anthropic'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai,anthropic');
-    // anthropic and ollama have no embedding models in this CLI's curated list for embedding priority
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'openai');
+    // Ollama is selected, so it takes priority for embedding
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
   } finally { await fs.remove(dir); }
 });
 

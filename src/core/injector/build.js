@@ -18,6 +18,7 @@
 // at startup).
 
 const fs = require('fs-extra');
+const path = require('path');
 const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION, backupFile } = require('./common');
 
 async function injectMavenDep(pomPath) {
@@ -233,7 +234,7 @@ async function injectDistributedDeps(buildPath) {
   return true;
 }
 
-async function injectSpringAiDeps(buildPath) {
+async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropic']) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
 
@@ -282,30 +283,41 @@ async function injectSpringAiDeps(buildPath) {
       }
     }
 
-    // 2. <dependencies> 블록에 모델 스타터 추가
+    // 2. <dependencies> 블록에 모델 스타터 추가/삭제
+    const cleanMavenDep = (provName) => {
+      const pat = new RegExp(`<dependency>\\s*<groupId>org\\.springframework\\.ai</groupId>\\s*<artifactId>spring-ai-starter-model-${provName}</artifactId>\\s*</dependency>\\s*`, 'g');
+      updated = updated.replace(pat, '');
+    };
+
+    const beforeClean = updated;
+    if (!llmProviders.includes('openai')) cleanMavenDep('openai');
+    if (!llmProviders.includes('anthropic')) cleanMavenDep('anthropic');
+    if (!llmProviders.includes('ollama')) cleanMavenDep('ollama');
+    if (updated !== beforeClean) changed = true;
+
     const additions = [];
-    if (!content.includes('spring-ai-starter-model-openai')) {
+    if (llmProviders.includes('openai') && !updated.includes('spring-ai-starter-model-openai')) {
       additions.push(
         `        <dependency>\n` +
         `            <groupId>org.springframework.ai</groupId>\n` +
         `            <artifactId>spring-ai-starter-model-openai</artifactId>\n` +
         `        </dependency>`);
     }
-    if (!content.includes('spring-ai-starter-model-anthropic')) {
+    if (llmProviders.includes('anthropic') && !updated.includes('spring-ai-starter-model-anthropic')) {
       additions.push(
         `        <dependency>\n` +
         `            <groupId>org.springframework.ai</groupId>\n` +
         `            <artifactId>spring-ai-starter-model-anthropic</artifactId>\n` +
         `        </dependency>`);
     }
-    if (!content.includes('spring-ai-starter-model-ollama')) {
+    if (llmProviders.includes('ollama') && !updated.includes('spring-ai-starter-model-ollama')) {
       additions.push(
         `        <dependency>\n` +
         `            <groupId>org.springframework.ai</groupId>\n` +
         `            <artifactId>spring-ai-starter-model-ollama</artifactId>\n` +
         `        </dependency>`);
     }
-    if (!content.includes('spring-ai-starter-vector-store-pgvector')) {
+    if (!updated.includes('spring-ai-starter-vector-store-pgvector')) {
       additions.push(
         `        <dependency>\n` +
         `            <groupId>org.springframework.ai</groupId>\n` +
@@ -342,40 +354,111 @@ async function injectSpringAiDeps(buildPath) {
   } else {
     // Gradle (Groovy or Kotlin DSL)
     const isKts = buildPath.endsWith('.kts');
+    let updated = content;
+
+    const cleanLines = (provName) => {
+      const pat = isKts
+        ? new RegExp(`^[ \\t]*implementation\\("org\\.springframework\\.ai:spring-ai-starter-model-${provName}"\\)[ \\t]*\\r?\\n?`, 'gm')
+        : new RegExp(`^[ \\t]*implementation 'org\\.springframework\\.ai:spring-ai-starter-model-${provName}'[ \\t]*\\r?\\n?`, 'gm');
+      updated = updated.replace(pat, '');
+    };
+
+    if (!llmProviders.includes('openai')) cleanLines('openai');
+    if (!llmProviders.includes('anthropic')) cleanLines('anthropic');
+    if (!llmProviders.includes('ollama')) cleanLines('ollama');
+
     const lines = [];
 
-    if (!content.includes('spring-ai-bom')) {
+    if (!updated.includes('spring-ai-bom')) {
       lines.push(isKts
         ? `    implementation(platform("org.springframework.ai:spring-ai-bom:1.1.2"))`
         : `    implementation platform('org.springframework.ai:spring-ai-bom:1.1.2')`);
     }
-    if (!content.includes('spring-ai-starter-model-openai')) {
+    if (llmProviders.includes('openai') && !updated.includes('spring-ai-starter-model-openai')) {
       lines.push(isKts
         ? `    implementation("org.springframework.ai:spring-ai-starter-model-openai")`
         : `    implementation 'org.springframework.ai:spring-ai-starter-model-openai'`);
     }
-    if (!content.includes('spring-ai-starter-model-anthropic')) {
+    if (llmProviders.includes('anthropic') && !updated.includes('spring-ai-starter-model-anthropic')) {
       lines.push(isKts
         ? `    implementation("org.springframework.ai:spring-ai-starter-model-anthropic")`
         : `    implementation 'org.springframework.ai:spring-ai-starter-model-anthropic'`);
     }
-    if (!content.includes('spring-ai-starter-model-ollama')) {
+    if (llmProviders.includes('ollama') && !updated.includes('spring-ai-starter-model-ollama')) {
       lines.push(isKts
         ? `    implementation("org.springframework.ai:spring-ai-starter-model-ollama")`
         : `    implementation 'org.springframework.ai:spring-ai-starter-model-ollama'`);
     }
-    if (!content.includes('spring-ai-starter-vector-store-pgvector')) {
+    if (!updated.includes('spring-ai-starter-vector-store-pgvector')) {
       lines.push(isKts
         ? `    implementation("org.springframework.ai:spring-ai-starter-vector-store-pgvector")`
         : `    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'`);
     }
 
-    if (lines.length === 0) return false;
+    if (lines.length === 0 && updated === content) return false;
     await backupFile(buildPath);
-    const updated = insertIntoTopLevelDependencies(content, lines);
-    await fs.writeFile(buildPath, updated);
+    const finalContent = lines.length > 0 ? insertIntoTopLevelDependencies(updated, lines) : updated;
+    await fs.writeFile(buildPath, finalContent);
     return true;
   }
+}
+
+async function injectEnableAiSecurity(projectDir) {
+  const javaRoot = path.join(projectDir, 'src/main/java');
+  if (!await fs.pathExists(javaRoot)) return false;
+
+  const queue = [javaRoot];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    let entries;
+    try { entries = await fs.readdir(cur, { withFileTypes: true }); }
+    catch { continue; }
+    for (const e of entries) {
+      const full = path.join(cur, e.name);
+      if (e.isDirectory()) {
+        queue.push(full);
+      } else if (e.isFile() && e.name.endsWith('.java')) {
+        try {
+          let text = await fs.readFile(full, 'utf8');
+          if (text.includes('@SpringBootApplication')) {
+            if (text.includes('@EnableAISecurity') || text.includes('EnableAISecurity')) {
+              return false;
+            }
+            
+            await backupFile(full);
+
+            const importLine = "import io.contexa.contexacommon.annotation.EnableAISecurity;\n";
+            const lastImportIndex = text.lastIndexOf('import ');
+            if (lastImportIndex !== -1) {
+              const endOfImportLine = text.indexOf(';', lastImportIndex);
+              if (endOfImportLine !== -1) {
+                text = text.slice(0, endOfImportLine + 1) + '\n' + importLine + text.slice(endOfImportLine + 1);
+              }
+            } else {
+              const packageIndex = text.indexOf('package ');
+              if (packageIndex !== -1) {
+                const endOfPackage = text.indexOf(';', packageIndex);
+                if (endOfPackage !== -1) {
+                  text = text.slice(0, endOfPackage + 1) + '\n\n' + importLine + text.slice(endOfPackage + 1);
+                }
+              } else {
+                text = importLine + '\n' + text;
+              }
+            }
+
+            const annotIndex = text.indexOf('@SpringBootApplication');
+            if (annotIndex !== -1) {
+              text = text.slice(0, annotIndex) + "@EnableAISecurity\n" + text.slice(annotIndex);
+            }
+
+            await fs.writeFile(full, text);
+            return true;
+          }
+        } catch {}
+      }
+    }
+  }
+  return false;
 }
 
 module.exports = {
@@ -383,6 +466,7 @@ module.exports = {
   injectGradleDep,
   injectDistributedDeps,
   injectSpringAiDeps,
+  injectEnableAiSecurity,
   findTopLevelDependenciesInsertIndex,
   insertIntoTopLevelDependencies,
 };

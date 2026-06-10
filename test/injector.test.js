@@ -218,7 +218,7 @@ test('injectYml: emits contexa.llm.selection.* (new API) instead of deprecated c
     await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai');
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'openai');
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
     assert.equal(root.contexa.llm.chatModelPriority, undefined,
       'deprecated key must not be re-introduced');
   } finally { await fs.remove(dir); }
@@ -435,5 +435,88 @@ test('injectDistributedDeps: adds redisson + spring-kafka to Maven pom', async (
     const pom = await fs.readFile(pomPath, 'utf8');
     assert.ok(pom.includes('spring-kafka'));
     assert.ok(pom.includes('redisson'));
+  } finally { await fs.remove(dir); }
+});
+
+// ============================================================
+// injectSpringAiDeps (LLM selective dependencies & cleanups)
+// ============================================================
+const { injectSpringAiDeps } = require('../src/core/injector/build');
+
+test('injectSpringAiDeps: filters model starters based on llmProviders', async () => {
+  const dir = await tempDir();
+  try {
+    const gPath = path.join(dir, 'build.gradle');
+    await fs.writeFile(gPath, `dependencies {\n}`);
+    
+    // Select only openai and ollama, exclude anthropic
+    await injectSpringAiDeps(gPath, ['openai', 'ollama']);
+    const out = await fs.readFile(gPath, 'utf8');
+    
+    assert.ok(out.includes('spring-ai-starter-model-openai'));
+    assert.ok(out.includes('spring-ai-starter-model-ollama'));
+    assert.ok(!out.includes('spring-ai-starter-model-anthropic'));
+    assert.ok(out.includes('spring-ai-starter-vector-store-pgvector'));
+  } finally { await fs.remove(dir); }
+});
+
+test('injectSpringAiDeps: cleans up unselected model starters from build file', async () => {
+  const dir = await tempDir();
+  try {
+    const gPath = path.join(dir, 'build.gradle');
+    await fs.writeFile(gPath, `dependencies {\n` +
+      `    implementation 'org.springframework.ai:spring-ai-starter-model-openai'\n` +
+      `    implementation 'org.springframework.ai:spring-ai-starter-model-anthropic'\n` +
+      `    implementation 'org.springframework.ai:spring-ai-starter-model-ollama'\n` +
+      `}`);
+    
+    // Keep only openai, clean up anthropic and ollama
+    await injectSpringAiDeps(gPath, ['openai']);
+    const out = await fs.readFile(gPath, 'utf8');
+    
+    assert.ok(out.includes('spring-ai-starter-model-openai'));
+    assert.ok(!out.includes('spring-ai-starter-model-anthropic'));
+    assert.ok(!out.includes('spring-ai-starter-model-ollama'));
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: configures fixed mode and ollama priority when ollama is selected', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    const root = loadYml(ymlPath);
+    
+    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
+    assert.equal(root.contexa.llm.selection.embedding.mode, 'fixed');
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: cleans up unselected LLM configuration blocks', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await fs.writeFile(ymlPath, [
+      'spring:',
+      '  ai:',
+      '    openai:',
+      '      api-key: somekey',
+      '    anthropic:',
+      '      api-key: otherkey',
+      'contexa:',
+      '  llm:',
+      '    chat:',
+      '      ollama:',
+      '        model: qwen2.5:7b',
+    ].join('\n'));
+    
+    // Select only anthropic (cleans up openai and ollama)
+    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['anthropic'] });
+    const root = loadYml(ymlPath);
+    
+    assert.ok(root.spring.ai.anthropic);
+    assert.ok(!root.spring.ai.openai);
+    assert.ok(!root.contexa.llm.chat);
   } finally { await fs.remove(dir); }
 });
