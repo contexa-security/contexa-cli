@@ -149,7 +149,7 @@ async function injectDistributedDeps(buildPath) {
   const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
 
   if (buildPath.endsWith('.xml')) {
-    if (content.includes('spring-kafka') && content.includes('redisson') && content.includes('spring-boot-starter-data-redis')) return false;
+    if (content.includes('spring-kafka') && content.includes('redisson') && content.includes('spring-boot-starter-data-redis') && content.includes('spring-statemachine-data-redis')) return false;
     const additions = [];
     if (!content.includes('spring-kafka')) {
       additions.push(
@@ -171,6 +171,14 @@ async function injectDistributedDeps(buildPath) {
         `        <dependency>\n` +
         `            <groupId>org.springframework.boot</groupId>\n` +
         `            <artifactId>spring-boot-starter-data-redis</artifactId>\n` +
+        `        </dependency>`);
+    }
+    if (!content.includes('spring-statemachine-data-redis')) {
+      additions.push(
+        `        <dependency>\n` +
+        `            <groupId>org.springframework.statemachine</groupId>\n` +
+        `            <artifactId>spring-statemachine-data-redis</artifactId>\n` +
+        `            <version>4.0.0</version>\n` +
         `        </dependency>`);
     }
     if (additions.length === 0) return false;
@@ -213,6 +221,11 @@ async function injectDistributedDeps(buildPath) {
     lines.push(isKts
       ? `    implementation("org.springframework.boot:spring-boot-starter-data-redis")`
       : `    implementation 'org.springframework.boot:spring-boot-starter-data-redis'`);
+  }
+  if (!content.includes('spring-statemachine-data-redis')) {
+    lines.push(isKts
+      ? `    implementation("org.springframework.statemachine:spring-statemachine-data-redis:4.0.0")`
+      : `    implementation 'org.springframework.statemachine:spring-statemachine-data-redis:4.0.0'`);
   }
   if (lines.length === 0) return false;
   const updated = insertIntoTopLevelDependencies(content, lines);

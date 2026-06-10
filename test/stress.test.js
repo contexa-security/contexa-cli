@@ -546,7 +546,7 @@ test('H1: distributed deps add redisson + spring-kafka to Maven', async () => {
 
 test('H2: distributed deps idempotent on Maven (already present)', async () => {
   const dir = await makeProject({
-    'pom.xml': `<project><dependencies>\n<dependency><groupId>org.springframework.kafka</groupId><artifactId>spring-kafka</artifactId></dependency>\n<dependency><groupId>org.redisson</groupId><artifactId>redisson</artifactId><version>3.48.0</version></dependency>\n<dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId></dependency>\n</dependencies></project>`,
+    'pom.xml': `<project><dependencies>\n<dependency><groupId>org.springframework.kafka</groupId><artifactId>spring-kafka</artifactId></dependency>\n<dependency><groupId>org.redisson</groupId><artifactId>redisson</artifactId><version>3.48.0</version></dependency>\n<dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId></dependency>\n<dependency><groupId>org.springframework.statemachine</groupId><artifactId>spring-statemachine-data-redis</artifactId><version>4.0.0</version></dependency>\n</dependencies></project>`,
   });
   try {
     const added = await injectDistributedDeps(path.join(dir, 'pom.xml'));
