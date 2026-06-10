@@ -1302,6 +1302,15 @@ create table login_attempt_ip
 create index idx_login_attempt_ip_window
     on login_attempt_ip (window_start_at);
 
+create table shedlock
+(
+    name       varchar(64)  not null
+        primary key,
+    lock_until timestamp    not null,
+    locked_at  timestamp    not null,
+    locked_by  varchar(255) not null
+);
+
 create unique index if not exists ux_admin_menu_data_page
     on admin_menu (data_page)
     where data_page is not null;
