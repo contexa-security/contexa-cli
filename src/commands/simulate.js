@@ -122,6 +122,12 @@ module.exports = function (program) {
       }
       console.log(chalk.yellow(`\n  Resetting simulation stack "${projectName}" (down -v + up -d)...\n`));
       dockerCompose(['-p', projectName, 'down', '-v'], infraDir);
+
+      const initdbDir = path.join(infraDir, 'initdb');
+      if (fs.existsSync(initdbDir)) {
+        fs.emptyDirSync(initdbDir);
+      }
+
       dockerCompose(['-p', projectName, 'up', '-d'],   infraDir);
     });
 
