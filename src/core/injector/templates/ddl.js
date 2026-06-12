@@ -51,6 +51,7 @@ create table users
 );
 
 
+
 create index idx_users_email
     on users (email);
 
@@ -73,6 +74,8 @@ create table app_group
     created_by  varchar(100)
 );
 
+
+
 create table role
 (
     role_id       bigserial
@@ -87,6 +90,8 @@ create table role
     created_by    varchar(100),
     is_expression varchar(255)
 );
+
+
 
 create table managed_resource
 (
@@ -109,6 +114,8 @@ create table managed_resource
     available_context_variables varchar(1024)
 );
 
+
+
 create table permission
 (
     permission_id        bigserial
@@ -129,6 +136,8 @@ create table permission
     updated_at           timestamp(6)
 );
 
+
+
 create table user_groups
 (
     user_id     bigint                                 not null
@@ -141,6 +150,8 @@ create table user_groups
     assigned_by varchar(100),
     primary key (user_id, group_id)
 );
+
+
 
 create table group_roles
 (
@@ -155,6 +166,8 @@ create table group_roles
     primary key (group_id, role_id)
 );
 
+
+
 create table role_permissions
 (
     role_id       bigint                                 not null
@@ -167,6 +180,8 @@ create table role_permissions
     assigned_by   varchar(100),
     primary key (role_id, permission_id)
 );
+
+
 
 create table policy
 (
@@ -182,19 +197,21 @@ create table policy
     approval_status      varchar(50)
         constraint policy_approval_status_check
             check ((approval_status)::text = ANY
-                   ((ARRAY ['PENDING'::character varying, 'APPROVED'::character varying, 'REJECTED'::character varying, 'NOT_REQUIRED'::character varying])::text[])),
+                   (ARRAY [('PENDING'::character varying)::text, ('APPROVED'::character varying)::text, ('REJECTED'::character varying)::text, ('NOT_REQUIRED'::character varying)::text])),
     approved_at          timestamp(6),
     approved_by          varchar(255),
     confidence_score     double precision,
     source               varchar(50)
         constraint policy_source_check
             check ((source)::text = ANY
-                   ((ARRAY ['MANUAL'::character varying, 'AI_GENERATED'::character varying, 'AI_EVOLVED'::character varying, 'IMPORTED'::character varying])::text[])),
+                   (ARRAY [('MANUAL'::character varying)::text, ('AI_GENERATED'::character varying)::text, ('AI_EVOLVED'::character varying)::text, ('IMPORTED'::character varying)::text])),
     updated_at           timestamp(6),
     created_at           timestamp(6) default CURRENT_TIMESTAMP not null,
     is_active            boolean      default true              not null,
     reasoning            varchar(4096)
 );
+
+
 
 create table policy_target
 (
@@ -210,6 +227,8 @@ create table policy_target
     source_type       varchar(20) default 'RESOURCE'::character varying
 );
 
+
+
 create table policy_rule
 (
     id          bigserial
@@ -219,6 +238,8 @@ create table policy_rule
             on delete cascade,
     description varchar(255)
 );
+
+
 
 create table policy_condition
 (
@@ -232,6 +253,8 @@ create table policy_condition
     description          varchar(255)
 );
 
+
+
 create table role_hierarchy_config
 (
     hierarchy_id     bigserial
@@ -241,6 +264,8 @@ create table role_hierarchy_config
         unique,
     is_active        boolean default false not null
 );
+
+
 
 create table audit_log
 (
@@ -268,6 +293,8 @@ create table audit_log
     status              varchar(255)
 );
 
+
+
 create table business_resource
 (
     id            bigserial
@@ -278,6 +305,8 @@ create table business_resource
     description   varchar(1024)
 );
 
+
+
 create table business_action
 (
     id          bigserial
@@ -287,6 +316,8 @@ create table business_action
     action_type varchar(100) not null,
     description varchar(1024)
 );
+
+
 
 create table business_resource_action
 (
@@ -299,6 +330,8 @@ create table business_resource_action
     mapped_permission_name varchar(255) not null,
     primary key (business_resource_id, business_action_id)
 );
+
+
 
 create table condition_template
 (
@@ -321,10 +354,12 @@ create table condition_template
     classification       varchar(255)
         constraint condition_template_classification_check
             check ((classification)::text = ANY
-                   ((ARRAY ['UNIVERSAL'::character varying, 'CONTEXT_DEPENDENT'::character varying, 'CUSTOM_COMPLEX'::character varying])::text[])),
+                   (ARRAY [('UNIVERSAL'::character varying)::text, ('CONTEXT_DEPENDENT'::character varying)::text, ('CUSTOM_COMPLEX'::character varying)::text])),
     complexity_score     integer,
     context_dependent    boolean
 );
+
+
 
 create table wizard_session
 (
@@ -336,6 +371,8 @@ create table wizard_session
     expires_at    timestamp(6) not null
 );
 
+
+
 create table function_group
 (
     id   bigserial
@@ -343,6 +380,8 @@ create table function_group
     name varchar(255) not null
         unique
 );
+
+
 
 create table function_catalog
 (
@@ -361,6 +400,8 @@ create table function_catalog
         references managed_resource
 );
 
+
+
 create table policy_template
 (
     id                bigserial
@@ -373,6 +414,8 @@ create table policy_template
         unique
 );
 
+
+
 create table vector_store
 (
     id        uuid default gen_random_uuid() not null
@@ -381,6 +424,7 @@ create table vector_store
     metadata  jsonb,
     embedding vector(1024)
 );
+
 
 
 create index vector_store_embedding_idx
@@ -406,6 +450,8 @@ create table user_behavior_profiles
     vector_cluster_id       varchar(100)
 );
 
+
+
 create table soar_incidents
 (
     id          uuid         not null
@@ -416,7 +462,7 @@ create table soar_incidents
     status      varchar(255) not null
         constraint soar_incidents_status_check
             check ((status)::text = ANY
-                   ((ARRAY ['NEW'::character varying, 'TRIAGE'::character varying, 'INVESTIGATION'::character varying, 'PLANNING'::character varying, 'PENDING_APPROVAL'::character varying, 'EXECUTION'::character varying, 'REPORTING'::character varying, 'COMPLETED'::character varying, 'AUTO_CLOSED'::character varying, 'FAILED'::character varying, 'CLOSED_BY_ADMIN'::character varying])::text[])),
+                   (ARRAY [('NEW'::character varying)::text, ('TRIAGE'::character varying)::text, ('INVESTIGATION'::character varying)::text, ('PLANNING'::character varying)::text, ('PENDING_APPROVAL'::character varying)::text, ('EXECUTION'::character varying)::text, ('REPORTING'::character varying)::text, ('COMPLETED'::character varying)::text, ('AUTO_CLOSED'::character varying)::text, ('FAILED'::character varying)::text, ('CLOSED_BY_ADMIN'::character varying)::text])),
     title       varchar(255) not null,
     updated_at  timestamp(6) not null,
     description text,
@@ -424,6 +470,8 @@ create table soar_incidents
     metadata    text,
     type        varchar(50)
 );
+
+
 
 create table soar_approval_policies
 (
@@ -438,6 +486,8 @@ create table soar_approval_policies
     severity                varchar(20),
     timeout_minutes         integer      not null
 );
+
+
 
 create table soar_approval_requests
 (
@@ -479,6 +529,8 @@ create table soar_approval_requests
     break_glass_reason       text
 );
 
+
+
 create table soar_approval_steps
 (
     id                  bigserial
@@ -499,6 +551,7 @@ create table soar_approval_steps
     constraint uk_soar_approval_step_request_number
         unique (request_id, step_number)
 );
+
 
 
 create index idx_soar_approval_step_request_id
@@ -526,6 +579,7 @@ create table soar_approval_assignments
 );
 
 
+
 create index idx_soar_approval_assignment_request_id
     on soar_approval_assignments (request_id);
 
@@ -551,6 +605,7 @@ create table soar_approval_votes
     constraint uk_soar_approval_vote_request_approver_step
         unique (request_id, approver_id, step_number)
 );
+
 
 
 create index idx_soar_approval_vote_request_id
@@ -587,6 +642,7 @@ create table approval_notifications
     updated_at        timestamp(6) not null,
     user_id           varchar(100)
 );
+
 
 
 create index idx_notification_request_id
@@ -631,17 +687,19 @@ create table threat_indicators
     status               varchar(255)
         constraint threat_indicators_status_check
             check ((status)::text = ANY
-                   ((ARRAY ['ACTIVE'::character varying, 'INACTIVE'::character varying, 'EXPIRED'::character varying, 'FALSE_POSITIVE'::character varying, 'UNDER_REVIEW'::character varying])::text[])),
+                   (ARRAY [('ACTIVE'::character varying)::text, ('INACTIVE'::character varying)::text, ('EXPIRED'::character varying)::text, ('FALSE_POSITIVE'::character varying)::text, ('UNDER_REVIEW'::character varying)::text])),
     threat_actor         varchar(255),
     threat_actor_id      varchar(100),
     threat_score         double precision,
     indicator_type       varchar(255)  not null
         constraint threat_indicators_indicator_type_check
             check ((indicator_type)::text = ANY
-                   ((ARRAY ['IP_ADDRESS'::character varying, 'DOMAIN'::character varying, 'URL'::character varying, 'FILE_HASH'::character varying, 'FILE_PATH'::character varying, 'REGISTRY_KEY'::character varying, 'PROCESS_NAME'::character varying, 'EMAIL_ADDRESS'::character varying, 'USER_AGENT'::character varying, 'CERTIFICATE'::character varying, 'MUTEX'::character varying, 'YARA_RULE'::character varying, 'BEHAVIORAL'::character varying, 'UNKNOWN'::character varying, 'PATTERN'::character varying, 'USER_ACCOUNT'::character varying, 'COMPLIANCE'::character varying, 'EVENT'::character varying])::text[])),
+                   (ARRAY [('IP_ADDRESS'::character varying)::text, ('DOMAIN'::character varying)::text, ('URL'::character varying)::text, ('FILE_HASH'::character varying)::text, ('FILE_PATH'::character varying)::text, ('REGISTRY_KEY'::character varying)::text, ('PROCESS_NAME'::character varying)::text, ('EMAIL_ADDRESS'::character varying)::text, ('USER_AGENT'::character varying)::text, ('CERTIFICATE'::character varying)::text, ('MUTEX'::character varying)::text, ('YARA_RULE'::character varying)::text, ('BEHAVIORAL'::character varying)::text, ('UNKNOWN'::character varying)::text, ('PATTERN'::character varying)::text, ('USER_ACCOUNT'::character varying)::text, ('COMPLIANCE'::character varying)::text, ('EVENT'::character varying)::text])),
     updated_at           timestamp(6),
     indicator_value      varchar(1024) not null
 );
+
+
 
 create table indicator_metadata
 (
@@ -652,12 +710,16 @@ create table indicator_metadata
     primary key (indicator_id, meta_key)
 );
 
+
+
 create table indicator_tags
 (
     indicator_id varchar(100) not null
         references threat_indicators,
     tag          varchar(255)
 );
+
+
 
 create table related_indicators
 (
@@ -667,6 +729,8 @@ create table related_indicators
         references threat_indicators,
     primary key (indicator_id, related_indicator_id)
 );
+
+
 
 create table blocked_user
 (
@@ -696,6 +760,8 @@ create table blocked_user
     mfa_verified         boolean,
     mfa_verified_at      timestamp(6)
 );
+
+
 
 create table oauth2_authorization
 (
@@ -736,6 +802,7 @@ create table oauth2_authorization
 );
 
 
+
 create index idx_oauth2_authorization_registered_client_id
     on oauth2_authorization (registered_client_id);
 
@@ -761,6 +828,7 @@ create table oauth2_registered_client
 );
 
 
+
 create unique index idx_oauth2_registered_client_client_id
     on oauth2_registered_client (client_id);
 
@@ -783,6 +851,8 @@ create table user_credentials
     label                        varchar(1000) not null
 );
 
+
+
 create table user_entities
 (
     id           varchar(1000) not null
@@ -790,6 +860,8 @@ create table user_entities
     name         varchar(100)  not null,
     display_name varchar(200)
 );
+
+
 
 create table one_time_tokens
 (
@@ -799,6 +871,8 @@ create table one_time_tokens
     expires_at  timestamp   not null
 );
 
+
+
 create table oauth2_authorization_consent
 (
     registered_client_id varchar(100)  not null
@@ -807,6 +881,8 @@ create table oauth2_authorization_consent
     authorities          varchar(1000) not null,
     primary key (registered_client_id, principal_name)
 );
+
+
 
 create table baseline_signal_outbox
 (
@@ -833,6 +909,7 @@ create table baseline_signal_outbox
 );
 
 
+
 create index idx_baseline_signal_outbox_dispatch
     on baseline_signal_outbox (status, next_attempt_at, period_start);
 
@@ -854,6 +931,7 @@ create table decision_feedback_forwarding_outbox
     tenant_external_ref varchar(128) not null,
     updated_at          timestamp(6) not null
 );
+
 
 
 create index idx_decision_feedback_forwarding_outbox_dispatch
@@ -886,6 +964,7 @@ create table model_performance_telemetry_outbox
 );
 
 
+
 create index idx_model_performance_telemetry_outbox_dispatch
     on model_performance_telemetry_outbox (status, next_attempt_at, period);
 
@@ -909,6 +988,7 @@ create table prompt_context_audit_forwarding_outbox
 );
 
 
+
 create index idx_prompt_context_audit_forwarding_outbox_dispatch
     on prompt_context_audit_forwarding_outbox (status, next_attempt_at, created_at);
 
@@ -929,6 +1009,7 @@ create table security_decision_forwarding_outbox
     tenant_external_ref varchar(128) not null,
     updated_at          timestamp(6) not null
 );
+
 
 
 create index idx_security_decision_forwarding_outbox_dispatch
@@ -954,6 +1035,7 @@ create table threat_outcome_forwarding_outbox
 );
 
 
+
 create index idx_threat_outcome_forwarding_outbox_dispatch
     on threat_outcome_forwarding_outbox (status, next_attempt_at, created_at);
 
@@ -970,25 +1052,29 @@ create table user_roles
     primary key (role_id, user_id)
 );
 
+
+
 create table password_policy
 (
     id                       bigint generated by default as identity
         primary key,
-    created_at               timestamp(6) not null,
-    history_count            integer      not null,
-    lockout_duration_minutes integer      not null,
-    max_failed_attempts      integer      not null,
-    max_length               integer      not null,
-    min_length               integer      not null,
-    password_expiry_days     integer      not null,
-    require_digit            boolean      not null,
-    require_lowercase        boolean      not null,
-    require_special_char     boolean      not null,
-    require_uppercase        boolean      not null,
+    created_at               timestamp(6)       not null,
+    history_count            integer            not null,
+    lockout_duration_minutes integer            not null,
+    max_failed_attempts      integer            not null,
+    max_length               integer            not null,
+    min_length               integer            not null,
+    password_expiry_days     integer            not null,
+    require_digit            boolean            not null,
+    require_lowercase        boolean            not null,
+    require_special_char     boolean            not null,
+    require_uppercase        boolean            not null,
     updated_at               timestamp(6),
     ip_max_failed_attempts   integer default 30 not null,
     ip_window_minutes        integer default 15 not null
 );
+
+
 
 create table behavior_anomaly_events
 (
@@ -1012,6 +1098,8 @@ create table behavior_anomaly_events
     user_id            varchar(255)     not null
 );
 
+
+
 create table behavior_based_permissions
 (
     id                    bigint generated by default as identity
@@ -1026,6 +1114,8 @@ create table behavior_based_permissions
     priority              integer
 );
 
+
+
 create table behavior_realtime_cache
 (
     user_id                 varchar(255) not null
@@ -1039,6 +1129,8 @@ create table behavior_realtime_cache
     session_ip              varchar(45),
     session_start_time      timestamp(6)
 );
+
+
 
 create table bridge_user_profile
 (
@@ -1059,6 +1151,8 @@ create table bridge_user_profile
     updated_at                  timestamp(6)
 );
 
+
+
 create table active_sessions
 (
     session_id       varchar(128) not null
@@ -1071,6 +1165,7 @@ create table active_sessions
     user_id          varchar(255) not null,
     username         varchar(255)
 );
+
 
 
 create index idx_session_user_id
@@ -1091,8 +1186,10 @@ create table ip_access_rules
     ip_address  varchar(45)  not null,
     rule_type   varchar(10)  not null
         constraint ip_access_rules_rule_type_check
-            check ((rule_type)::text = ANY ((ARRAY ['ALLOW'::character varying, 'DENY'::character varying])::text[]))
+            check ((rule_type)::text = ANY
+                   (ARRAY [('ALLOW'::character varying)::text, ('DENY'::character varying)::text]))
 );
+
 
 
 create index idx_ip_rule_type
@@ -1116,6 +1213,8 @@ create table security_spel
     created_at  timestamp default now()
 );
 
+
+
 create table admin_menu
 (
     id         bigserial
@@ -1130,41 +1229,53 @@ create table admin_menu
     url        varchar(255)
 );
 
+
+
+create unique index ux_admin_menu_data_page
+    on admin_menu (data_page)
+    where (data_page IS NOT NULL);
+
 create table admin_menu_role
 (
     id        bigserial
         primary key,
     menu_id   bigint       not null
-        references admin_menu (id),
+        references admin_menu,
     role_name varchar(100) not null,
-    constraint admin_menu_role_menu_id_role_name_key unique (menu_id, role_name)
+    unique (menu_id, role_name)
 );
+
+
 
 create table group_role_permissions
 (
     group_id      bigint       not null
-        references app_group (group_id),
+        references app_group,
     role_id       bigint       not null
-        references role (role_id),
+        references role,
     permission_id bigint       not null
-        references permission (permission_id),
+        references permission,
     assigned_at   timestamp(6) not null,
     assigned_by   varchar(100),
     primary key (group_id, role_id, permission_id)
 );
 
+
+
 create table user_role_permissions
 (
     user_id       bigint       not null
-        references users (id),
+        references users,
     role_id       bigint       not null
-        references role (role_id),
+        references role,
     permission_id bigint       not null
-        references permission (permission_id),
+        references permission,
     assigned_at   timestamp(6) not null,
     assigned_by   varchar(100),
     primary key (user_id, role_id, permission_id)
 );
+
+
 
 create table password_history
 (
@@ -1175,6 +1286,8 @@ create table password_history
     changed_at    timestamp(6) not null
 );
 
+
+
 create table policy_version
 (
     id             bigserial
@@ -1184,15 +1297,20 @@ create table policy_version
     change_type    varchar(20)  not null
         constraint policy_version_change_type_check
             check ((change_type)::text = ANY
-                   ((ARRAY ['CREATED'::character varying, 'UPDATED'::character varying, 'DELETED'::character varying, 'ROLLBACK'::character varying])::text[])),
+                   (ARRAY [('CREATED'::character varying)::text, ('UPDATED'::character varying)::text, ('DELETED'::character varying)::text, ('ROLLBACK'::character varying)::text])),
     change_reason  varchar(1024),
     changed_by     varchar(255) not null,
     changed_at     timestamp(6) not null,
     snapshot_json  text         not null
 );
 
-create index idx_policy_version_changed_at on policy_version (changed_at);
-create index idx_policy_version_policy_id  on policy_version (policy_id);
+
+
+create index idx_policy_version_changed_at
+    on policy_version (changed_at);
+
+create index idx_policy_version_policy_id
+    on policy_version (policy_id);
 
 create table system_settings
 (
@@ -1205,6 +1323,8 @@ create table system_settings
     created_at                 timestamp(6) not null,
     updated_at                 timestamp(6)
 );
+
+
 
 create table learning_artifact_registry
 (
@@ -1232,6 +1352,8 @@ create table learning_artifact_registry
     constraint uk_learning_artifact_registry_identity
         unique (tenant_id, artifact_type, artifact_key)
 );
+
+
 
 create index idx_learning_artifact_registry_tenant_updated
     on learning_artifact_registry (tenant_id, updated_at);
@@ -1262,6 +1384,8 @@ create table learning_artifact_release_ledger
     facts_json            text
 );
 
+
+
 create index idx_learning_artifact_ledger_identity
     on learning_artifact_release_ledger (tenant_id, artifact_type, artifact_key, created_at);
 
@@ -1282,6 +1406,8 @@ create table learning_governance_snapshot
         unique (tenant_id, artifact_type)
 );
 
+
+
 create index idx_learning_governance_snapshot_tenant_updated
     on learning_governance_snapshot (tenant_id, updated_at);
 
@@ -1299,6 +1425,8 @@ create table login_attempt_ip
     window_start_at timestamp(6) not null
 );
 
+
+
 create index idx_login_attempt_ip_window
     on login_attempt_ip (window_start_at);
 
@@ -1311,8 +1439,443 @@ create table shedlock
     locked_by  varchar(255) not null
 );
 
-create unique index if not exists ux_admin_menu_data_page
-    on admin_menu (data_page)
-    where data_page is not null;
 
+
+
+-- ----------------------------------------------------------------
+-- Enterprise Migrated Tables DDL
+-- ----------------------------------------------------------------
+
+create table if not exists protectable_resource_registry (
+    id bigserial primary key,
+    tenant_id varchar(128) not null default 'default',
+    resource_id varchar(255) not null,
+    resource_url varchar(1000) not null,
+    http_method varchar(32) not null,
+    criticality varchar(64),
+    verification_required boolean not null default true,
+    sync_enabled boolean not null default false,
+    owner_field varchar(255),
+    bean_name varchar(255),
+    method_identifier varchar(1000),
+    source_class_name varchar(1000),
+    source_method_name varchar(255),
+    annotation_signature_hash varchar(128) not null,
+    certificate_state varchar(64) not null default 'REVIEW_REQUIRED',
+    operational_state varchar(64) not null default 'PENDING_VERIFICATION',
+    latest_certificate_id varchar(128),
+    last_verified_at timestamp,
+    signature_changed_at timestamp,
+    discovered_at timestamp not null,
+    updated_at timestamp not null,
+    retired boolean not null default false
+);
+
+create table if not exists protectable_resource_overlay (
+    id bigserial primary key,
+    tenant_id varchar(64) not null,
+    resource_id varchar(256) not null,
+    http_method varchar(16) not null,
+    overlay_criticality varchar(32),
+    overlay_verification_required boolean,
+    overlay_sync boolean,
+    overlay_owner_field varchar(128),
+    overlay_resource_url varchar(512),
+    override_reason text not null,
+    override_approver varchar(128) not null,
+    override_approved_at timestamp not null,
+    override_expires_at timestamp,
+    created_at timestamp not null,
+    updated_at timestamp not null,
+    created_by varchar(255),
+    updated_by varchar(255),
+    constraint ux_protectable_overlay_scope unique (tenant_id, resource_id, http_method)
+);
+
+create table if not exists prompt_quality_certificate_ledger (
+    id bigserial primary key,
+    certificate_id varchar(128) not null,
+    state varchar(64) not null,
+    state_label varchar(128) not null,
+    usable_for_llm_zero_trust boolean not null,
+    zero_trust_state varchar(64) not null,
+    zero_trust_state_label varchar(128) not null,
+    resource_operational_state varchar(64) not null default 'PENDING_VERIFICATION',
+    resource_operational_state_label varchar(128) not null default '검증 대기',
+    issued_at varchar(64),
+    tenant_id varchar(128) not null default 'default',
+    scope_hash varchar(128) not null,
+    prompt_contract_version varchar(128) not null default 'official-prompt-contract-v1',
+    model_profile varchar(128) not null default 'default-model-profile',
+    verifier_version varchar(128) not null default 'official-verifier-v1',
+    expires_at timestamp,
+    revoked_at timestamp,
+    revoked_by varchar(255),
+    revocation_reason varchar(1000),
+    prompt_hash varchar(128),
+    system_prompt_hash varchar(128),
+    user_prompt_hash varchar(128),
+    context_hash varchar(128),
+    evidence_request_ids_json text,
+    run_ids_json text,
+    resource_key varchar(600) not null,
+    resource_url varchar(1000) not null,
+    resource_id varchar(255) not null,
+    http_method varchar(32) not null,
+    protectable_method varchar(1000),
+    criticality varchar(64),
+    verification_required boolean not null,
+    total_metric_count integer not null,
+    verified_metric_count integer not null,
+    failed_metric_count integer not null,
+    missing_metric_count integer not null,
+    summary varchar(3000),
+    blocking_findings_json text,
+    six_w_json text,
+    issue_case_json text,
+    evidence_lineage_json text,
+    remediation_loop_json text,
+    metrics_json text,
+    recommended_actions_json text,
+    recorded_at timestamp not null
+);
+
+create table if not exists prompt_quality_certificate_audit_event (
+    id bigserial primary key,
+    event_id varchar(128) not null unique,
+    event_type varchar(128) not null,
+    actor varchar(255) not null,
+    tenant_id varchar(128) not null,
+    certificate_id varchar(128),
+    scope_hash varchar(128),
+    resource_url varchar(1000),
+    resource_id varchar(255),
+    http_method varchar(32),
+    previous_state varchar(128),
+    next_state varchar(128),
+    reason varchar(3000),
+    recorded_at timestamp not null
+);
+
+create table if not exists prompt_quality_issue_case (
+    id bigserial primary key,
+    case_id varchar(128) not null unique,
+    certificate_id varchar(128),
+    source_type varchar(64) not null,
+    tenant_id varchar(128) not null,
+    scope_hash varchar(128),
+    resource_url varchar(1000),
+    http_method varchar(32),
+    resource_id varchar(255),
+    state varchar(64) not null,
+    symptom varchar(3000),
+    expected_outcome varchar(3000),
+    actual_outcome varchar(3000),
+    evidence_package_id varchar(255),
+    recurrence_count integer not null default 0,
+    findings_json text,
+    recommended_actions_json text,
+    opened_at timestamp not null,
+    updated_at timestamp not null
+);
+
+create table if not exists prompt_governance_registry (
+    id bigserial primary key,
+    registry_scope varchar(128) not null,
+    prompt_key varchar(128) not null,
+    template_key varchar(128) not null,
+    prompt_version varchar(128) not null,
+    contract_version varchar(128) not null,
+    prompt_artifact_hash_sha256 varchar(64) not null,
+    release_status varchar(64) not null,
+    owner_name varchar(128) not null,
+    release_approval_reference varchar(256),
+    evaluation_baseline_reference varchar(256),
+    rollback_prompt_version varchar(128),
+    change_summary varchar(2000),
+    template_class_name varchar(512) not null,
+    registration_source varchar(128) not null,
+    supported_model_profiles_json varchar(8000),
+    created_at timestamp(6) not null default current_timestamp,
+    updated_at timestamp(6) not null default current_timestamp
+);
+
+create table if not exists prompt_governance_runtime_cache_invalidation (
+    id bigserial primary key,
+    event_id varchar(160) not null unique,
+    registry_scope varchar(128) not null,
+    prompt_key varchar(128) not null,
+    prompt_version varchar(128) not null,
+    invalidation_reason varchar(2000),
+    published_by varchar(128),
+    published_at timestamp not null,
+    consumed boolean not null default false,
+    consumed_at timestamp
+);
+
+create table if not exists prompt_runtime_governance_rule (
+    id bigserial primary key,
+    rule_id varchar(256) not null unique,
+    source_action_id varchar(256) not null,
+    package_id varchar(256) not null,
+    aggregate_run_id varchar(256) not null,
+    issue_id varchar(256) not null,
+    work_item_id varchar(256) not null,
+    metric_code varchar(32) not null,
+    check_code varchar(128) not null,
+    registry_scope varchar(128) not null,
+    prompt_key varchar(128) not null,
+    prompt_version varchar(128) not null,
+    scope_type varchar(64) not null,
+    tenant_id varchar(256),
+    resource_id varchar(256),
+    resource_url text,
+    http_method varchar(32),
+    slot_key varchar(256) not null,
+    rule_type varchar(128) not null,
+    rule_payload_json jsonb not null default '{}',
+    priority integer not null default 100,
+    active boolean not null default true,
+    current_result boolean not null default true,
+    created_by varchar(256),
+    approved_reason text,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint ck_prompt_runtime_governance_rule_scope
+        check (scope_type in ('RESOURCE_METHOD_PATH', 'RESOURCE_ID', 'TENANT', 'PROMPT_KEY')),
+    constraint fk_prompt_runtime_governance_rule_action
+        foreign key (source_action_id)
+        references prompt_runtime_governance_action (action_id),
+    constraint fk_prompt_runtime_governance_rule_type
+        foreign key (rule_type)
+        references prompt_runtime_governance_action_type_contract (action_type)
+);
+
+create table if not exists prompt_runtime_governance_action (
+    id bigserial primary key,
+    action_id varchar(256) not null unique,
+    package_id varchar(256) not null,
+    aggregate_run_id varchar(256) not null,
+    issue_id varchar(256) not null,
+    work_item_id varchar(256) not null,
+    problem_id varchar(256),
+    metric_code varchar(32) not null,
+    check_code varchar(128) not null,
+    slot_key varchar(256) not null,
+    prompt_location varchar(512) not null,
+    action_type varchar(128) not null,
+    action_status varchar(64) not null,
+    action_source varchar(64) not null,
+    candidate_basis_json jsonb not null default '{}',
+    request_payload_json jsonb not null default '{}',
+    actor_id varchar(256),
+    current_result boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint ck_prompt_runtime_governance_action_status
+        check (action_status in ('DRAFT', 'REQUESTED', 'APPROVED', 'REJECTED', 'SUPERSEDED')),
+    constraint ck_prompt_runtime_governance_action_source
+        check (action_source in ('PROMPT_RESOLUTION_BUTTON', 'SYSTEM_SYNC')),
+    constraint fk_prompt_runtime_governance_action_type
+        foreign key (action_type)
+        references prompt_runtime_governance_action_type_contract (action_type)
+);
+
+CREATE TABLE IF NOT EXISTS pqa_resolution_work_item (
+    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    work_item_id VARCHAR(256) NOT NULL UNIQUE,
+    resolution_type VARCHAR(32) NOT NULL,
+    resource_url TEXT,
+    resource_id VARCHAR(256),
+    http_method VARCHAR(32),
+    package_id VARCHAR(256) NOT NULL,
+    aggregate_run_id VARCHAR(256) NOT NULL,
+    metric_code VARCHAR(32),
+    check_code VARCHAR(128),
+    signal_key VARCHAR(512),
+    prompt_location VARCHAR(512),
+    evidence_value TEXT,
+    interpretation TEXT,
+    problem_title TEXT,
+    problem_summary TEXT,
+    why_it_matters TEXT,
+    user_action_title TEXT,
+    user_action_detail TEXT,
+    action_route_type VARCHAR(128),
+    action_route_params_json JSONB,
+    completion_criterion TEXT,
+    resolution_owner VARCHAR(128),
+    resolution_state VARCHAR(64) NOT NULL,
+    blocked_by_work_item_id VARCHAR(256),
+    dependency_state VARCHAR(128) NOT NULL DEFAULT 'NONE',
+    current_result BOOLEAN NOT NULL DEFAULT TRUE,
+    data_version BIGINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_pqa_resolution_work_item_type
+        CHECK (resolution_type IN ('PRE_INPUT', 'PROMPT')),
+    CONSTRAINT ck_pqa_resolution_work_item_state
+        CHECK (resolution_state IN (
+            'OPEN', 'ACTION_READY', 'ACTION_RUNNING', 'ACTION_DONE',
+            'READY_TO_REVERIFY', 'RESOLVED', 'BLOCKED',
+            'ACTION_REQUIRED', 'SUPERSEDED_BY_INPUT_RESOLUTION'
+        ))
+);
+
+create table if not exists prompt_runtime_governance_scope_type_contract (
+    scope_type varchar(64) primary key,
+    scope_priority integer not null,
+    scope_description text not null,
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp
+);
+
+create table if not exists prompt_runtime_governance_action_policy (
+    id bigserial primary key,
+    contract_version varchar(128) not null,
+    prompt_key varchar(128) not null default 'SECURITY_DECISION',
+    metric_code varchar(32) not null,
+    check_code varchar(128) not null,
+    issue_key varchar(512),
+    action_type varchar(128) not null,
+    policy_basis text not null,
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint uq_prompt_runtime_governance_action_policy
+        unique (contract_version, prompt_key, metric_code, check_code),
+    constraint fk_prompt_runtime_governance_action_policy_type
+        foreign key (action_type)
+        references prompt_runtime_governance_action_type_contract (action_type)
+);
+
+create table if not exists prompt_runtime_metric_check_slot_contract (
+    id bigserial primary key,
+    contract_version varchar(128) not null,
+    prompt_key varchar(128) not null default 'SECURITY_DECISION',
+    metric_code varchar(32) not null,
+    check_code varchar(128) not null,
+    slot_key varchar(256) not null,
+    prompt_location varchar(512) not null,
+    required_role varchar(128),
+    interpretation_role varchar(128),
+    required boolean not null default true,
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint uq_prompt_runtime_metric_check_slot_contract
+        unique (contract_version, prompt_key, metric_code, check_code, slot_key),
+    constraint fk_prompt_runtime_metric_check_slot_contract_slot
+        foreign key (contract_version, prompt_key, slot_key)
+        references prompt_runtime_slot_contract (contract_version, prompt_key, slot_key)
+);
+
+create table if not exists prompt_runtime_slot_contract (
+    id bigserial primary key,
+    contract_version varchar(128) not null,
+    prompt_key varchar(128) not null default 'SECURITY_DECISION',
+    slot_key varchar(256) not null,
+    prompt_location varchar(512) not null,
+    section_key varchar(256) not null,
+    label_key varchar(256),
+    signal_key varchar(512) not null,
+    canonical_context_path varchar(512) not null,
+    source_producer varchar(256) not null,
+    priority varchar(64) not null,
+    truncation_policy varchar(64) not null,
+    required_role varchar(128),
+    interpretation_role varchar(128),
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint uq_prompt_runtime_slot_contract
+        unique (contract_version, prompt_key, slot_key)
+);
+
+create table if not exists prompt_runtime_governance_application_ledger (
+    id bigserial primary key,
+    application_id varchar(256) not null unique,
+    rule_id varchar(256) not null,
+    source_action_id varchar(256) not null,
+    registry_scope varchar(128) not null,
+    prompt_key varchar(128) not null,
+    prompt_version varchar(128) not null,
+    tenant_id varchar(256),
+    resource_id varchar(256),
+    resource_url text,
+    http_method varchar(32),
+    request_id varchar(256),
+    system_prompt_hash varchar(128) not null,
+    user_prompt_hash varchar(128) not null,
+    before_prompt_hash varchar(128) not null,
+    after_prompt_hash varchar(128) not null,
+    slot_key varchar(256),
+    rule_type varchar(128) not null,
+    applied_operation varchar(128) not null,
+    result_state varchar(64) not null,
+    changed_prompt boolean not null default false,
+    application_context_json jsonb not null default '{}',
+    applied_at timestamp not null default current_timestamp,
+    constraint fk_prompt_runtime_governance_application_rule
+        foreign key (rule_id)
+        references prompt_runtime_governance_rule (rule_id)
+);
+
+create table if not exists prompt_runtime_governance_check_action_contract (
+    id bigserial primary key,
+    contract_version varchar(128) not null,
+    prompt_key varchar(128) not null default 'SECURITY_DECISION',
+    metric_code varchar(32) not null,
+    check_code varchar(128) not null,
+    action_type varchar(128) not null,
+    action_reason text not null,
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    constraint uq_prompt_runtime_governance_check_action_contract
+        unique (contract_version, prompt_key, metric_code, check_code),
+    constraint fk_prompt_runtime_governance_check_action_contract_type
+        foreign key (action_type)
+        references prompt_runtime_governance_action_type_contract (action_type)
+);
+
+create table if not exists prompt_runtime_governance_action_type_contract (
+    action_type varchar(128) primary key,
+    action_family varchar(128) not null,
+    action_intent text not null,
+    active boolean not null default true,
+    created_at timestamp not null default current_timestamp,
+    updated_at timestamp not null default current_timestamp,
+    display_label text,
+    button_label text,
+    customer_description text
+);
+
+CREATE TABLE IF NOT EXISTS official_prompt_signal_contract (
+    id BIGSERIAL PRIMARY KEY,
+    contract_version VARCHAR(128) NOT NULL,
+    metric_code VARCHAR(32) NOT NULL,
+    check_code VARCHAR(128) NOT NULL,
+    signal_key VARCHAR(256) NOT NULL,
+    prompt_location VARCHAR(512),
+    required_role VARCHAR(128),
+    interpretation_role VARCHAR(128),
+    created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+    UNIQUE (contract_version, metric_code, check_code, signal_key)
+);
+
+CREATE TABLE IF NOT EXISTS official_metric_evaluation_contract (
+    id BIGSERIAL PRIMARY KEY,
+    contract_version VARCHAR(128) NOT NULL,
+    metric_code VARCHAR(32) NOT NULL,
+    check_code VARCHAR(128) NOT NULL,
+    purpose_question TEXT NOT NULL,
+    pass_condition TEXT NOT NULL,
+    fail_condition TEXT NOT NULL,
+    issue_key VARCHAR(512),
+    customer_visible BOOLEAN NOT NULL DEFAULT TRUE,
+    readiness_scope VARCHAR(128) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+);
 `;
