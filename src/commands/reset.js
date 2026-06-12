@@ -18,6 +18,41 @@ const {
   findBackupFiles
 } = require('../core/cleanup');
 
+const { spawnSync } = require('child_process');
+
+function forceCleanupByPattern(pattern) {
+  if (!pattern) return;
+  // 1. Find and remove containers matching the pattern
+  try {
+    const ps = spawnSync('docker', ['ps', '-a', '--filter', `name=${pattern}`, '--format', '{{.Names}}'], { shell: false });
+    if (ps.status === 0 && ps.stdout) {
+      const names = ps.stdout.toString().split(/\r?\n/).map(n => n.trim()).filter(Boolean);
+      for (const name of names) {
+        if (name.includes(pattern)) {
+          spawnSync('docker', ['rm', '-f', name], { shell: false });
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore
+  }
+
+  // 2. Find and remove volumes matching the pattern
+  try {
+    const vol = spawnSync('docker', ['volume', 'ls', '--format', '{{.Name}}'], { shell: false });
+    if (vol.status === 0 && vol.stdout) {
+      const names = vol.stdout.toString().split(/\r?\n/).map(n => n.trim()).filter(Boolean);
+      for (const name of names) {
+        if (name.includes(pattern)) {
+          spawnSync('docker', ['volume', 'rm', '-f', name], { shell: false });
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore
+  }
+}
+
 module.exports = function (program) {
   program
     .command('reset')
@@ -62,6 +97,7 @@ module.exports = function (program) {
       let runInfra = !!opts.infra;
       let runCode = !!opts.code;
       let runAll = !!opts.all;
+      let dockerFailed = false;
 
       // contexa reset --simulate가 명시되면 contexa init --simulate의 완벽한 대칭형 리셋으로 동작하도록
       // 코드 설정 초기화(runCode)를 함께 활성화합니다.
@@ -145,40 +181,84 @@ module.exports = function (program) {
       // 1. Stop and Remove Docker containers
       if (isDockerCliInstalled() && (runSimulate || runInfra)) {
         const s1 = ora(t('reset.stoppingContainers') || 'Stopping and removing Docker containers...').start();
+        let dockerErrorMessage = '';
         
         // 1a. Clean simulation project (ctxa-sim)
         if (runSimulate) {
           const simInfraDir = resolveInfraDir('ctxa-sim');
-          if (fs.existsSync(path.join(simInfraDir, 'docker-compose.yml'))) {
+          // If the compose file doesn't exist, temporarily recreate it to allow down -v to clean up orphaned volumes
+          if (!fs.existsSync(path.join(simInfraDir, 'docker-compose.yml'))) {
             try {
-              dockerCompose(['-p', 'ctxa-sim', 'down', '-v'], { cwd: simInfraDir, stdio: 'ignore' });
-            } catch (e) {
-              // Ignore down failures if container already stopped/removed
+              const { generateDockerCompose } = require('../core/injector/compose');
+              await generateDockerCompose(simInfraDir, { infra: 'distributed', includeOllama: true });
+            } catch (err) {
+              // Ignore generation error and attempt down anyway
             }
+          }
+          try {
+            const result = dockerCompose(['-p', 'ctxa-sim', 'down', '-v'], { cwd: simInfraDir, stdio: 'pipe' });
+            if (result.status !== 0) {
+              dockerFailed = true;
+              dockerErrorMessage += `ctxa-sim down failed: ${result.stderr ? result.stderr.toString() : 'Unknown error'}\n`;
+            }
+          } catch (e) {
+            dockerFailed = true;
+            dockerErrorMessage += `ctxa-sim down execution error: ${e.message}\n`;
           }
         }
 
         // 1b. Clean default project contexa stack
         if (runInfra) {
           const defaultInfraDir = resolveInfraDir(projectName);
-          if (fs.existsSync(path.join(defaultInfraDir, 'docker-compose.yml'))) {
+          // If the compose file doesn't exist, temporarily recreate it to allow down -v to clean up orphaned volumes
+          if (!fs.existsSync(path.join(defaultInfraDir, 'docker-compose.yml'))) {
             try {
-              dockerCompose(['-p', projectName, 'down', '-v'], { cwd: defaultInfraDir, stdio: 'ignore' });
-            } catch (e) {
+              const { generateDockerCompose } = require('../core/injector/compose');
+              await generateDockerCompose(defaultInfraDir, { infra: 'distributed', includeOllama: true });
+            } catch (err) {
               // Ignore
             }
+          }
+          try {
+            const result = dockerCompose(['-p', projectName, 'down', '-v'], { cwd: defaultInfraDir, stdio: 'pipe' });
+            if (result.status !== 0) {
+              dockerFailed = true;
+              dockerErrorMessage += `${projectName} down failed: ${result.stderr ? result.stderr.toString() : 'Unknown error'}\n`;
+            }
+          } catch (e) {
+            dockerFailed = true;
+            dockerErrorMessage += `${projectName} down execution error: ${e.message}\n`;
           }
           // 프로젝트 루트 디렉토리에서 docker-compose.yml 검색 및 종료 (디렉토리 프로젝트 자동 매핑)
           if (fs.existsSync(path.join(projectDir, 'docker-compose.yml'))) {
             try {
-              dockerCompose(['down', '-v'], { cwd: projectDir, stdio: 'ignore' });
+              const result = dockerCompose(['down', '-v'], { cwd: projectDir, stdio: 'pipe' });
+              if (result.status !== 0) {
+                dockerFailed = true;
+                dockerErrorMessage += `project root compose down failed: ${result.stderr ? result.stderr.toString() : 'Unknown error'}\n`;
+              }
             } catch (e) {
-              // Ignore
+              dockerFailed = true;
+              dockerErrorMessage += `project root compose down execution error: ${e.message}\n`;
             }
           }
         }
         
-        s1.succeed(t('reset.stoppingContainers') || 'Docker containers stopped and removed.');
+        if (dockerFailed) {
+          s1.fail(`Docker cleanup failed:\n${dockerErrorMessage}`);
+        } else {
+          // Fallback force cleanup of leftover/orphaned containers and volumes
+          if (runSimulate) {
+            forceCleanupByPattern('ctxa-sim');
+          }
+          if (runInfra) {
+            forceCleanupByPattern('contexa');
+            if (projectName !== 'contexa') {
+              forceCleanupByPattern(projectName);
+            }
+          }
+          s1.succeed(t('reset.stoppingContainers') || 'Docker containers stopped and removed.');
+        }
       } else if (runSimulate || runInfra) {
         console.log(chalk.gray(`  i ${t('reset.noContainers') || 'Docker CLI not found. Skipping container cleanup.'}`));
       }
@@ -239,6 +319,22 @@ module.exports = function (program) {
           || (fs.existsSync(path.join(projectDir, 'pom.xml')) ? path.join(projectDir, 'pom.xml')
              : path.join(projectDir, 'build.gradle'));
 
+        // Clean up any sibling .bak files
+        try {
+          const siblingBaks = [
+            ymlPath + '.bak',
+            propsPath + '.bak',
+            buildPath + '.bak'
+          ];
+          for (const siblingBak of siblingBaks) {
+            if (fs.existsSync(siblingBak)) {
+              fs.removeSync(siblingBak);
+            }
+          }
+        } catch (e) {
+          // Ignore
+        }
+
         if (buildPath && !restoredOriginals.has(path.resolve(buildPath))) {
           await cleanupBuildFile(buildPath);
         }
@@ -282,7 +378,7 @@ module.exports = function (program) {
       }
 
       // 4. Remove infrastructure cache/config directories (Contexa owned)
-      if (runSimulate || runInfra) {
+      if ((runSimulate || runInfra) && !dockerFailed) {
         const s4 = ora(t('reset.removingDir') || 'Cleaning Contexa owned cache/config...').start();
         try {
           if (runSimulate) {

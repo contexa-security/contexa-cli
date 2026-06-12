@@ -590,7 +590,7 @@ module.exports = function (program) {
             console.log(chalk.red('  x Build dependency injection failed.'));
             console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
             console.log('');
-            await rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged);
+            await rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged, opts.dir);
             process.exit(1);
           }
         }
@@ -930,26 +930,52 @@ function isValidOllamaModel(s) {
 // Restore application.yml and the build file from their .bak siblings when a
 // later step in the (yml + build) transaction fails. The .bak files are left
 // in place after restore so the operator can still inspect what we attempted.
-async function rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged) {
+async function rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged, projectDir) {
   const restored = [];
   if (buildChanged) {
-    const bak = buildPath + '.bak';
-    if (await fs.pathExists(bak)) {
-      try { await fs.copy(bak, buildPath, { overwrite: true }); restored.push(path.basename(buildPath)); }
-      catch (e) { console.log(chalk.red(`    Failed to restore ${path.basename(buildPath)}: ${e.message}`)); }
+    const bak1 = buildPath + '.bak';
+    const bak2 = projectDir ? path.join(projectDir, 'contexa', 'bak', path.relative(projectDir, buildPath)) : null;
+    const bak = (await fs.pathExists(bak1)) ? bak1 : (bak2 && (await fs.pathExists(bak2)) ? bak2 : null);
+    if (bak) {
+      try {
+        await fs.copy(bak, buildPath, { overwrite: true });
+        restored.push(path.basename(buildPath));
+      } catch (e) {
+        console.log(chalk.red(`    Failed to restore ${path.basename(buildPath)}: ${e.message}`));
+      }
     }
   }
   if (ymlChanged) {
-    const bak = ymlPath + '.bak';
-    if (await fs.pathExists(bak)) {
-      try { await fs.copy(bak, ymlPath, { overwrite: true }); restored.push(path.basename(ymlPath)); }
-      catch (e) { console.log(chalk.red(`    Failed to restore ${path.basename(ymlPath)}: ${e.message}`)); }
+    const bak1 = ymlPath + '.bak';
+    const bak2 = projectDir ? path.join(projectDir, 'contexa', 'bak', path.relative(projectDir, ymlPath)) : null;
+    const bak = (await fs.pathExists(bak1)) ? bak1 : (bak2 && (await fs.pathExists(bak2)) ? bak2 : null);
+    if (bak) {
+      try {
+        await fs.copy(bak, ymlPath, { overwrite: true });
+        restored.push(path.basename(ymlPath));
+      } catch (e) {
+        console.log(chalk.red(`    Failed to restore ${path.basename(ymlPath)}: ${e.message}`));
+      }
+    }
+  }
+  // Clean up backups dir if empty or after restore
+  if (projectDir) {
+    try {
+      const backupsDir = path.join(projectDir, 'contexa', 'bak');
+      if (await fs.pathExists(backupsDir)) {
+        await fs.remove(backupsDir);
+        const parentContexa = path.join(projectDir, 'contexa');
+        if (await fs.pathExists(parentContexa) && (await fs.readdir(parentContexa)).length === 0) {
+          await fs.remove(parentContexa);
+        }
+      }
+    } catch (e) {
+      // Ignore
     }
   }
   if (restored.length > 0) {
     console.log(chalk.yellow('  ! Rolled back: ' + restored.join(', ')));
     console.log(chalk.gray('    Your project files have been restored to their pre-init state.'));
-    console.log(chalk.gray('    The .bak files are kept on disk for reference.'));
     console.log('');
   } else {
     console.log(chalk.yellow('  ! No automatic rollback was performed (no .bak files found or no changes made).'));
