@@ -22,15 +22,6 @@ async function generateInitDbScripts(infraDir, opts = {}) {
   const initdbDir = path.join(infraDir, 'initdb');
   await fs.ensureDir(initdbDir);
 
-  const isSimulate = opts.simulate || infraDir.includes('ctxa-sim');
-  if (isSimulate) {
-    const ddlPath = path.join(initdbDir, '01-core-ddl.sql');
-    if (await fs.pathExists(ddlPath)) {
-      await fs.remove(ddlPath);
-    }
-    return { initdbDir };
-  }
-
   // 01-core-ddl.sql (numbered for execution order)
   await fs.writeFile(path.join(initdbDir, '01-core-ddl.sql'), getDdlScript());
 
