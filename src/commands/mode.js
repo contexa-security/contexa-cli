@@ -3,7 +3,9 @@
 const chalk = require('chalk');
 const ora   = require('ora');
 const fs    = require('fs-extra');
+const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
+const { t } = require('../core/i18n');
 
 module.exports = function (program) {
   program
@@ -20,24 +22,47 @@ module.exports = function (program) {
       }
 
       const target = opts.enforce ? 'enforce' : 'shadow';
-      const project = await detectSpringProject(opts.dir);
+      const targetUpper = target.toUpperCase();
+      // mode only mutates application.yml; no docker probe needed.
+      const project = await detectSpringProject(opts.dir, { probeDocker: false });
 
       if (!project.appYmlPath || !await fs.pathExists(project.appYmlPath)) {
-        console.log(chalk.red('\n✗ Run contexa init first\n'));
+        console.log(chalk.red('\n  x ' + t('mode.notInstalled') + '\n'));
         return;
       }
 
-      const s = ora('Switching mode...').start();
-      let yml = await fs.readFile(project.appYmlPath, 'utf8');
-      yml = yml.replace(/mode: \w+/, `mode: ${target}`);
-      await fs.writeFile(project.appYmlPath, yml);
+      const s = ora('...').start();
+      const content = await fs.readFile(project.appYmlPath, 'utf8');
+
+      let root;
+      try {
+        root = yaml.load(content);
+      } catch (err) {
+        s.stop();
+        console.log(chalk.red('\n  x cannot parse application.yml: ' + err.message + '\n'));
+        return;
+      }
+      if (!root || typeof root !== 'object' || Array.isArray(root)) root = {};
+
+      const previous = root?.contexa?.security?.zerotrust?.mode;
+      if (!root.contexa || !root.contexa.security || !root.contexa.security.zerotrust) {
+        s.stop();
+        console.log(chalk.red('\n  x ' + t('mode.noBlock') + '\n'));
+        return;
+      }
+      const previousUpper = (previous || '').toString().toUpperCase();
+      if (previousUpper === targetUpper) {
+        s.stop();
+        console.log(chalk.gray('\n  - ' + t('mode.unchanged', targetUpper) + '\n'));
+        return;
+      }
+
+      await fs.copy(project.appYmlPath, project.appYmlPath + '.bak');
+      root.contexa.security.zerotrust.mode = targetUpper;
+      const out = yaml.dump(root, { lineWidth: 200, noRefs: true, sortKeys: false, quotingType: '"' });
+      await fs.writeFile(project.appYmlPath, out);
       s.stop();
 
-      if (target === 'enforce') {
-        console.log(chalk.green('\n✅ ENFORCE mode — threats will be blocked'));
-      } else {
-        console.log(chalk.yellow('\n✅ SHADOW mode — analyze only'));
-      }
-      console.log(chalk.gray('  Restart your app to apply.\n'));
+      console.log(chalk.green('\n  v ' + t('mode.changed', previousUpper || 'unset', targetUpper) + '\n'));
     });
 };
