@@ -698,37 +698,15 @@ module.exports = function (program) {
               if (!isValidOllamaModel(chatModel)) throw new Error(`Invalid OLLAMA_CHAT_MODEL value: ${chatModel}`);
               if (!isValidOllamaModel(embedModel)) throw new Error(`Invalid OLLAMA_EMBEDDING_MODEL value: ${embedModel}`);
 
-              // Ollama 모델 다운로드 확인 — 수 분~수십 분 소요될 수 있음
-              let shouldPullOllama = true;
-              if (!opts.yes) {
-                const ollamaAns = await inquirer.prompt([{
-                  type: 'confirm',
-                  name: 'pullOllama',
-                  message:
-                    `\n  Ollama LLM 모델을 지금 다운로드하시겠습니까?\n` +
-                    `    · ${chatModel} (약 4.7 GB)\n` +
-                    `    · ${embedModel} (약 670 MB)\n` +
-                    chalk.yellow(`    소요 시간: 네트워크 속도에 따라 수 분 ~ 수십 분 소요\n`) +
-                    chalk.gray(`    나중에 수동 실행: docker exec ${ollamaContainer} ollama pull ${chatModel}`),
-                  default: true,
-                }]);
-                shouldPullOllama = ollamaAns.pullOllama;
-              }
-
-              if (!shouldPullOllama) {
-                console.log(chalk.yellow('\n  ! Ollama 모델 다운로드를 건너뜁니다.'));
-                console.log(chalk.gray('    나중에 아래 명령어로 실행하세요:'));
-                console.log(chalk.cyan('    contexa ollama pull'));
-                console.log(chalk.gray('    (실행 중인 Ollama 컨테이너를 자동 감지하여 모델을 다운로드합니다)'));
-              } else {
-                const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
+              // Ollama 모델 다운로드 자동 진행
+              const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
                 const s5 = ora(t('step.pullingChat', chatModel)).start();
                 try {
                   let ready = false;
                   const deadlineMs = Date.now() + 90000; // 90s absolute cap
                   while (!ready && Date.now() < deadlineMs) {
                     const probe = dockerTry(
-                      ['exec', ollamaContainer, 'curl', '-sf', 'http://localhost:11434/api/tags'],
+                      ['exec', ollamaContainer, 'ollama', 'list'],
                       { stdio: 'ignore', timeout: 3000 }
                     );
                     if (!probe.error && probe.status === 0) { ready = true; break; }
@@ -751,10 +729,9 @@ module.exports = function (program) {
                   console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
                 }
               }
+            } catch (e) {
+              s4.fail(t('step.dockerFailed'));
             }
-          } catch (e) {
-            s4.fail(t('step.dockerFailed'));
-          }
         }
       }
     }

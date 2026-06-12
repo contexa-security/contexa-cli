@@ -119,7 +119,7 @@ function isNativeOllamaRunning(port) {
 async function waitForDockerOllama(container, deadlineMs) {
   while (Date.now() < deadlineMs) {
     const probe = dockerTry(
-      ['exec', container, 'curl', '-sf', 'http://localhost:11434/api/tags'],
+      ['exec', container, 'ollama', 'list'],
       { stdio: 'ignore', timeout: 3000 }
     );
     if (!probe.error && probe.status === 0) return true;
