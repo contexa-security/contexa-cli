@@ -3,7 +3,9 @@
 // Auto-extracted from the monolithic injector.js. Edit the SQL here
 // directly and regenerate the SEA bundle (npm run bundle) afterwards.
 
-module.exports = `create table users
+module.exports = `create extension if not exists vector;
+
+create table users
 (
     id                    bigserial
         primary key,
