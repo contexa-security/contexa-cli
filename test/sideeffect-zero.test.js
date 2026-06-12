@@ -386,6 +386,15 @@ test('A1: simulate.js targets ctxa-sim regardless of CONTEXA_PROJECT', () => {
     'simulate.js must not depend on CONTEXA_PROJECT via resolveProjectName()');
 });
 
+test('A2: simulate reset preserves and refreshes initdb DDL before recreating volumes', () => {
+  const simSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'commands', 'simulate.js'), 'utf8');
+  assert.equal(simSrc.includes('emptyDirSync'), false,
+    'simulate reset must not delete initdb scripts before docker compose up');
+  assert.match(simSrc, /generateInitDbScripts\(infraDir\)/,
+    'simulate reset must regenerate the latest 01-core-ddl.sql before docker compose up');
+});
+
 // =====================================================================
 // A3 + A4 - normalizePath helper in init.js must:
 //   - expand "~" / "~/x" to the OS home directory

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { osDefaultInfraDir } = require('../core/project');
 const { dockerTry, dockerCompose: dockerComposeExec } = require('../core/docker');
+const { generateInitDbScripts } = require('../core/injector');
 
 // `contexa simulate` is the lifecycle helper for the SIMULATION stack created
 // by `contexa init --simulate` (compose project name "ctxa-sim", containers
@@ -112,7 +113,7 @@ module.exports = function (program) {
   sim.command('reset')
     .description('Stop the simulation stack AND delete its volumes (clean slate)')
     .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action((opts) => {
+    .action(async (opts) => {
       const { projectName, infraDir } = buildContext(opts);
       const compose = findCompose(infraDir);
       if (!compose) {
@@ -123,10 +124,7 @@ module.exports = function (program) {
       console.log(chalk.yellow(`\n  Resetting simulation stack "${projectName}" (down -v + up -d)...\n`));
       dockerCompose(['-p', projectName, 'down', '-v'], infraDir);
 
-      const initdbDir = path.join(infraDir, 'initdb');
-      if (fs.existsSync(initdbDir)) {
-        fs.emptyDirSync(initdbDir);
-      }
+      await generateInitDbScripts(infraDir);
 
       dockerCompose(['-p', projectName, 'up', '-d'],   infraDir);
     });
