@@ -1938,7 +1938,14 @@ CREATE TABLE IF NOT EXISTS official_metric_evaluation_contract (
     issue_key VARCHAR(512),
     customer_visible BOOLEAN NOT NULL DEFAULT TRUE,
     readiness_scope VARCHAR(128) NOT NULL,
-    created_at TIMESTAMP(6) NOT NULL DEFAULT now()
+    problem_title TEXT,
+    short_problem TEXT,
+    expected_message TEXT,
+    pass_message TEXT,
+    failure_message TEXT,
+    created_at TIMESTAMP(6) NOT NULL DEFAULT now(),
+    CONSTRAINT uq_official_metric_evaluation_contract
+        UNIQUE (contract_version, metric_code, check_code)
 );
 
 create index idx_soar_approval_vote_decision
