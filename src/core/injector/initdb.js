@@ -2,6 +2,7 @@
 
 // Postgres docker-entrypoint-initdb.d generator.
 //   01-core-ddl.sql : full schema for the contexa platform (entity-derived)
+//   02-dml.sql      : OSS-safe seed data, including official prompt inspection contracts
 //
 // Same isolation rule as compose.js: `infraDir` MUST be contexa-owned, never
 // the customer's project directory. A defensive .gitignore is dropped beside
@@ -13,9 +14,14 @@ const fs = require('fs-extra');
 const path = require('path');
 
 const DDL_SCRIPT = require('./templates/ddl');
+const DML_SCRIPT = require('./templates/dml');
 
 function getDdlScript() {
   return DDL_SCRIPT;
+}
+
+function getDmlScript() {
+  return DML_SCRIPT;
 }
 
 async function generateInitDbScripts(infraDir, opts = {}) {
@@ -24,6 +30,7 @@ async function generateInitDbScripts(infraDir, opts = {}) {
 
   // 01-core-ddl.sql (numbered for execution order)
   await fs.writeFile(path.join(initdbDir, '01-core-ddl.sql'), getDdlScript());
+  await fs.writeFile(path.join(initdbDir, '02-dml.sql'), getDmlScript());
 
   // Drop a defensive .gitignore inside initdb/ itself.
   // The "*" line gitignores everything, "!.gitignore" keeps the
@@ -44,5 +51,5 @@ async function generateInitDbScripts(infraDir, opts = {}) {
 
 module.exports = {
   generateInitDbScripts,
+  getDmlScript,
 };
-

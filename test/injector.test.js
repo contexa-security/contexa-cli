@@ -320,15 +320,17 @@ test('injectGradleDep: idempotent when artifact already present', async () => {
 });
 
 // ============================================================
-// generateInitDbScripts - seed password randomization
+// generateInitDbScripts - schema and OSS seed data
 // ============================================================
 
-test('generateInitDbScripts: writes 01-core-ddl.sql successfully', async () => {
+test('generateInitDbScripts: writes initdb scripts successfully', async () => {
   const dir = await tempDir();
   try {
     await generateInitDbScripts(dir);
     const ddlExists = await fs.pathExists(path.join(dir, 'initdb', '01-core-ddl.sql'));
+    const dmlExists = await fs.pathExists(path.join(dir, 'initdb', '02-dml.sql'));
     assert.equal(ddlExists, true, '01-core-ddl.sql should be generated');
+    assert.equal(dmlExists, true, '02-dml.sql should be generated');
   } finally { await fs.remove(dir); }
 });
 
@@ -381,6 +383,37 @@ test('generateInitDbScripts: generated DDL contains the complete OSS runtime sch
     ]) {
       assert.equal(uniqueTableNames.includes(forbidden), false,
         `01-core-ddl.sql must not include Enterprise-only table ${forbidden}`);
+    }
+  } finally { await fs.remove(dir); }
+});
+
+test('generateInitDbScripts: generated DML installs OSS official prompt contract seed data only', async () => {
+  const dir = await tempDir();
+  try {
+    await generateInitDbScripts(dir);
+    const dml = await fs.readFile(path.join(dir, 'initdb', '02-dml.sql'), 'utf8');
+    const countRows = (table) => {
+      const re = new RegExp(`insert\\s+into\\s+${table}[\\s\\S]*?on\\s+conflict`, 'i');
+      const block = dml.match(re)?.[0] || '';
+      return (block.match(/current_timestamp\)/gi) || []).length;
+    };
+
+    assert.equal(countRows('official_metric_evaluation_contract'), 66,
+      '02-dml.sql must seed all 66 official metric check contracts');
+    assert.equal(countRows('official_prompt_signal_contract'), 679,
+      '02-dml.sql must seed all official prompt signal contracts');
+    for (const forbiddenInsert of [
+      'managed_resource',
+      'permission',
+      'role_permissions',
+      'prompt_runtime_governance_action',
+      'prompt_runtime_governance_rule',
+      'prompt_runtime_metric_check_slot_contract',
+      'prompt_quality_certificate_ledger',
+      'protectable_resource_registry',
+    ]) {
+      assert.equal(new RegExp(`insert\\s+into\\s+${forbiddenInsert}\\b`, 'i').test(dml), false,
+        `02-dml.sql must not seed ${forbiddenInsert}`);
     }
   } finally { await fs.remove(dir); }
 });
