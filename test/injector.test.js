@@ -332,7 +332,7 @@ test('generateInitDbScripts: writes 01-core-ddl.sql successfully', async () => {
   } finally { await fs.remove(dir); }
 });
 
-test('generateInitDbScripts: generated DDL contains the complete IAM runtime schema', async () => {
+test('generateInitDbScripts: generated DDL contains the complete OSS runtime schema', async () => {
   const dir = await tempDir();
   try {
     await generateInitDbScripts(dir);
@@ -341,8 +341,8 @@ test('generateInitDbScripts: generated DDL contains the complete IAM runtime sch
       .map(match => match[1].toLowerCase());
     const uniqueTableNames = [...new Set(tableNames)].sort();
 
-    assert.equal(uniqueTableNames.length, 88,
-      '01-core-ddl.sql must install every table from contexa-iam schema.sql');
+    assert.equal(uniqueTableNames.length, 73,
+      '01-core-ddl.sql must install every OSS table from contexa-iam db/schema.sql');
     const vectorExtensionIndex = ddl.search(/create\s+extension\s+if\s+not\s+exists\s+vector/i);
     const vectorStoreIndex = ddl.search(/create\s+table\s+(?:if\s+not\s+exists\s+)?vector_store/i);
     assert.notEqual(vectorExtensionIndex, -1,
@@ -352,8 +352,15 @@ test('generateInitDbScripts: generated DDL contains the complete IAM runtime sch
     assert.equal(vectorExtensionIndex < vectorStoreIndex, true,
       'pgvector extension must be created before vector_store uses vector(1024)');
     for (const required of [
+      'sealed_evidence_package',
+      'official_verification_oss_run',
       'official_metric_evaluation_contract',
       'official_prompt_signal_contract',
+    ]) {
+      assert.equal(uniqueTableNames.includes(required), true,
+        `01-core-ddl.sql must include ${required}`);
+    }
+    for (const forbidden of [
       'pqa_resolution_work_item',
       'prompt_runtime_governance_action',
       'prompt_runtime_governance_action_policy',
@@ -364,9 +371,16 @@ test('generateInitDbScripts: generated DDL contains the complete IAM runtime sch
       'prompt_runtime_governance_scope_type_contract',
       'prompt_runtime_metric_check_slot_contract',
       'prompt_runtime_slot_contract',
+      'prompt_quality_certificate_ledger',
+      'prompt_quality_certificate_audit_event',
+      'prompt_quality_issue_case',
+      'prompt_governance_registry',
+      'prompt_governance_runtime_cache_invalidation',
+      'protectable_resource_registry',
+      'protectable_resource_overlay',
     ]) {
-      assert.equal(uniqueTableNames.includes(required), true,
-        `01-core-ddl.sql must include ${required}`);
+      assert.equal(uniqueTableNames.includes(forbidden), false,
+        `01-core-ddl.sql must not include Enterprise-only table ${forbidden}`);
     }
   } finally { await fs.remove(dir); }
 });
