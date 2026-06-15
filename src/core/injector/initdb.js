@@ -15,13 +15,19 @@ const path = require('path');
 
 const DDL_SCRIPT = require('./templates/ddl');
 const DML_SCRIPT = require('./templates/dml');
+const MENU_DML_SCRIPT = require('./templates/menu-dml');
+const SYSTEM_SETTINGS_DML_SCRIPT = require('./templates/system-settings-dml');
 
 function getDdlScript() {
   return DDL_SCRIPT;
 }
 
 function getDmlScript() {
-  return DML_SCRIPT;
+  return [
+    DML_SCRIPT,
+    MENU_DML_SCRIPT,
+    SYSTEM_SETTINGS_DML_SCRIPT,
+  ].join('\n\n');
 }
 
 async function generateInitDbScripts(infraDir, opts = {}) {
