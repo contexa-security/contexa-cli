@@ -5,8 +5,9 @@ AI-Native Zero Trust Security CLI for Spring Boot projects.
 `contexa-cli` provisions a Contexa setup into an existing Spring Boot project:
 it adds the starter dependency, writes a Contexa-managed block into
 `application.yml` (with an isolated `contexa.datasource` separate from your
-application DB), generates seed SQL, and produces a `docker-compose.yml` that
-binds ports to `127.0.0.1` only.
+application DB), and can produce a `docker-compose.yml` that binds ports to
+`127.0.0.1` only. Database schema and seed data are installed by the
+`contexa-iam` runtime initializer when the application starts.
 
 > For PoC / enterprise demo, run `contexa init --distributed` to additionally
 > provision Redis + Kafka and switch the application to
@@ -84,12 +85,12 @@ Interactive setup. Detects Maven (`pom.xml`) or Gradle (`build.gradle` /
    The block contains an isolated `contexa.datasource` (driven by
    `CONTEXA_DB_*` / `DB_*` env vars) plus standard `spring.datasource` and
    `spring.ai.*` configuration.
-3. Generates `initdb/01-core-ddl.sql`, `initdb/02-dml.sql` with a
-   freshly-randomized BCrypt hash for the four seed accounts.
-4. Generates `docker-compose.yml` (PostgreSQL + Ollama, ports bound to
+3. Generates `docker-compose.yml` when infrastructure provisioning is selected
+   (PostgreSQL + Ollama, ports bound to
    `127.0.0.1`).
-5. Optionally starts the containers and pulls the Ollama models.
-6. Prints the seed account password **once** so you can record it.
+4. Optionally starts the containers and pulls the Ollama models.
+5. Leaves table creation and base seed insertion to `contexa-iam` at
+   application startup.
 
 Flags:
 
@@ -99,8 +100,8 @@ Flags:
 | `--force` | Re-initialize even if Contexa is already detected |
 | `--dir <path>` | Project directory (default: current working directory) |
 | `--lang <code>` | Interface language (`en` or `ko`) |
-| `--distributed` | **Opt-in:** install distributed infrastructure (Postgres + Ollama + Redis + Zookeeper + Kafka), set `contexa.infrastructure.mode: DISTRIBUTED`, and add `redisson` + `spring-kafka` deps. Without this flag, `init` does not generate `docker-compose.yml`, does not generate `initdb/`, and does not start any containers. Production deployments should still use Kubernetes + Helm. |
-| `--no-docker` | With `--distributed`: generate compose/initdb files but do not run `docker compose up -d`. Has no effect without `--distributed` (init does nothing infra-related anyway). |
+| `--distributed` | **Opt-in:** install distributed infrastructure (Postgres + Ollama + Redis + Zookeeper + Kafka), set `contexa.infrastructure.mode: DISTRIBUTED`, and add `redisson` + `spring-kafka` deps. Without this flag, `init` does not generate `docker-compose.yml` and does not start any containers. Production deployments should still use Kubernetes + Helm. |
+| `--no-docker` | With `--distributed`: generate compose files but do not run `docker compose up -d`. Has no effect without `--distributed` (init does nothing infra-related anyway). |
 
 > **Default behavior:** `contexa init` (no flags) only updates `application.yml`
 > with the contexa-managed keys and adds `spring-boot-starter-contexa` to your
@@ -271,13 +272,13 @@ Both modes run a pre-flight check before `docker compose up -d`.
 | Symptom | Resolution |
 |---|---|
 | `Docker is not installed on this machine` | Install Docker Desktop (Windows/macOS) or Docker Engine (Linux), then open a new terminal and re-run `contexa init`. If you cannot install Docker, re-run with `--no-infra` to skip infrastructure provisioning - you must then run PostgreSQL/Ollama (and Redis/Kafka if `--distributed`) yourself. |
-| `Docker is installed but the daemon is not running` | Open Docker Desktop and wait for the whale icon to settle, OR run `sudo systemctl start docker` on Linux. Or re-run with `--no-docker` to generate compose/initdb files without starting them. |
+| `Docker is installed but the daemon is not running` | Open Docker Desktop and wait for the whale icon to settle, OR run `sudo systemctl start docker` on Linux. Or re-run with `--no-docker` to generate compose files without starting them. |
 | `Port 5432 / 6379 / 9092 (...) is already in use` | Stop the conflicting service, OR set `COMPOSE_BIND_HOST=0.0.0.0` to bind to a different interface, OR re-run with `--no-docker` and resolve the conflict before running compose manually. |
 | `Container "contexa-postgres" already exists` | compose will silently reuse it. If its config has drifted (different password, mount path, etc.) run `docker rm -f contexa-postgres` (and other contexa-* containers) before re-init. |
 | `redisson` version conflict with your existing BOM (`--distributed` only) | Set `CONTEXA_REDISSON_VERSION=<your-version>` before running `contexa init --distributed`. The CLI will use that version instead of the bundled `3.48.0`. |
 | Ollama model pull failed | Run `docker exec contexa-ollama ollama pull qwen2.5:7b`. Override default models with `OLLAMA_CHAT_MODEL=qwen2.5:3b` (and optionally `OLLAMA_EMBEDDING_MODEL`) before re-running `init`. |
 | Application can't connect to DB | Confirm `CONTEXA_DB_PASSWORD` matches the value in `docker-compose.yml`. Volumes persist across restarts; `docker compose down -v` resets the data directory. |
-| `permission` table column `auto_created` does not exist | Older `02-dml.sql` had a column the DDL did not declare. Re-run `contexa init --force` to regenerate `initdb/01-core-ddl.sql`, then `docker compose down -v && docker compose up -d` to re-bootstrap. |
+| Schema or seed data is missing after startup | Confirm the application includes `spring-boot-starter-contexa`, points `contexa.datasource.*` at the Contexa database, and starts with `contexa.iam.seed.enabled=true` or unset. The `contexa-iam` runtime initializer owns schema and seed installation. |
 
 ### `contexa scan` warnings explained
 
@@ -297,9 +298,8 @@ The CLI provisions a local-only PostgreSQL container with the default password
 exposed to your LAN by default; override with `COMPOSE_BIND_HOST=0.0.0.0` only
 if you need external access.
 
-The four seed users (`admin`, `kim_manager`, `park_user`, `dev_lead`) are
-created with a **per-init random password** that is printed once at the end
-of `contexa init`. Save it immediately - the CLI keeps no record of it.
+Seed users and base platform data are installed by the `contexa-iam` runtime
+initializer when the application starts.
 
 Before exposing the deployment to anything other than your own machine:
 

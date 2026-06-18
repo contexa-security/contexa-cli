@@ -9,7 +9,7 @@ const yaml = require('js-yaml');
 
 const {
   injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
-  generateDockerCompose, generateInitDbScripts,
+  generateDockerCompose,
 } = require('../src/core/injector');
 
 async function tempDir() {
@@ -319,103 +319,10 @@ test('injectGradleDep: idempotent when artifact already present', async () => {
   } finally { await fs.remove(dir); }
 });
 
-// ============================================================
-// generateInitDbScripts - schema and OSS seed data
-// ============================================================
-
-test('generateInitDbScripts: writes initdb scripts successfully', async () => {
-  const dir = await tempDir();
-  try {
-    await generateInitDbScripts(dir);
-    const ddlExists = await fs.pathExists(path.join(dir, 'initdb', '01-core-ddl.sql'));
-    const dmlExists = await fs.pathExists(path.join(dir, 'initdb', '02-dml.sql'));
-    assert.equal(ddlExists, true, '01-core-ddl.sql should be generated');
-    assert.equal(dmlExists, true, '02-dml.sql should be generated');
-  } finally { await fs.remove(dir); }
-});
-
-test('generateInitDbScripts: generated DDL contains the complete OSS runtime schema', async () => {
-  const dir = await tempDir();
-  try {
-    await generateInitDbScripts(dir);
-    const ddl = await fs.readFile(path.join(dir, 'initdb', '01-core-ddl.sql'), 'utf8');
-    const tableNames = [...ddl.matchAll(/^\s*create\s+table\s+(?:if\s+not\s+exists\s+)?(?:(?:"?public"?|\w+)\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?/gim)]
-      .map(match => match[1].toLowerCase());
-    const uniqueTableNames = [...new Set(tableNames)].sort();
-
-    assert.equal(uniqueTableNames.length, 73,
-      '01-core-ddl.sql must install every OSS table from contexa-iam db/schema.sql');
-    const vectorExtensionIndex = ddl.search(/create\s+extension\s+if\s+not\s+exists\s+vector/i);
-    const vectorStoreIndex = ddl.search(/create\s+table\s+(?:if\s+not\s+exists\s+)?vector_store/i);
-    assert.notEqual(vectorExtensionIndex, -1,
-      '01-core-ddl.sql must create the pgvector extension before vector_store');
-    assert.notEqual(vectorStoreIndex, -1,
-      '01-core-ddl.sql must include vector_store');
-    assert.equal(vectorExtensionIndex < vectorStoreIndex, true,
-      'pgvector extension must be created before vector_store uses vector(1024)');
-    for (const required of [
-      'sealed_evidence_package',
-      'official_verification_oss_run',
-      'official_metric_evaluation_contract',
-      'official_prompt_signal_contract',
-    ]) {
-      assert.equal(uniqueTableNames.includes(required), true,
-        `01-core-ddl.sql must include ${required}`);
-    }
-    for (const forbidden of [
-      'pqa_resolution_work_item',
-      'prompt_runtime_governance_action',
-      'prompt_runtime_governance_action_policy',
-      'prompt_runtime_governance_action_type_contract',
-      'prompt_runtime_governance_application_ledger',
-      'prompt_runtime_governance_check_action_contract',
-      'prompt_runtime_governance_rule',
-      'prompt_runtime_governance_scope_type_contract',
-      'prompt_runtime_metric_check_slot_contract',
-      'prompt_runtime_slot_contract',
-      'prompt_quality_certificate_ledger',
-      'prompt_quality_certificate_audit_event',
-      'prompt_quality_issue_case',
-      'prompt_governance_registry',
-      'prompt_governance_runtime_cache_invalidation',
-      'protectable_resource_registry',
-      'protectable_resource_overlay',
-    ]) {
-      assert.equal(uniqueTableNames.includes(forbidden), false,
-        `01-core-ddl.sql must not include Enterprise-only table ${forbidden}`);
-    }
-  } finally { await fs.remove(dir); }
-});
-
-test('generateInitDbScripts: generated DML installs OSS official prompt contract seed data only', async () => {
-  const dir = await tempDir();
-  try {
-    await generateInitDbScripts(dir);
-    const dml = await fs.readFile(path.join(dir, 'initdb', '02-dml.sql'), 'utf8');
-    const countRows = (table) => {
-      const re = new RegExp(`insert\\s+into\\s+${table}[\\s\\S]*?on\\s+conflict`, 'i');
-      const block = dml.match(re)?.[0] || '';
-      return (block.match(/current_timestamp\)/gi) || []).length;
-    };
-
-    assert.equal(countRows('official_metric_evaluation_contract'), 66,
-      '02-dml.sql must seed all 66 official metric check contracts');
-    assert.equal(countRows('official_prompt_signal_contract'), 679,
-      '02-dml.sql must seed all official prompt signal contracts');
-    for (const forbiddenInsert of [
-      'managed_resource',
-      'permission',
-      'role_permissions',
-      'prompt_runtime_governance_action',
-      'prompt_runtime_governance_rule',
-      'prompt_runtime_metric_check_slot_contract',
-      'prompt_quality_certificate_ledger',
-      'protectable_resource_registry',
-    ]) {
-      assert.equal(new RegExp(`insert\\s+into\\s+${forbiddenInsert}\\b`, 'i').test(dml), false,
-        `02-dml.sql must not seed ${forbiddenInsert}`);
-    }
-  } finally { await fs.remove(dir); }
+test('injector.js does not export database initdb generation', () => {
+  const exported = require('../src/core/injector');
+  assert.equal('generateInitDbScripts' in exported, false,
+    'CLI must not own schema/seed SQL copies; contexa-iam installs them at application startup');
 });
 
 // ============================================================
@@ -454,6 +361,18 @@ test('generateDockerCompose: POSTGRES_PASSWORD uses env fallback, not plaintext 
     assert.ok(yml.includes('POSTGRES_PASSWORD: ${CONTEXA_DB_PASSWORD:-contexa1234!@#}'));
     // Plain "POSTGRES_PASSWORD: contexa1234" without env wrapper must not appear.
     assert.equal(/POSTGRES_PASSWORD:\s*contexa1234/.test(yml), false);
+  } finally { await fs.remove(dir); }
+});
+
+test('generateDockerCompose: does not mount docker-entrypoint initdb SQL', async () => {
+  const dir = await tempDir();
+  try {
+    await generateDockerCompose(dir, { infra: 'distributed', includeOllama: true });
+    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
+    assert.equal(yml.includes('docker-entrypoint-initdb.d'), false,
+      'schema/seed data must be installed by contexa-iam at application startup');
+    assert.equal(yml.includes('./initdb'), false,
+      'CLI must not rely on generated initdb SQL copies');
   } finally { await fs.remove(dir); }
 });
 

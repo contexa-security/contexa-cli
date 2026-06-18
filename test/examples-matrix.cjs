@@ -66,19 +66,10 @@ function restore(moduleDir, snap) {
   // Remove anything contexa-cli created that was not in the snapshot.
   const newFiles = [
     'docker-compose.yml', 'docker-compose.yml.bak',
-    path.join('initdb', '01-core-ddl.sql'),
   ];
   for (const rel of newFiles) {
     const f = path.join(moduleDir, rel);
     if (fs.existsSync(f)) fs.rmSync(f, { force: true });
-  }
-  // Remove the initdb directory if now empty.
-  const initdb = path.join(moduleDir, 'initdb');
-  if (fs.existsSync(initdb)) {
-    try {
-      const left = fs.readdirSync(initdb);
-      if (left.length === 0) fs.rmdirSync(initdb);
-    } catch {}
   }
   // Remove .bak files contexa-cli created.
   for (const baseDir of [moduleDir, path.join(moduleDir, 'src/main/resources')]) {
@@ -257,7 +248,8 @@ function inspectModule(moduleDir, snap, init, distributed) {
     issues.push({ severity: 'warning', message: 'build file (build.gradle / pom.xml) not found in module directory' });
   }
 
-  // Infra side-effects: --distributed leaves docker-compose.yml + initdb/.
+  // Infra side-effects: --distributed leaves docker-compose.yml only.
+  // Schema/seed SQL is installed by contexa-iam on application startup.
   // Without --distributed the new policy is "do not touch infra".
   facts.composeWritten = fs.existsSync(path.join(moduleDir, 'docker-compose.yml'));
   facts.initdbWritten  = fs.existsSync(path.join(moduleDir, 'initdb'));
@@ -272,8 +264,8 @@ function inspectModule(moduleDir, snap, init, distributed) {
     if (!facts.composeWritten) {
       issues.push({ severity: 'error', message: '--distributed: docker-compose.yml was not generated' });
     }
-    if (!facts.initdbWritten) {
-      issues.push({ severity: 'error', message: '--distributed: initdb/ was not generated' });
+    if (facts.initdbWritten) {
+      issues.push({ severity: 'error', message: '--distributed: initdb/ was generated, but schema/seed must be installed by contexa-iam at app startup' });
     }
   }
 

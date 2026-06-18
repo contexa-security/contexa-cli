@@ -8,9 +8,6 @@ side without colliding.
 ## Bring up / tear down
 
 ```bash
-# Generate the seed schema first (required on FIRST start of each volume)
-node ../scripts/seed-test-initdb.cjs
-
 # Start
 docker compose -f docker-compose.test.yml -p ctxa-test up -d
 
@@ -18,13 +15,8 @@ docker compose -f docker-compose.test.yml -p ctxa-test up -d
 docker compose -f docker-compose.test.yml -p ctxa-test down -v
 ```
 
-## Why is `initdb/` gitignored?
-
-The `02-dml.sql` script contains a freshly randomized BCrypt seed password
-generated on every `contexa init`. Committing it would publish that password
-hash to the repository history. The directory is generated on demand by
-`scripts/seed-test-initdb.cjs` (or the matrix runner, which calls the same
-core helper before bringing the stack up).
+The stack only provisions infrastructure. Contexa schema and seed data are
+installed by the `contexa-iam` runtime initializer when the application starts.
 
 ## Endpoints (host ports)
 

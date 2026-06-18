@@ -13,7 +13,7 @@
 //                                  (e.g. "postgres" -> "contexa-postgres" or "ctxa-sim-postgres").
 //
 //   - osDefaultInfraDir(name)   : platform-appropriate default location for the contexa-owned
-//                                  infrastructure files (docker-compose.yml + initdb/*).
+//                                  infrastructure files (docker-compose.yml).
 //                                  Customers' project directories must NEVER be touched for
 //                                  infra files - those go under contexa's own home.
 //
@@ -38,7 +38,7 @@ function containerName(svc) {
 }
 
 // OS-specific contexa home for storing per-project infrastructure artifacts
-// (docker-compose.yml, initdb/*.sql). Returns the directory path; caller decides
+// (docker-compose.yml). Returns the directory path; caller decides
 // whether to create it.
 //
 //   Linux / macOS : $XDG_CONFIG_HOME/contexa/<projectName>

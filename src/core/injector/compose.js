@@ -2,6 +2,10 @@
 
 // docker-compose.yml generator for the contexa-managed infrastructure stack.
 //
+// The CLI provisions infrastructure only. Contexa schema and seed data are
+// installed by the contexa-iam runtime initializer when the application starts,
+// so this compose file intentionally does not mount docker-entrypoint initdb SQL.
+//
 // `infraDir` MUST be a contexa-owned directory (e.g. ~/.contexa/<projectName>),
 // NEVER the customer's project directory. Writing into the customer's project
 // directory would clobber any docker-compose.yml the customer may already have
@@ -60,7 +64,6 @@ services:
       - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \${CONTEXA_DB_USERNAME:-contexa} -d \${CONTEXA_DB_NAME:-contexa}"]
       interval: 10s

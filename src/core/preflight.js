@@ -51,7 +51,7 @@ async function inspectInfra(opts = {}) {
         hint: [
           'Windows / macOS : open Docker Desktop and wait for the whale icon to settle.',
           'Linux           : sudo systemctl start docker',
-          'Or re-run "contexa init --no-docker" to generate compose/initdb files',
+          'Or re-run "contexa init --no-docker" to generate compose files',
           'without starting containers (you can `docker compose up -d` later).',
         ],
       });

@@ -49,7 +49,7 @@ function downloadFile(url, dest) {
 const { detectSpringProject } = require('../core/detector');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
         injectSpringAiDeps, injectEnableAiSecurity, injectStandalone,
-        generateDockerCompose, generateInitDbScripts } = require('../core/injector');
+        generateDockerCompose } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
 const { t, setLocale, getLocale } = require('../core/i18n');
@@ -69,8 +69,10 @@ module.exports = function (program) {
     //
     // --distributed installs the full PoC/demo stack:
     //   PostgreSQL + Redis + Zookeeper + Kafka  (+ Ollama if --include-ollama)
-    // --no-docker (only meaningful with --distributed) generates compose/initdb
-    // files but does not run "docker compose up -d".
+    // --no-docker (only meaningful with --distributed) generates compose files
+    // but does not run "docker compose up -d". Database schema/seed data is
+    // installed by the contexa-iam runtime initializer when the application
+    // starts, not by contexa-cli.
     //
     // --include-ollama opts in to the local Ollama LLM runtime. Default behavior
     // routes chat/embedding to OpenAI + Anthropic (cloud). Use --include-ollama
@@ -78,18 +80,18 @@ module.exports = function (program) {
     // cannot call external LLMs.
     .option('--distributed', 'Install distributed infrastructure (Postgres + Redis + Kafka) for PoC/enterprise demo')
     .option('--include-ollama', 'Include the local Ollama LLM runtime (off by default; required for offline / no-API-key operation)')
-    .option('--no-docker', 'With --distributed: generate compose/initdb files but do not start containers')
+    .option('--no-docker', 'With --distributed: generate compose files but do not start containers')
     .option('--simulate', 'Install isolated simulation stack (ctxa-sim-* containers on +20000 ports) so you can practice the manual install flow without colliding with production. Implies --distributed.')
     // The two integration modes. By default the prompt asks the user; these
     // flags exist for prompt-bypass automation.
     .option('--merge', 'Merge mode: write contexa.* into the customer build/yml (default)')
     .option('--standalone', 'Standalone mode: place contexa-only build/yml under a separate directory; never touch customer originals')
     .option('--standalone-dir <path>', 'Standalone mode output directory (default: <projectDir>/contexa)')
-    // Infrastructure files (docker-compose.yml + initdb/) are ALWAYS written
+    // Infrastructure files (docker-compose.yml) are ALWAYS written
     // outside the customer project directory. Default: contexa-owned home
     // (Linux/macOS: $XDG_CONFIG_HOME/contexa/<projectName> or $HOME/.contexa/<name>;
     // Windows: %LOCALAPPDATA%\Contexa\<projectName>). Override with --infra-dir.
-    .option('--infra-dir <path>', 'Override the contexa-owned directory used for docker-compose.yml + initdb/')
+    .option('--infra-dir <path>', 'Override the contexa-owned directory used for docker-compose.yml')
     .option('--check', 'Run environment diagnostic check and exit')
     .action(async (opts) => {
       // --simulate isolates this run from any other contexa stack on the same
@@ -206,7 +208,7 @@ module.exports = function (program) {
       if (!project.hasDocker && wantsContainers) {
         console.log('');
         console.log(chalk.yellow('  ! Docker is required to start the distributed infrastructure.'));
-        console.log(chalk.gray('    This run will still write compose/initdb files so you can start them later.'));
+        console.log(chalk.gray('    This run will still write compose files so you can start them later.'));
         console.log(chalk.gray('    To install Docker:'));
         console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
         console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
@@ -596,14 +598,13 @@ module.exports = function (program) {
         }
       }
 
-      // 5. Generate database init scripts + docker-compose.yml
+      // 5. Generate docker-compose.yml
       //
-      // Infrastructure files (docker-compose.yml + initdb/) are written to a
+      // Infrastructure files (docker-compose.yml) are written to a
       // contexa-owned directory, NEVER the customer project directory. The
       // customer project's existing docker-compose.yml (if any) is therefore
       // never touched. Default location is OS-specific contexa home; users
       // can override via --infra-dir.
-      let seedPassword = null;
       let infraDir = null;
       if (answers.infra !== 'skip') {
         const includesOllama = !!(answers.llmProviders && answers.llmProviders.includes('ollama'));
@@ -617,13 +618,7 @@ module.exports = function (program) {
 
         infraDir = resolveInfraDir(resolveProjectName(), { infraDir: infraDirOverride });
         console.log(chalk.gray(`  Infrastructure files location: ${infraDir}`));
-
-        const startDb = process.hrtime.bigint();
-        const s3a = ora(t('step.generatingDb')).start();
-        const dbResult = await generateInitDbScripts(infraDir);
-        seedPassword = dbResult.seedPassword;
-        const elapsedDb = Number(process.hrtime.bigint() - startDb) / 1e6;
-        s3a.succeed(`${t('step.dbGenerated')} (${elapsedDb.toFixed(0)}ms)`);
+        console.log(chalk.gray('  Database schema and seed data will be installed by contexa-iam when the application starts.'));
 
         const startCompose = process.hrtime.bigint();
         const s3 = ora(t('step.generatingCompose')).start();

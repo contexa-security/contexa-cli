@@ -2,7 +2,7 @@
 
 // Shared constants and tiny helpers used across the injector submodules.
 // Kept minimal on purpose: anything bigger belongs in its domain module
-// (yml/build/compose/initdb/standalone).
+// (yml/build/compose/standalone).
 
 const path = require('path');
 const fs = require('fs-extra');
