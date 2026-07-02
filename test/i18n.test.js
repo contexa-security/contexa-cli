@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -53,7 +53,7 @@ test('t: falls back to English when key missing in current locale', () => {
   i18n.setLocale('ko');
   // Both bundles ship the same keys, so we synthesize the gap by switching
   // to English and verifying that an English-only sentinel resolves there.
-  assert.equal(i18n.t('init.detected'), 'Spring 프로젝트 감지됨');
+  assert.equal(i18n.t('init.detected'), 'Spring 프로젝트 확인됨');
   i18n.setLocale('en');
   assert.equal(i18n.t('init.detected'), 'Spring project detected');
 });
@@ -62,7 +62,7 @@ test('t: substitutes positional placeholders', () => {
   i18n.setLocale('en');
   assert.equal(i18n.t('mode.changed', 'SHADOW', 'ENFORCE'), 'Mode changed: SHADOW -> ENFORCE');
   i18n.setLocale('ko');
-  assert.equal(i18n.t('mode.changed', 'SHADOW', 'ENFORCE'), '모드 변경됨: SHADOW -> ENFORCE');
+  assert.equal(i18n.t('mode.changed', 'SHADOW', 'ENFORCE'), '모드 변경: SHADOW -> ENFORCE');
 });
 
 test('t: handles single placeholder for spinner messages', () => {

@@ -11,12 +11,8 @@ const { resolveProjectName, resolveInfraDir } = require('../core/project');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
-const {
-  cleanupBuildFile,
-  cleanupYmlFile,
-  cleanupJavaFiles,
-  findBackupFiles
-} = require('../core/cleanup');
+const { findBackupFiles } = require('../core/cleanup');
+const { loadManifest, manifestPath } = require('../core/manifest');
 
 const COMPOSE_SERVICES = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka'];
 const COMPOSE_VOLUMES = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'kafka-data'];
@@ -117,59 +113,53 @@ function removeIfEmpty(dir) {
 }
 
 async function restoreProjectFiles(projectDir) {
-  const project = await detectSpringProject(projectDir);
-  const ymlPath = path.join(projectDir, 'src/main/resources/application.yml');
   const backupsDir = path.join(projectDir, 'contexa', 'bak');
-  const ymlBackupPath = path.join(backupsDir, 'src/main/resources/application.yml');
-  const propsPath = path.join(projectDir, 'src/main/resources/application.properties');
-  const propsBackupPath = path.join(backupsDir, 'src/main/resources/application.properties');
-  const restoredOriginals = new Set();
+  const manifest = await loadManifest(projectDir);
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
 
-  if (fs.existsSync(ymlPath) && !fs.existsSync(ymlBackupPath)) {
-    if (fs.existsSync(propsPath) || fs.existsSync(propsBackupPath)) {
-      fs.removeSync(ymlPath);
-      console.log(chalk.gray('    - Removed generated application.yml to restore properties-only state.'));
+  if (manifestFiles.length > 0) {
+    const sorted = [...manifestFiles].sort((a, b) => {
+      if (a.relativePath === 'contexa') return 1;
+      if (b.relativePath === 'contexa') return -1;
+      return b.relativePath.length - a.relativePath.length;
+    });
+
+    for (const entry of sorted) {
+      const originalFile = path.join(projectDir, entry.relativePath);
+      const backupPath = path.join(backupsDir, entry.relativePath);
+      if (fs.existsSync(backupPath)) {
+        fs.ensureDirSync(path.dirname(originalFile));
+        fs.copySync(backupPath, originalFile, { overwrite: true });
+        console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
+      } else if (entry.generated && fs.existsSync(originalFile)) {
+        fs.removeSync(originalFile);
+        console.log(chalk.gray(`    - Removed CLI-generated file: ${originalFile}`));
+      }
     }
+
+    const mPath = manifestPath(projectDir);
+    if (fs.existsSync(mPath)) fs.removeSync(mPath);
+    if (fs.existsSync(backupsDir)) fs.removeSync(backupsDir);
+    const parentContexa = path.join(projectDir, 'contexa');
+    if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
+    return;
   }
 
   const backupFiles = fs.existsSync(backupsDir) ? findBackupFiles(backupsDir) : [];
   if (backupFiles.length > 0) {
     for (const item of backupFiles) {
       const originalFile = path.join(projectDir, item.relativePath);
+      fs.ensureDirSync(path.dirname(originalFile));
       fs.copySync(item.backupPath, originalFile, { overwrite: true });
-      restoredOriginals.add(path.resolve(originalFile));
       console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
     }
-
     fs.removeSync(backupsDir);
     const parentContexa = path.join(projectDir, 'contexa');
     if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
+    return;
   }
 
-  const buildPath = project.buildFilePath
-    || (fs.existsSync(path.join(projectDir, 'pom.xml'))
-      ? path.join(projectDir, 'pom.xml')
-      : path.join(projectDir, 'build.gradle'));
-
-  for (const siblingBak of [ymlPath + '.bak', propsPath + '.bak', buildPath + '.bak']) {
-    if (fs.existsSync(siblingBak)) {
-      fs.removeSync(siblingBak);
-    }
-  }
-
-  if (buildPath && !restoredOriginals.has(path.resolve(buildPath))) {
-    await cleanupBuildFile(buildPath);
-  }
-  if (fs.existsSync(ymlPath) && !restoredOriginals.has(path.resolve(ymlPath))) {
-    await cleanupYmlFile(ymlPath);
-  }
-  await cleanupJavaFiles(projectDir);
-
-  const standalonePath = path.join(projectDir, 'contexa');
-  if (fs.existsSync(standalonePath)) {
-    fs.removeSync(standalonePath);
-    console.log(chalk.gray(`    - Removed standalone output folder: ${standalonePath}`));
-  }
+  console.log(chalk.yellow(`    - ${t('reset.noBackup') || 'No manifest or backup files found; project source files were not modified.'}`));
 }
 
 function resolveTargets(opts) {

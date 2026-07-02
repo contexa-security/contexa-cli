@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -24,11 +24,25 @@ function loadYml(p) {
 // injectYml - merged contexa.* tree (no marker block)
 // ============================================================
 
+test('injectYml: default install writes starter settings only, no AI runtime settings', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, { mode: 'shadow' });
+    const root = loadYml(ymlPath);
+    assert.ok(root.contexa.datasource);
+    assert.ok(root.contexa.security);
+    assert.equal(root.contexa.llm, undefined);
+    assert.equal(root.contexa.hcad, undefined);
+    assert.equal(root.spring && root.spring.ai, undefined);
+  } finally { await fs.remove(dir); }
+});
+
 test('injectYml: produces a parseable yaml with a single contexa: tree', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const text = await fs.readFile(ymlPath, 'utf8');
     const root = yaml.load(text);
     assert.ok(root && root.contexa, 'contexa: must exist as a top-level key');
@@ -41,7 +55,7 @@ test('injectYml: emits contexa.datasource with double env fallback (preserves cu
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.datasource.url,
       '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/contexa}}');
@@ -55,7 +69,7 @@ test('injectYml: ENFORCE mode writes contexa.security.zerotrust.mode = ENFORCE',
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'enforce', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
   } finally { await fs.remove(dir); }
@@ -65,7 +79,7 @@ test('injectYml: distributed sets contexa.infrastructure.mode and never spring.d
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed' });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed' });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
     assert.equal(root.spring, undefined, 'spring.* must not be written by CLI');
@@ -78,7 +92,7 @@ test('injectYml: never writes any spring.* key across all provider/infra combina
     const ymlPath = path.join(dir, 'application.yml');
     for (const infra of ['standalone', 'distributed']) {
       for (const providers of [['ollama'], ['openai'], ['anthropic'], ['ollama', 'openai', 'anthropic']]) {
-        await injectYml(ymlPath, { mode: 'shadow', llmProviders: providers, infra });
+        await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: providers, infra });
         const root = loadYml(ymlPath);
         assert.equal(root.spring, undefined,
           `spring.* leaked with infra=${infra} providers=${providers}`);
@@ -91,8 +105,8 @@ test('injectYml: idempotent - second call updates only the CLI-managed keys', as
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
-    await injectYml(ymlPath, { mode: 'enforce', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'] });
     const text = await fs.readFile(ymlPath, 'utf8');
     const root = yaml.load(text);
     assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1);
@@ -105,7 +119,7 @@ test('injectYml: backs up existing file before modifying', async () => {
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await fs.writeFile(ymlPath, 'server:\n  port: 8080\n');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const backupDest = path.join(dir, 'contexa', 'bak', 'application.yml');
     assert.ok(await fs.pathExists(backupDest));
   } finally { await fs.remove(dir); }
@@ -136,7 +150,7 @@ test('injectYml: merges into existing contexa: block instead of duplicating top-
       '    url: jdbc:postgresql://localhost:5432/host_app',
       '',
     ].join('\n'));
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const text = await fs.readFile(ymlPath, 'utf8');
     const root = yaml.load(text); // must not throw
     assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1,
@@ -156,7 +170,7 @@ test('injectYml: --distributed overrides existing contexa.infrastructure.mode', 
   try {
     const ymlPath = path.join(dir, 'application.yml');
     await fs.writeFile(ymlPath, 'contexa:\n  infrastructure:\n    mode: standalone\n');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed' });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed' });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
   } finally { await fs.remove(dir); }
@@ -177,7 +191,7 @@ test('injectYml: strips a legacy marker block from a previous CLI version', asyn
       '# --- End Contexa ---',
       '',
     ].join('\n'));
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const text = await fs.readFile(ymlPath, 'utf8');
     assert.equal(text.includes('# --- Contexa AI Security ---'), false,
       'legacy marker block must be stripped');
@@ -192,7 +206,7 @@ test('injectYml: never emits dead key contexa.jpa.hibernate.ddl-auto', async () 
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.jpa, undefined,
       'contexa.jpa is not bound by any @ConfigurationProperties; CLI must not write it');
@@ -203,7 +217,7 @@ test('injectYml: emits contexa.hcad.geoip.enabled = true alongside dbPath', asyn
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.hcad.geoip.enabled, true,
       'enabled must be true so the dbPath actually takes effect (default in core is false)');
@@ -215,7 +229,7 @@ test('injectYml: emits contexa.llm.selection.* (new API) instead of deprecated c
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama', 'openai'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama', 'openai'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai');
     assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
@@ -462,7 +476,7 @@ test('injectYml: configures fixed mode and ollama priority when ollama is select
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['ollama'] });
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
@@ -471,7 +485,7 @@ test('injectYml: configures fixed mode and ollama priority when ollama is select
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: cleans up unselected LLM configuration blocks', async () => {
+test('injectYml: preserves host spring.ai and cleans only CLI-owned contexa LLM blocks', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
@@ -489,12 +503,12 @@ test('injectYml: cleans up unselected LLM configuration blocks', async () => {
       '        model: qwen2.5:7b',
     ].join('\n'));
     
-    // Select only anthropic (cleans up openai and ollama)
-    await injectYml(ymlPath, { mode: 'shadow', llmProviders: ['anthropic'] });
+    // Select only anthropic. spring.ai belongs to the host app; contexa.llm.ollama is CLI-owned.
+    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['anthropic'] });
     const root = loadYml(ymlPath);
     
     assert.ok(root.spring.ai.anthropic);
-    assert.ok(!root.spring.ai.openai);
+    assert.ok(root.spring.ai.openai);
     assert.ok(!root.contexa.llm.chat);
   } finally { await fs.remove(dir); }
 });

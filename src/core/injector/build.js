@@ -139,7 +139,7 @@ async function injectGradleDep(gradlePath) {
 }
 
 // Inject Redis/Kafka client dependencies for the distributed PoC profile.
-// Idempotent — silently does nothing if any of the markers already exist.
+// Idempotent ??silently does nothing if any of the markers already exist.
 //
 // spring-kafka version is omitted: Spring Boot's BOM manages it. redisson's
 // version can be overridden via CONTEXA_REDISSON_VERSION env var so that
@@ -243,7 +243,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     let changed = false;
     let updated = content;
 
-    // 1. Dependency Management에 spring-ai-bom 추가
+    // 1. Dependency Management??spring-ai-bom 추�?
     if (!content.includes('spring-ai-bom')) {
       const mgmtTag = '</dependencyManagement>';
       const mgmtIndex = content.indexOf(mgmtTag);
@@ -283,7 +283,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
       }
     }
 
-    // 2. <dependencies> 블록에 모델 스타터 추가/삭제
+    // 2. <dependencies> 블록??모델 ?��???추�?/??��
     const cleanMavenDep = (provName) => {
       const pat = new RegExp(`<dependency>\\s*<groupId>org\\.springframework\\.ai</groupId>\\s*<artifactId>spring-ai-starter-model-${provName}</artifactId>\\s*</dependency>\\s*`, 'g');
       updated = updated.replace(pat, '');
@@ -405,7 +405,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
 
 async function injectEnableAiSecurity(projectDir) {
   const javaRoot = path.join(projectDir, 'src/main/java');
-  if (!await fs.pathExists(javaRoot)) return false;
+  if (!await fs.pathExists(javaRoot)) return { changed: false, filePath: null };
 
   const queue = [javaRoot];
   while (queue.length > 0) {

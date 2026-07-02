@@ -28,6 +28,50 @@ function normalizePath(input, baseDir) {
   }
   return path.isAbsolute(p) ? path.resolve(p) : path.resolve(baseDir, p);
 }
+function normalizeProviders(providerOpt, includeOllama) {
+  if (providerOpt) {
+    const values = String(providerOpt).split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+    if (values.includes('none')) return [];
+    const allowed = new Set(['openai', 'anthropic', 'ollama']);
+    const invalid = values.filter(v => !allowed.has(v));
+    if (invalid.length > 0) {
+      throw new Error(`Unsupported provider: ${invalid.join(', ')}. Use openai, anthropic, ollama, or none.`);
+    }
+    return [...new Set(values)];
+  }
+  return includeOllama ? ['openai', 'anthropic', 'ollama'] : ['openai'];
+}
+
+function aiProviderSelected(answers) {
+  return Array.isArray(answers.llmProviders) && answers.llmProviders.length > 0;
+}
+
+function printPlannedChanges(answers, project, paths) {
+  const isKo = getLocale() === 'ko';
+  console.log(chalk.cyan(`\n  ${isKo ? '적용 예정 변경' : 'Planned changes'}`));
+  const items = [];
+  if (answers.integrationMode === 'standalone') {
+    items.push(`${isKo ? 'Contexa 전용 파일 생성' : 'Create Contexa-only files'}: ${paths.standaloneDir}`);
+  } else {
+    items.push(`${isKo ? 'starter 의존성 추가' : 'Add starter dependency'}: ${paths.buildPath}`);
+    items.push(`${isKo ? '최소 Contexa 설정 적용' : 'Apply minimal Contexa settings'}: ${paths.ymlPath}`);
+  }
+  if (answers.enableAiSecurity) {
+    items.push(`${isKo ? 'AI 보안 설정 적용' : 'Enable AI security settings'} (${answers.llmProviders.join(', ')})`);
+    if (answers.autoAnnotate) {
+      items.push(isKo ? '@EnableAISecurity 자동 추가' : 'Auto-add @EnableAISecurity');
+    } else if (!project.hasEnableAiSecurity) {
+      items.push(isKo ? '@EnableAISecurity는 직접 추가' : 'You will add @EnableAISecurity manually');
+    }
+  } else {
+    items.push(isKo ? 'AI 보안은 아직 켜지 않음' : 'AI security remains disabled for now');
+  }
+  if (answers.infra !== 'skip') {
+    items.push(isKo ? '선택한 인프라 파일 생성' : 'Create selected infrastructure files');
+  }
+  for (const item of items) console.log(chalk.gray(`    - ${item}`));
+}
+
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
@@ -53,6 +97,7 @@ const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
 const { t, setLocale, getLocale } = require('../core/i18n');
+const { recordChange } = require('../core/manifest');
 
 module.exports = function (program) {
   program
@@ -74,14 +119,19 @@ module.exports = function (program) {
     // installed by the contexa-iam runtime initializer when the application
     // starts, not by contexa-cli.
     //
-    // --include-ollama opts in to the local Ollama LLM runtime. Default behavior
-    // routes chat/embedding to OpenAI + Anthropic (cloud). Use --include-ollama
-    // for offline operation, no-API-key demos, or regulated environments that
-    // cannot call external LLMs.
+    // AI security is opt-in. Basic init installs the starter and minimal Contexa
+    // settings only. --enable-ai-security / wizard consent controls provider
+    // dependencies, LLM settings, and optional @EnableAISecurity insertion.
+    // --include-ollama only opts in to the local Ollama runtime when AI security
+    // is explicitly enabled or simulation is requested.
     .option('--distributed', 'Install distributed infrastructure (Postgres + Redis + Kafka) for PoC/enterprise demo')
     .option('--include-ollama', 'Include the local Ollama LLM runtime (off by default; required for offline / no-API-key operation)')
     .option('--no-docker', 'With --distributed: generate compose files but do not start containers')
     .option('--simulate', 'Install isolated simulation stack (ctxa-sim-* containers on +20000 ports) so you can practice the manual install flow without colliding with production. Implies --distributed.')
+    .option('--quick', 'Use the guided quick path without showing advanced choices')
+    .option('--enable-ai-security', 'Enable AI security integration during init')
+    .option('--provider <name>', 'AI provider to configure for explicit AI security activation: openai, anthropic, ollama, none. Comma-separated values are allowed.')
+    .option('--auto-annotate', 'When AI security is enabled, add @EnableAISecurity to the main Spring Boot application class')
     // The two integration modes. By default the prompt asks the user; these
     // flags exist for prompt-bypass automation.
     .option('--merge', 'Merge mode: write contexa.* into the customer build/yml (default)')
@@ -270,10 +320,16 @@ module.exports = function (program) {
         : opts.merge ? 'merge'
         : null;
 
+      const providerFromFlags = normalizeProviders(opts.provider, opts.includeOllama);
+      const explicitAiSecurity = !!(opts.enableAiSecurity || opts.autoAnnotate || opts.provider || opts.includeOllama || opts.simulate);
       const defaults = {
+        setupMode: opts.quick ? 'quick' : 'quick',
         integrationMode: explicitIntegrationMode || 'merge',
-        securityMode: 'full', mode: 'shadow',
-        llmProviders: opts.includeOllama ? ['openai', 'anthropic', 'ollama'] : ['openai', 'anthropic'],
+        securityMode: 'full',
+        mode: 'shadow',
+        enableAiSecurity: explicitAiSecurity && providerFromFlags.length > 0,
+        autoAnnotate: !!opts.autoAnnotate,
+        llmProviders: explicitAiSecurity ? providerFromFlags : [],
         infra: opts.distributed ? 'distributed' : 'skip',
         injectDep: true,
         startDocker: opts.docker !== false,
@@ -297,7 +353,39 @@ module.exports = function (program) {
             { name: t('prompt.setupMode.quick'),    value: 'quick' },
             { name: t('prompt.setupMode.advanced'), value: 'advanced' },
           ],
-          when: !opts.simulate,
+          when: !opts.simulate && !opts.quick,
+        },
+        {
+          type: 'rawlist', name: 'enableAiSecurity',
+          message: '\n' + t('prompt.enableAiSecurity'),
+          default: 1,
+          choices: [
+            { name: t('prompt.enableAiSecurity.yes'), value: true },
+            { name: t('prompt.enableAiSecurity.no'), value: false },
+          ],
+          when: a => !opts.simulate && !opts.enableAiSecurity && !opts.provider && !opts.autoAnnotate,
+        },
+        {
+          type: 'rawlist', name: 'providerQuick',
+          message: '\n' + t('prompt.provider'),
+          default: 1,
+          choices: [
+            { name: t('prompt.provider.openai'), value: 'openai' },
+            { name: t('prompt.provider.anthropic'), value: 'anthropic' },
+            { name: t('prompt.provider.ollama'), value: 'ollama' },
+            { name: t('prompt.provider.none'), value: 'none' },
+          ],
+          when: a => (a.setupMode !== 'advanced') && (opts.enableAiSecurity || opts.autoAnnotate || a.enableAiSecurity === true) && !opts.provider,
+        },
+        {
+          type: 'rawlist', name: 'autoAnnotate',
+          message: '\n' + t('prompt.autoAnnotate'),
+          default: 1,
+          choices: [
+            { name: t('prompt.autoAnnotate.no'), value: false },
+            { name: t('prompt.autoAnnotate.yes'), value: true },
+          ],
+          when: a => (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true) && !opts.autoAnnotate,
         },
         {
           type: 'rawlist', name: 'integrationMode',
@@ -331,7 +419,7 @@ module.exports = function (program) {
             { name: t('prompt.securityMode.full'), value: 'full' },
             { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
           ],
-          when: a => a.setupMode === 'advanced',
+          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true),
         },
         {
           type: 'rawlist', name: 'mode',
@@ -341,7 +429,7 @@ module.exports = function (program) {
             { name: t('prompt.mode.shadow'), value: 'shadow' },
             { name: t('prompt.mode.enforce'), value: 'enforce' },
           ],
-          when: a => a.setupMode === 'advanced',
+          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true),
         },
         {
           // checkbox stays as-is because rawlist does not support multiple
@@ -354,7 +442,7 @@ module.exports = function (program) {
             { name: t('prompt.llm.ollama'),    value: 'ollama',    checked: !!opts.includeOllama },
           ],
           validate: a => a.length > 0 ? true : t('prompt.llm.atLeastOne'),
-          when: a => a.setupMode === 'advanced',
+          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || opts.autoAnnotate || a.enableAiSecurity === true),
         },
         {
           type: 'rawlist', name: 'infra',
@@ -390,38 +478,40 @@ module.exports = function (program) {
             return infra !== 'skip' && project.hasDocker && opts.docker !== false;
           },
         },
-        // Quick Start 전용: Ollama 사용 여부 한 줄 질문
-        // Advanced 모드는 기존 llmProviders checkbox 에서 Ollama를 직접 선택.
-        // --simulate / --include-ollama 플래그가 이미 있으면 묻지 않는다.
-        {
-          type: 'rawlist', name: 'includeOllamaQuick',
-          message: '\n' + t('prompt.ollama.quick'),
-          default: 1,
-          choices: [
-            { name: t('prompt.ollama.quick.no'),  value: false },
-            { name: t('prompt.ollama.quick.yes'), value: true  },
-          ],
-          when: a => a.setupMode === 'quick' && !opts.simulate && !opts.includeOllama,
-        },
       ]);
 
-      // Resolve final setup configuration based on chosen track
-      if (answers.setupMode === 'quick' || opts.yes || opts.simulate) {
-        answers.integrationMode = explicitIntegrationMode || 'merge';
-        answers.securityMode = 'full';
-        answers.mode = 'shadow';
-        // Quick Start: --include-ollama 플래그 > 프롬프트 답변 > 기본값(없음) 순으로 결정
-        const wantsOllama = opts.includeOllama || answers.includeOllamaQuick === true;
-        answers.llmProviders = wantsOllama ? ['openai', 'anthropic', 'ollama'] : ['openai', 'anthropic'];
-        answers.infra = opts.distributed ? 'distributed' : 'skip';
-        answers.startDocker = opts.docker !== false;
+            // Resolve final setup configuration based on chosen track.
+      const promptProvider = answers.providerQuick || null;
+      const requestedAiSecurity = !!(
+        opts.simulate ||
+        opts.enableAiSecurity ||
+        opts.autoAnnotate ||
+        opts.provider ||
+        opts.includeOllama ||
+        answers.enableAiSecurity === true
+      );
+
+      answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
+      answers.securityMode = answers.securityMode || 'full';
+      answers.mode = answers.mode || 'shadow';
+      answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
+      answers.startDocker = opts.docker !== false && answers.startDocker !== false;
+
+      if (promptProvider) {
+        answers.llmProviders = normalizeProviders(promptProvider, false);
+      } else if (opts.provider || opts.includeOllama || opts.enableAiSecurity || opts.autoAnnotate || opts.simulate) {
+        answers.llmProviders = providerFromFlags;
+      } else if (Array.isArray(answers.llmProviders)) {
+        answers.llmProviders = answers.llmProviders;
       } else {
-        answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
-        answers.securityMode = answers.securityMode || 'full';
-        answers.mode = answers.mode || 'shadow';
-        answers.llmProviders = answers.llmProviders || (opts.includeOllama ? ['openai', 'anthropic', 'ollama'] : ['openai', 'anthropic']);
-        answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
-        answers.startDocker = opts.docker !== false && answers.startDocker !== false;
+        answers.llmProviders = [];
+      }
+
+      answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
+      answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
+      if (answers.autoAnnotate && !answers.enableAiSecurity) {
+        answers.enableAiSecurity = true;
+        if (!aiProviderSelected(answers)) answers.llmProviders = ['openai'];
       }
 
       answers.simulate = !!opts.simulate;
@@ -442,31 +532,33 @@ module.exports = function (program) {
         || normalizePath(answers.infraDir, opts.dir)
         || null;
 
-      // Provision GeoLite2-City.mmdb (common for all modes)
-      const startGeo = process.hrtime.bigint();
-      const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
-      try {
-        const targetDataDir = path.join(opts.dir, 'contexa', 'data');
-        const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
-        await fs.ensureDir(targetDataDir);
+      if (answers.enableAiSecurity || answers.simulate) {
+        // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
+        const startGeo = process.hrtime.bigint();
+        const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
+        try {
+          const targetDataDir = path.join(opts.dir, 'contexa', 'data');
+          const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
+          await fs.ensureDir(targetDataDir);
 
-        if (!(await fs.pathExists(targetMmdbPath))) {
-          // 1. Try to copy from local contexa directory if in dev/eval workspace
-          const localSource = 'E:\\projects\\contexa\\data\\GeoLite2-City.mmdb';
-          if (await fs.pathExists(localSource)) {
-            await fs.copy(localSource, targetMmdbPath);
-            sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+          if (!(await fs.pathExists(targetMmdbPath))) {
+            const localSource = 'E:\\projects\\contexa\\data\\GeoLite2-City.mmdb';
+            if (await fs.pathExists(localSource)) {
+              await fs.copy(localSource, targetMmdbPath);
+              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' });
+              sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+            } else {
+              const downloadUrl = 'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb';
+              await downloadFile(downloadUrl, targetMmdbPath);
+              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' });
+              sGeo.succeed(`GeoLite2-City.mmdb downloaded successfully (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+            }
           } else {
-            // 2. Download from public fallback URL
-            const downloadUrl = 'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb';
-            await downloadFile(downloadUrl, targetMmdbPath);
-            sGeo.succeed(`GeoLite2-City.mmdb downloaded successfully (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
+            sGeo.succeed('GeoLite2-City.mmdb already present in data directory');
           }
-        } else {
-          sGeo.succeed('GeoLite2-City.mmdb already present in data directory');
+        } catch (err) {
+          sGeo.warn(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
         }
-      } catch (err) {
-        sGeo.warn(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
       }
 
       console.log('');
@@ -479,9 +571,12 @@ module.exports = function (program) {
       //   standalone - write contexa-only artifacts to a separate folder; the
       //                customer's project files are NEVER touched.
       let standaloneResult = null;
+      let aiAnnotationApplied = !!project.hasEnableAiSecurity;
+      let aiDependenciesProcessed = false;
       if (answers.integrationMode === 'standalone') {
         console.log(chalk.cyan('\n  ' + t('standalone.intro')));
         console.log(chalk.gray(`  ${t('standalone.location')} ${standaloneDir}`));
+        printPlannedChanges(answers, project, { standaloneDir });
         const startStandalone = process.hrtime.bigint();
         const sStandalone = ora(t('step.writingStandalone')).start();
         try {
@@ -491,6 +586,7 @@ module.exports = function (program) {
           standaloneResult = await injectStandalone(standaloneDir, project, {
             ...answers, force: !!opts.force,
           });
+          await recordChange(opts.dir, standaloneDir, { kind: 'standalone-output', generated: true, reason: 'Contexa standalone configuration output' });
           const elapsed = Number(process.hrtime.bigint() - startStandalone) / 1e6;
           sStandalone.succeed(`${t('step.standaloneWritten')} (${elapsed.toFixed(0)}ms)`);
         } catch (err) {
@@ -513,6 +609,8 @@ module.exports = function (program) {
             : path.join(opts.dir, 'build.gradle'));
         let ymlChanged = false;
         let buildChanged = false;
+        const ymlExistedBefore = await fs.pathExists(ymlPath);
+        printPlannedChanges(answers, project, { ymlPath, buildPath });
 
         // 3. Inject application.yml
         const startYml = process.hrtime.bigint();
@@ -520,6 +618,7 @@ module.exports = function (program) {
         try {
           await injectYml(ymlPath, answers);
           ymlChanged = true;
+          await recordChange(opts.dir, ymlPath, { kind: 'application-yml', generated: !ymlExistedBefore, reason: answers.enableAiSecurity ? 'Contexa AI security configuration' : 'Contexa starter configuration' });
           const elapsed = Number(process.hrtime.bigint() - startYml) / 1e6;
           s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
         } catch (err) {
@@ -544,19 +643,23 @@ module.exports = function (program) {
         // 4. Inject dependency (rolls back yml on failure)
         if (answers.injectDep) {
           try {
-            // 3.5. Inject @EnableAISecurity into main class
-            try {
-              const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
-              const injected = await injectEnableAiSecurity(opts.dir);
-              if (injected) {
-                sAnnot.succeed('@EnableAISecurity injected into main class');
-                // Force project flag to true so that Spring AI dependencies get injected in this run
-                project.hasEnableAiSecurity = true;
-              } else {
-                sAnnot.info('@EnableAISecurity already present or main class not found');
+            // 3.5. Inject @EnableAISecurity only when the user explicitly allowed source annotation.
+            if (answers.enableAiSecurity && answers.autoAnnotate) {
+              try {
+                const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
+                const injected = await injectEnableAiSecurity(opts.dir);
+                if (injected && injected.changed) {
+                  sAnnot.succeed('@EnableAISecurity injected into main class');
+                  await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' });
+                  project.hasEnableAiSecurity = true;
+                  aiAnnotationApplied = true;
+                } else {
+                  aiAnnotationApplied = aiAnnotationApplied || !!project.hasEnableAiSecurity || !!(injected && injected.filePath);
+                  sAnnot.info('@EnableAISecurity already present or main class not found');
+                }
+              } catch (err) {
+                console.log(chalk.yellow(`  ! Could not automatically inject @EnableAISecurity: ${err.message}`));
               }
-            } catch (err) {
-              console.log(chalk.yellow(`  ! Could not automatically inject @EnableAISecurity: ${err.message}`));
             }
 
             const startDep = process.hrtime.bigint();
@@ -564,17 +667,23 @@ module.exports = function (program) {
             const ok = project.buildTool === 'maven'
               ? await injectMavenDep(buildPath)
               : await injectGradleDep(buildPath);
-            if (ok) buildChanged = true;
+            if (ok) {
+              buildChanged = true;
+              await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Contexa starter dependency' });
+            }
             const elapsed = Number(process.hrtime.bigint() - startDep) / 1e6;
             ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
 
-            // Spring AI provider starters and the pgvector vector-store starter
-            // are automatically added only if @EnableAISecurity is present.
-            if (project.hasEnableAiSecurity) {
+            // Spring AI provider starters and vector-store are added only for explicit AI security setup.
+            if (answers.enableAiSecurity && aiProviderSelected(answers)) {
               const startAiDep = process.hrtime.bigint();
               const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
               const addedAi = await injectSpringAiDeps(buildPath, answers.llmProviders);
-              if (addedAi) buildChanged = true;
+              if (addedAi) {
+                buildChanged = true;
+                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit AI provider dependencies' });
+              }
+              aiDependenciesProcessed = true;
               const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
               addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
             }
@@ -583,7 +692,10 @@ module.exports = function (program) {
               const startDistDep = process.hrtime.bigint();
               const s2b = ora(t('step.addingDistributedDeps')).start();
               const added = await injectDistributedDeps(buildPath);
-              if (added) buildChanged = true;
+              if (added) {
+                buildChanged = true;
+                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit distributed infrastructure dependencies' });
+              }
               const elapsedDist = Number(process.hrtime.bigint() - startDistDep) / 1e6;
               added ? s2b.succeed(`${t('step.distributedDepsAdded')} (${elapsedDist.toFixed(0)}ms)`) : s2b.info(t('step.distributedDepsPresent'));
             }
@@ -771,46 +883,42 @@ module.exports = function (program) {
       // Show seed password and gitignore instructions
 
 
-      console.log(chalk.yellow(`\n  [${isKo ? '사용자 수동 필수 조치' : 'Manual Actions Required'}]:`));
-      console.log(chalk.white(`    1. ${isKo ? '메인 애플리케이션 클래스 상단에 @EnableAISecurity 추가' : 'Add @EnableAISecurity to your main Application class'}:`));
-      console.log(chalk.cyan('       ----------------------------------------------------'));
-      if (answers.securityMode === 'sandbox') {
-        console.log(chalk.cyan('       @EnableAISecurity('));
-        console.log(chalk.cyan('           mode = SecurityMode.SANDBOX,'));
-        console.log(chalk.cyan('           authBridge = SessionAuthBridge.class'));
-        console.log(chalk.cyan('       )'));
-      } else {
-        console.log(chalk.cyan('       @EnableAISecurity'));
+      console.log(chalk.yellow(`\n  [${isKo ? '다음 확인 사항' : 'Next checks'}]:`));
+      let manualStep = 1;
+      if (answers.enableAiSecurity && !aiAnnotationApplied) {
+        console.log(chalk.white(`    ${manualStep++}. ${isKo ? '메인 애플리케이션 클래스에 @EnableAISecurity를 추가하세요' : 'Add @EnableAISecurity to your main Application class'}:`));
+        console.log(chalk.cyan('       ----------------------------------------------------'));
+        if (answers.securityMode === 'sandbox') {
+          console.log(chalk.cyan('       @EnableAISecurity('));
+          console.log(chalk.cyan('           mode = SecurityMode.SANDBOX,'));
+          console.log(chalk.cyan('           authBridge = SessionAuthBridge.class'));
+          console.log(chalk.cyan('       )'));
+        } else {
+          console.log(chalk.cyan('       @EnableAISecurity'));
+        }
+        console.log(chalk.cyan('       @SpringBootApplication'));
+        console.log(chalk.cyan('       public class YourApplication { }'));
+        console.log(chalk.cyan('       ----------------------------------------------------'));
       }
-      console.log(chalk.cyan('       @SpringBootApplication'));
-      console.log(chalk.cyan('       public class YourApplication { }'));
-      console.log(chalk.cyan('       ----------------------------------------------------'));
 
-      console.log(chalk.white(`    2. ${isKo ? 'Spring AI 의존성 확인 (Contexa가 자동으로 빌드 파일에 삽입 완료함)' : 'Spring AI dependencies verification (Contexa has automatically injected them)'}:`));
-      const isMavenForHint = project.buildTool === 'maven';
-      console.log(chalk.cyan('       ----------------------------------------------------'));
-      if (isMavenForHint) {
-        console.log(chalk.gray(`       ${isKo ? '(이미 pom.xml에 아래 의존성 및 spring-ai-bom이 추가되었습니다)' : '(The following dependencies and spring-ai-bom have already been added to pom.xml)'}`));
-        console.log(chalk.cyan('       <dependency>'));
-        console.log(chalk.cyan('         <groupId>org.springframework.ai</groupId>'));
-        console.log(chalk.cyan('         <artifactId>spring-ai-starter-model-openai</artifactId>'));
-        console.log(chalk.cyan('       </dependency>'));
-        console.log(chalk.cyan('       <dependency>'));
-        console.log(chalk.cyan('         <groupId>org.springframework.ai</groupId>'));
-        console.log(chalk.cyan('         <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>'));
-        console.log(chalk.cyan('       </dependency>'));
+      if (answers.enableAiSecurity) {
+        console.log(chalk.white(`    ${manualStep++}. ${isKo ? '선택한 AI provider 설정을 확인하세요' : 'Verify the selected AI provider settings'}:`));
+        console.log(chalk.gray(`       - ${isKo ? '선택 provider' : 'Providers'}: ${answers.llmProviders.join(', ')}`));
+        console.log(chalk.gray(`       - ${isKo ? 'API key와 모델 값은 사용자 환경 변수나 애플리케이션 설정에서 관리하세요.' : 'Keep API keys and model values in your environment or application config.'}`));
+        if (aiDependenciesProcessed) {
+          console.log(chalk.gray(`       - ${isKo ? '명시 선택한 AI provider 의존성 처리가 완료되었습니다.' : 'Explicit AI provider dependencies were processed.'}`));
+        }
       } else {
-        console.log(chalk.gray(`       ${isKo ? '(이미 build.gradle에 아래 의존성 및 platform(spring-ai-bom)이 추가되었습니다)' : '(The following dependencies and spring-ai-bom have already been added to build.gradle)'}`));
-        console.log(chalk.cyan("       implementation 'org.springframework.ai:spring-ai-starter-model-openai'"));
-        console.log(chalk.cyan("       implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'"));
+        console.log(chalk.white(`    ${manualStep++}. ${isKo ? 'AI 보안은 아직 비활성 상태입니다' : 'AI security is not enabled yet'}:`));
+        console.log(chalk.gray(`       ${isKo ? '나중에 켜려면 contexa init을 다시 실행하고 AI 보안 질문에서 예를 선택하세요.' : 'To enable later, run contexa init again and choose Yes when asked about AI security.'}`));
       }
-      console.log(chalk.cyan('       ----------------------------------------------------'));
 
-      console.log(chalk.white(`    3. ${isKo ? '로컬 서버를 기동하고 환경 상태를 진단하세요' : 'Run the server and diagnose your environment'}:`));
+      console.log(chalk.white(`    ${manualStep++}. ${isKo ? '로컬 서버를 기동하고 환경 상태를 진단하세요' : 'Run the server and diagnose your environment'}:`));
       console.log(chalk.gray(`       - ${isKo ? '서버 기동' : 'Start Server'} : ${project.buildTool === 'maven' ? './mvnw spring-boot:run' : './gradlew bootRun'}`));
-      console.log(chalk.gray(`       - ${isKo ? '환경 진단' : 'Diagnose'}     : contexa doctor  ` + chalk.cyan(`\u001b[FIX Guide] \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007[Troubleshooting Guide]\u001b]8;;\u0007`)));
+      const doctorProvider = aiProviderSelected(answers) ? ` --provider ${answers.llmProviders.join(',')}` : '';
+      console.log(chalk.gray(`       - ${isKo ? '환경 진단' : 'Diagnose'}     : contexa doctor${doctorProvider}`));
 
-      if (answers.mode === 'shadow') {
+      if (answers.enableAiSecurity && answers.mode === 'shadow') {
         console.log(chalk.yellow(`\n  * ${isKo ? '현재 SHADOW 모드로 설정되었습니다 (차단 없이 관찰만 수행).' : 'SHADOW mode is active (observe only, no blocking).'}`));
         console.log(chalk.gray(`    ${isKo ? '준비되면 다음 명령어로 실시간 차단을 활성화하세요:' : 'Switch to blocking mode when ready:'} contexa mode --enforce`));
       }

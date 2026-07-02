@@ -19,6 +19,16 @@ function isPortBound(port) {
   });
 }
 
+function normalizeProviderList(providerOpt, includeOllama, simulate) {
+  if (providerOpt) {
+    const values = String(providerOpt).split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+    if (values.includes('none')) return [];
+    return [...new Set(values)];
+  }
+  if (includeOllama || simulate) return ['ollama'];
+  return [];
+}
+
 function checkOllamaModels(port) {
   return new Promise((resolve) => {
     const options = {
@@ -53,12 +63,19 @@ module.exports = function (program) {
   program
     .command('doctor')
     .description('Diagnose local environment for Contexa deployment')
-    .action(async () => {
+    .option('--provider <name>', 'Provider to diagnose: openai, anthropic, ollama, none. Comma-separated values are allowed.')
+    .option('--include-ollama', 'Check local Ollama runtime')
+    .option('--infra', 'Check Docker/infrastructure readiness')
+    .option('--simulate', 'Check simulation infrastructure readiness')
+    .action(async (opts) => {
       console.log(chalk.cyan('\n  ============================================='));
       console.log(chalk.cyan(`  ${t('doctor.title') || 'Contexa Doctor - Environment Report'}`));
       console.log(chalk.cyan('  =============================================\n'));
 
       let overallPass = true;
+      const providersToCheck = normalizeProviderList(opts.provider, opts.includeOllama, opts.simulate);
+      const needsDocker = !!(opts.infra || opts.simulate);
+      const needsOllama = providersToCheck.includes('ollama');
 
       // 1. Java 17 Check
       try {
@@ -80,54 +97,66 @@ module.exports = function (program) {
         console.log(`    ${chalk.yellow('[FIX]')} Install JDK 17 and configure your JAVA_HOME environment variable. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`);
       }
 
-      // 2. Docker CLI and Daemon
-      if (!isDockerCliInstalled()) {
-        overallPass = false;
-        console.log(`  [${chalk.red('FAIL')}] Docker CLI is not installed.`);
-        console.log(`    ${chalk.yellow('[FIX]')} Please install Docker Desktop: https://www.docker.com/products/docker-desktop \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`);
-      } else if (!isDockerDaemonRunning()) {
-        overallPass = false;
-        console.log(`  [${chalk.red('FAIL')}] Docker is installed but daemon is not running.`);
-        console.log(`    ${chalk.yellow('[FIX]')} Open Docker Desktop or run 'sudo systemctl start docker'. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`);
+      // 2. Docker CLI and Daemon (only when infrastructure checks are requested)
+      if (needsDocker) {
+        if (!isDockerCliInstalled()) {
+          overallPass = false;
+          console.log(`  [${chalk.red('FAIL')}] Docker CLI is not installed.`);
+          console.log(`    ${chalk.yellow('[FIX]')} Please install Docker Desktop: https://www.docker.com/products/docker-desktop`);
+        } else if (!isDockerDaemonRunning()) {
+          overallPass = false;
+          console.log(`  [${chalk.red('FAIL')}] Docker is installed but daemon is not running.`);
+          console.log(`    ${chalk.yellow('[FIX]')} Open Docker Desktop or run 'sudo systemctl start docker'.`);
+        } else {
+          console.log(`  [${chalk.green('OK')}] Docker Daemon is running.`);
+        }
       } else {
-        console.log(`  [${chalk.green('OK')}] Docker Daemon is running.`);
+        console.log(`  [${chalk.gray('SKIP')}] Docker check skipped. Use --infra or --simulate when you want infrastructure diagnostics.`);
       }
 
       // 3. PostgreSQL Port Collision (Default 5432 and simulation 25432)
-      const isPostgresPortBound = await isPortBound(5432);
-      const isSimPostgresPortBound = await isPortBound(25432);
-      if (isPostgresPortBound || isSimPostgresPortBound) {
-        console.log(`  [${chalk.yellow('WARN')}] PostgreSQL port conflict detected (Port 5432 or 25432 is in use).`);
-        console.log(`    ${chalk.gray('Note:')} Contexa will skip starting PostgreSQL container and attempt to reuse host service.`);
+      if (needsDocker) {
+        const isPostgresPortBound = await isPortBound(5432);
+        const isSimPostgresPortBound = await isPortBound(25432);
+        if (isPostgresPortBound || isSimPostgresPortBound) {
+          console.log(`  [${chalk.yellow('WARN')}] PostgreSQL port conflict detected (Port 5432 or 25432 is in use).`);
+          console.log(`    ${chalk.gray('Note:')} Contexa will skip starting PostgreSQL container and attempt to reuse host service.`);
+        } else {
+          console.log(`  [${chalk.green('OK')}] PostgreSQL ports are free.`);
+        }
       } else {
-        console.log(`  [${chalk.green('OK')}] PostgreSQL ports are free.`);
+        console.log(`  [${chalk.gray('SKIP')}] PostgreSQL port check skipped.`);
       }
 
       // 4. Ollama and LLM Models (11434 and simulation 31434)
-      const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
-      const ollamaSimPort = 31434;
-      
-      let ollamaStatus = await checkOllamaModels(ollamaPort);
-      if (!ollamaStatus.reachable) {
-        ollamaStatus = await checkOllamaModels(ollamaSimPort);
-      }
+      if (needsOllama) {
+        const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
+        const ollamaSimPort = 31434;
 
-      if (ollamaStatus.reachable) {
-        console.log(`  [${chalk.green('OK')}] Ollama is running.`);
-        const requiredChatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
-        const hasChatModel = ollamaStatus.models.some(m => m.startsWith(requiredChatModel.split(':')[0]));
-        
-        if (hasChatModel) {
-          console.log(`  [${chalk.green('OK')}] Ollama Model: ${requiredChatModel} is pulled.`);
+        let ollamaStatus = await checkOllamaModels(ollamaPort);
+        if (!ollamaStatus.reachable) {
+          ollamaStatus = await checkOllamaModels(ollamaSimPort);
+        }
+
+        if (ollamaStatus.reachable) {
+          console.log(`  [${chalk.green('OK')}] Ollama is running.`);
+          const requiredChatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
+          const hasChatModel = ollamaStatus.models.some(m => m.startsWith(requiredChatModel.split(':')[0]));
+
+          if (hasChatModel) {
+            console.log(`  [${chalk.green('OK')}] Ollama Model: ${requiredChatModel} is pulled.`);
+          } else {
+            overallPass = false;
+            console.log(`  [${chalk.red('FAIL')}] Ollama Model '${requiredChatModel}' is missing.`);
+            console.log(`    ${chalk.yellow('[FIX]')} Run: docker exec -it contexa-ollama ollama pull ${requiredChatModel}`);
+          }
         } else {
           overallPass = false;
-          console.log(`  [${chalk.red('FAIL')}] Ollama Model '${requiredChatModel}' is missing.`);
-          console.log(`    ${chalk.yellow('[FIX]')} Run: docker exec -it contexa-ollama ollama pull ${requiredChatModel} \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`);
+          console.log(`  [${chalk.red('FAIL')}] Ollama is not running on port ${ollamaPort} or ${ollamaSimPort}.`);
+          console.log(`    ${chalk.yellow('[FIX]')} Start Ollama locally or run 'docker compose up -d ollama' via contexa infra.`);
         }
       } else {
-        overallPass = false;
-        console.log(`  [${chalk.red('FAIL')}] Ollama is not running on port ${ollamaPort} or ${ollamaSimPort}.`);
-        console.log(`    ${chalk.yellow('[FIX]')} Start Ollama locally or run 'docker compose up -d ollama' via contexa infra. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`);
+        console.log(`  [${chalk.gray('SKIP')}] Ollama check skipped. Use --provider ollama when you use local Ollama.`);
       }
 
       console.log('');

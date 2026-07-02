@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 // YAML injection: build the contexa.* tree the CLI is responsible for, merge
 // it onto the host application's parsed yml object, force-overwrite the small
@@ -24,7 +24,13 @@ const LEGACY_MARKER_END   = '# --- End Contexa ---';
 // The shape mirrors the @ConfigurationProperties surface in the platform.
 // Returned tree is a fresh object the caller can mutate freely.
 function buildCliContexaTree(opts = {}) {
-  const { mode = 'shadow', llmProviders = ['openai', 'anthropic'], infra = 'standalone', simulate = false } = opts;
+  const {
+    mode = 'shadow',
+    llmProviders = [],
+    infra = 'standalone',
+    simulate = false,
+    enableAiSecurity = false,
+  } = opts;
   
   // Sort providers so that 'ollama' comes first if it exists (for seamless offline out-of-the-box testing without API keys)
   let sortedProviders = [...llmProviders];
@@ -51,13 +57,6 @@ function buildCliContexaTree(opts = {}) {
   const ollamaPort = isSimulate ? '31434' : '11434';
 
   const tree = {
-    llm: {
-      // Use the non-deprecated selection API. Deprecated chatModelPriority/
-      // embeddingModelPriority on contexa.llm.* are intentionally NOT written.
-      selection: {
-        chat: { mode: 'dynamic-priority', priority },
-      },
-    },
     datasource: {
       url: `\${CONTEXA_DB_URL:\${DB_URL:jdbc:postgresql://localhost:${dbPort}/${dbName}}}`,
       username: `\${CONTEXA_DB_USERNAME:\${DB_USERNAME:${dbUser}}}`,
@@ -68,16 +67,26 @@ function buildCliContexaTree(opts = {}) {
     security: {
       zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
     },
-    hcad: {
-      geoip: { enabled: true, dbPath: 'contexa/data/GeoLite2-City.mmdb' },
-    },
   };
 
-  if (!isSimulate) {
-    tree.llm.selection.embedding = { mode: 'fixed', priority: embeddingPriority };
+  if (enableAiSecurity || isSimulate) {
+    tree.llm = {
+      // Use the non-deprecated selection API. Deprecated chatModelPriority/
+      // embeddingModelPriority on contexa.llm.* are intentionally NOT written.
+      selection: {
+        chat: { mode: 'dynamic-priority', priority: priority || 'openai' },
+      },
+    };
+    tree.hcad = {
+      geoip: { enabled: true, dbPath: 'contexa/data/GeoLite2-City.mmdb' },
+    };
+
+    if (!isSimulate) {
+      tree.llm.selection.embedding = { mode: 'fixed', priority: embeddingPriority };
+    }
   }
 
-  if (llmProviders.includes('ollama')) {
+  if ((enableAiSecurity || isSimulate) && llmProviders.includes('ollama')) {
     tree.llm.chat = {
       ollama: {
         baseUrl: `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
@@ -138,7 +147,6 @@ function setPath(obj, pathArr, value) {
 //       * contexa.llm.selection.{chat,embedding}.priority
 //   - --distributed additionally forces contexa.infrastructure.mode = DISTRIBUTED.
 function applyCliContexaTree(rootObj, cliTree, opts) {
-  const { llmProviders = ['openai', 'anthropic'] } = opts || {};
   if (!rootObj.contexa || typeof rootObj.contexa !== 'object' || Array.isArray(rootObj.contexa)) {
     rootObj.contexa = {};
   }
@@ -146,42 +154,38 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
 
   setPath(rootObj.contexa, ['security', 'zerotrust', 'mode'],
     (opts.simulate || opts.mode === 'enforce') ? 'ENFORCE' : 'SHADOW');
-  setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
-  setPath(rootObj.contexa, ['hcad', 'geoip', 'dbPath'], 'contexa/data/GeoLite2-City.mmdb');
   setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
-  setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
-    cliTree.llm.selection.chat.mode);
-  setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
-    cliTree.llm.selection.chat.priority);
 
-  if (opts.simulate) {
-    if (rootObj.contexa.llm && rootObj.contexa.llm.selection) {
-      delete rootObj.contexa.llm.selection.embedding;
-    }
-  } else {
-    setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
-      cliTree.llm.selection.embedding.mode);
-    setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
-      cliTree.llm.selection.embedding.priority);
+  if (cliTree.hcad) {
+    setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
+    setPath(rootObj.contexa, ['hcad', 'geoip', 'dbPath'], 'contexa/data/GeoLite2-City.mmdb');
   }
 
+  if (cliTree.llm && cliTree.llm.selection) {
+    setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
+      cliTree.llm.selection.chat.mode);
+    setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
+      cliTree.llm.selection.chat.priority);
+
+    if (opts.simulate) {
+      if (rootObj.contexa.llm && rootObj.contexa.llm.selection) {
+        delete rootObj.contexa.llm.selection.embedding;
+      }
+    } else if (cliTree.llm.selection.embedding) {
+      setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
+        cliTree.llm.selection.embedding.mode);
+      setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
+        cliTree.llm.selection.embedding.priority);
+    }
+  }
   if (opts.infra === 'distributed') {
     setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
   }
 
-  // Clean up unselected LLM provider configs in spring.ai and contexa.llm
-  if (rootObj.spring && rootObj.spring.ai) {
-    if (!llmProviders.includes('openai')) {
-      delete rootObj.spring.ai.openai;
-    }
-    if (!llmProviders.includes('anthropic')) {
-      delete rootObj.spring.ai.anthropic;
-    }
-    if (!llmProviders.includes('ollama')) {
-      delete rootObj.spring.ai.ollama;
-    }
-  }
-  if (rootObj.contexa && rootObj.contexa.llm) {
+  // Do not create or delete spring.ai.*. Provider runtime settings belong to
+  // the user application or the starter/autoconfigure defaults, not the CLI.
+  if (rootObj.contexa && rootObj.contexa.llm && opts.enableAiSecurity !== false) {
+    const llmProviders = opts.llmProviders || [];
     if (!llmProviders.includes('ollama')) {
       if (rootObj.contexa.llm.chat) {
         delete rootObj.contexa.llm.chat.ollama;
@@ -197,48 +201,6 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
       }
     }
   }
-
-  // Inject spring.ai configurations for openai/anthropic/ollama if selected and not already configured
-  const willHaveEnableAiSecurity = opts.simulate || opts.hasEnableAiSecurity || (opts.integrationMode === 'merge');
-  if (willHaveEnableAiSecurity) {
-    if (!rootObj.spring) rootObj.spring = {};
-    if (!rootObj.spring.ai) rootObj.spring.ai = {};
-
-    if (!rootObj.spring.ai.retry) rootObj.spring.ai.retry = {};
-    if (rootObj.spring.ai.retry['max-attempts'] === undefined) {
-      rootObj.spring.ai.retry['max-attempts'] = 1;
-    }
-
-    if (llmProviders.includes('openai') && !rootObj.spring.ai.openai) {
-      rootObj.spring.ai.openai = {
-        'api-key': '${OPENAI_API_KEY:disabled}',
-        'base-url': 'https://api.openai.com',
-        chat: {
-          options: {
-            model: 'gpt-5-nano'
-          }
-        },
-        embedding: {
-          options: {
-            model: 'text-embedding-3-small',
-            dimensions: 1024
-          }
-        }
-      };
-    }
-
-    if (llmProviders.includes('anthropic') && !rootObj.spring.ai.anthropic) {
-      rootObj.spring.ai.anthropic = {
-        'api-key': '${ANTHROPIC_API_KEY:disabled}',
-        chat: {
-          options: {
-            model: 'claude-3-sonnet-20240229'
-          }
-        }
-      };
-    }
-  }
-
   // Inject spring.data.redis and spring.kafka configurations if simulate mode
   if (opts.simulate) {
     if (!rootObj.spring) rootObj.spring = {};
@@ -326,3 +288,4 @@ module.exports = {
   fillOnly,
   setPath,
 };
+

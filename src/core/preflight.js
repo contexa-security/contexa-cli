@@ -34,9 +34,9 @@ async function inspectInfra(opts = {}) {
           '  Windows / macOS : https://www.docker.com/products/docker-desktop',
           '  Linux           : https://docs.docker.com/engine/install/',
           'After installation, open a new terminal and re-run "contexa init".',
-          'If you cannot install Docker, re-run with "--no-infra" to skip',
-          'infrastructure provisioning - you will need to run PostgreSQL',
-          '(and Redis/Kafka if --distributed) yourself before starting the app.',
+          'Docker is only required for simulation or distributed infrastructure.',
+          'If you cannot install Docker, run the normal guided setup with "contexa init"',
+          'and use your own PostgreSQL or managed infrastructure instead.',
         ],
       });
       return issues;
@@ -51,8 +51,8 @@ async function inspectInfra(opts = {}) {
         hint: [
           'Windows / macOS : open Docker Desktop and wait for the whale icon to settle.',
           'Linux           : sudo systemctl start docker',
-          'Or re-run "contexa init --no-docker" to generate compose files',
-          'without starting containers (you can `docker compose up -d` later).',
+          'If you selected infrastructure setup, re-run with "contexa init --no-docker"',
+          'to generate compose files without starting containers.',
         ],
       });
       // No point checking ports/containers when the daemon is down.

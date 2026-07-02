@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 // Regression lock for the "user claim 0" guarantees:
 //   1. contexa-cli must not touch any customer file beyond build.gradle/pom.xml
@@ -46,7 +46,7 @@ test('S1: generateDockerCompose writes ONLY to the infra dir, never to the custo
     await fs.writeFile(customerCompose, customerContent);
 
     await generateDockerCompose(infraDir, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
 
     assert.equal(await fs.readFile(customerCompose, 'utf8'), customerContent,
@@ -67,7 +67,7 @@ test('S2: contexa-cli does not generate initdb SQL in customer or infra dirs', a
     await fs.writeFile(customerSql, customerContent);
 
     await generateDockerCompose(infraDir, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed',
     });
 
     assert.equal(await fs.readFile(customerSql, 'utf8'), customerContent,
@@ -217,7 +217,7 @@ dependencies {
       hasEnableAiSecurity: false,
     };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
 
     // Customer files: byte-identical.
@@ -261,7 +261,7 @@ test('Mode 2: Maven projects get pom-fragment.xml, not contexa.gradle', async ()
       hasEnableAiSecurity: false,
     };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
 
     // Customer pom.xml: byte-identical.
@@ -286,7 +286,7 @@ test('Mode 2: distributed infra adds spring-kafka and redisson to the gradle fra
       hasEnableAiSecurity: false,
     };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'distributed',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed',
     });
     const frag = await fs.readFile(result.buildFragmentPath, 'utf8');
     assert.ok(frag.includes('spring-kafka'), 'distributed must add spring-kafka');
@@ -313,7 +313,7 @@ test('C1: injectStandalone NEVER adds Spring AI provider starters even when hasE
       hasEnableAiSecurity: true,
     };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama', 'openai'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama', 'openai'], infra: 'standalone',
     });
     const frag = await fs.readFile(result.buildFragmentPath, 'utf8');
     assert.equal(frag.includes('spring-ai-starter-model-ollama'), false,
@@ -459,7 +459,7 @@ test('A5: injectStandalone backs up existing application.yml as .bak', async () 
 
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
 
     assert.equal(await fs.pathExists(ymlPath + '.bak'), true,
@@ -480,7 +480,7 @@ test('A5: injectStandalone backs up existing contexa.gradle as .bak', async () =
 
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
 
     assert.equal(await fs.pathExists(fragPath + '.bak'), true);
@@ -497,7 +497,7 @@ test('A6: injectStandalone throws a clear error when the target path is a FILE',
     await fs.writeFile(standaloneDir, '#!/bin/sh\necho user-tool\n');
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     await assert.rejects(
-      injectStandalone(standaloneDir, project, { mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone' }),
+      injectStandalone(standaloneDir, project, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone' }),
       /already exists and is not a directory/);
     // The original file must be preserved byte-identical.
     assert.equal(await fs.readFile(standaloneDir, 'utf8'), '#!/bin/sh\necho user-tool\n');
@@ -513,7 +513,7 @@ test('A6: injectStandalone refuses to write into a non-empty unrelated directory
     await fs.writeFile(path.join(standaloneDir, 'README.md'), '# customer notes\n');
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     await assert.rejects(
-      injectStandalone(standaloneDir, project, { mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone' }),
+      injectStandalone(standaloneDir, project, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone' }),
       /does not look like a contexa-cli output folder/);
     // The unrelated file must remain.
     assert.equal(await fs.readFile(path.join(standaloneDir, 'README.md'), 'utf8'), '# customer notes\n');
@@ -528,7 +528,7 @@ test('A6: injectStandalone proceeds when --force is passed even if folder is non
     await fs.writeFile(path.join(standaloneDir, 'README.md'), '# customer notes\n');
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone', force: true,
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone', force: true,
     });
     assert.equal(await fs.pathExists(result.ymlPath), true);
     // Customer file still present.
@@ -545,7 +545,7 @@ test('A6: injectStandalone proceeds without --force when folder already looks li
     await fs.writeFile(path.join(standaloneDir, 'application.yml'), '# previous\n');
     const project = { buildTool: 'gradle', buildFilePath: path.join(root, 'build.gradle'), hasEnableAiSecurity: false };
     const result = await injectStandalone(standaloneDir, project, {
-      mode: 'shadow', llmProviders: ['ollama'], infra: 'standalone',
+      mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'standalone',
     });
     assert.equal(await fs.pathExists(result.ymlPath), true);
     assert.equal(await fs.pathExists(result.ymlPath + '.bak'), true,
