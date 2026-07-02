@@ -12,7 +12,7 @@ const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
 const { findBackupFiles } = require('../core/cleanup');
-const { loadManifest, manifestPath } = require('../core/manifest');
+const { loadManifest, manifestPath, sha256FileSync } = require('../core/manifest');
 
 const COMPOSE_SERVICES = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka'];
 const COMPOSE_VOLUMES = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'kafka-data'];
@@ -69,12 +69,6 @@ function forceCleanupComposeProject(projectName) {
   }
 }
 
-async function ensureComposeForDown(infraDir) {
-  if (fs.existsSync(path.join(infraDir, 'docker-compose.yml'))) return;
-  const { generateDockerCompose } = require('../core/injector/compose');
-  await generateDockerCompose(infraDir, { infra: 'distributed', includeOllama: true });
-}
-
 function composeEnv(projectName, extra = {}) {
   return {
     ...process.env,
@@ -97,13 +91,17 @@ function simulateComposeEnv() {
 }
 
 async function composeDown(projectName, infraDir, env) {
-  await ensureComposeForDown(infraDir);
+  const composePath = path.join(infraDir, 'docker-compose.yml');
+  if (!fs.existsSync(composePath)) {
+    return { skipped: true, reason: `compose file not found: ${composePath}` };
+  }
   const result = dockerCompose(['-p', projectName, 'down', '-v'], { cwd: infraDir, stdio: 'pipe', env });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const stderr = result.stderr ? result.stderr.toString() : 'Unknown error';
     throw new Error(`${projectName} down failed: ${stderr.trim()}`);
   }
+  return { skipped: false };
 }
 
 function removeIfEmpty(dir) {
@@ -112,10 +110,16 @@ function removeIfEmpty(dir) {
   }
 }
 
+function fileChangedSinceInit(entry, originalFile) {
+  if (!entry || !entry.currentChecksum || !fs.existsSync(originalFile)) return false;
+  return sha256FileSync(originalFile) !== entry.currentChecksum;
+}
+
 async function restoreProjectFiles(projectDir) {
   const backupsDir = path.join(projectDir, 'contexa', 'bak');
   const manifest = await loadManifest(projectDir);
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const conflicts = [];
 
   if (manifestFiles.length > 0) {
     const sorted = [...manifestFiles].sort((a, b) => {
@@ -127,6 +131,15 @@ async function restoreProjectFiles(projectDir) {
     for (const entry of sorted) {
       const originalFile = path.join(projectDir, entry.relativePath);
       const backupPath = path.join(backupsDir, entry.relativePath);
+      if (entry.relativePath === 'contexa' && fs.existsSync(originalFile)) {
+        removeIfEmpty(originalFile);
+        continue;
+      }
+      if (fileChangedSinceInit(entry, originalFile)) {
+        conflicts.push(entry.relativePath);
+        console.log(chalk.yellow(`    - Skipped user-modified file: ${originalFile}`));
+        continue;
+      }
       if (fs.existsSync(backupPath)) {
         fs.ensureDirSync(path.dirname(originalFile));
         fs.copySync(backupPath, originalFile, { overwrite: true });
@@ -137,12 +150,16 @@ async function restoreProjectFiles(projectDir) {
       }
     }
 
-    const mPath = manifestPath(projectDir);
-    if (fs.existsSync(mPath)) fs.removeSync(mPath);
-    if (fs.existsSync(backupsDir)) fs.removeSync(backupsDir);
-    const parentContexa = path.join(projectDir, 'contexa');
-    if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
-    return;
+    if (conflicts.length === 0) {
+      const mPath = manifestPath(projectDir);
+      if (fs.existsSync(mPath)) fs.removeSync(mPath);
+      if (fs.existsSync(backupsDir)) fs.removeSync(backupsDir);
+      const parentContexa = path.join(projectDir, 'contexa');
+      if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
+    } else {
+      console.log(chalk.yellow('    - Manifest and backups were kept so you can review skipped files.'));
+    }
+    return { conflicts };
   }
 
   const backupFiles = fs.existsSync(backupsDir) ? findBackupFiles(backupsDir) : [];
@@ -156,10 +173,11 @@ async function restoreProjectFiles(projectDir) {
     fs.removeSync(backupsDir);
     const parentContexa = path.join(projectDir, 'contexa');
     if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
-    return;
+    return { conflicts };
   }
 
   console.log(chalk.yellow(`    - ${t('reset.noBackup') || 'No manifest or backup files found; project source files were not modified.'}`));
+  return { conflicts };
 }
 
 function resolveTargets(opts) {
@@ -220,9 +238,11 @@ module.exports = function (program) {
       console.log(chalk.cyan('  =============================================\n'));
 
       const projectDir = path.resolve(opts.dir);
-      const projectName = resolveProjectName();
+      const resetManifest = await loadManifest(projectDir);
+      const projectName = (resetManifest.metadata && resetManifest.metadata.projectName) || resolveProjectName();
       let targets = resolveTargets(opts);
       let dockerFailed = false;
+      let resetHadIssues = false;
 
       if (!hasAnyTarget(targets)) {
         if (opts.yes) {
@@ -260,7 +280,9 @@ module.exports = function (program) {
         const errors = [];
 
         if (targets.simulate) {
-          const simInfraDir = resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
+          const simInfraDir = (resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
+            ? resetManifest.metadata.simInfraDir
+            : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
           try {
             await composeDown('ctxa-sim', simInfraDir, simulateComposeEnv());
           } catch (error) {
@@ -269,7 +291,9 @@ module.exports = function (program) {
         }
 
         if (targets.infra) {
-          const infraDir = resolveInfraDir(projectName, { infraDir: opts.infraDir });
+          const infraDir = (resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
+            ? resetManifest.metadata.infraDir
+            : resolveInfraDir(projectName, { infraDir: opts.infraDir });
           try {
             await composeDown(projectName, infraDir, composeEnv(projectName));
           } catch (error) {
@@ -279,6 +303,7 @@ module.exports = function (program) {
 
         if (errors.length > 0) {
           dockerFailed = true;
+          resetHadIssues = true;
           spinner.fail(`Docker cleanup failed:\n${errors.join('\n')}`);
         } else {
           if (targets.simulate) forceCleanupComposeProject('ctxa-sim');
@@ -292,8 +317,13 @@ module.exports = function (program) {
       if (targets.code) {
         const spinner = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
         try {
-          await restoreProjectFiles(projectDir);
-          spinner.succeed(t('reset.restoringFiles') || 'Backup files restored.');
+          const restoreResult = await restoreProjectFiles(projectDir);
+          if (restoreResult.conflicts && restoreResult.conflicts.length > 0) {
+            resetHadIssues = true;
+            spinner.warn(`Project file restore skipped ${restoreResult.conflicts.length} user-modified file(s).`);
+          } else {
+            spinner.succeed(t('reset.restoringFiles') || 'Backup files restored.');
+          }
         } catch (error) {
           spinner.fail(`Project file restore failed: ${error.message}`);
           process.exit(1);
@@ -304,19 +334,29 @@ module.exports = function (program) {
         const spinner = ora(t('reset.removingDir') || 'Cleaning Contexa owned cache/config...').start();
         try {
           if (targets.simulate) {
-            const simCacheDir = resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
+            const simCacheDir = (resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
+              ? resetManifest.metadata.simInfraDir
+              : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
             if (fs.existsSync(simCacheDir)) fs.removeSync(simCacheDir);
           }
           if (targets.infra) {
-            const infraCacheDir = resolveInfraDir(projectName, { infraDir: opts.infraDir });
+            const infraCacheDir = (resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
+              ? resetManifest.metadata.infraDir
+              : resolveInfraDir(projectName, { infraDir: opts.infraDir });
             if (fs.existsSync(infraCacheDir)) fs.removeSync(infraCacheDir);
           }
           spinner.succeed(t('reset.removingDir') || 'Contexa directories cleaned.');
         } catch (error) {
+          resetHadIssues = true;
           spinner.fail(`Failed to clean Contexa directories: ${error.message}`);
         }
       }
 
-      console.log(chalk.green(`\n  v ${t('reset.success') || 'Contexa reset successfully completed.'}\n`));
+      if (resetHadIssues) {
+        console.log(chalk.yellow(`\n  ! Contexa reset completed with issues. Review the messages above before re-running.\n`));
+        process.exitCode = 1;
+      } else {
+        console.log(chalk.green(`\n  v ${t('reset.success') || 'Contexa reset successfully completed.'}\n`));
+      }
     });
 };

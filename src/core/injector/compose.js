@@ -18,9 +18,11 @@
 
 const fs = require('fs-extra');
 const path = require('path');
+const { sanitizeProjectName } = require('../project');
 
 async function generateDockerCompose(infraDir, opts = {}) {
-  const { infra = 'standalone', includeOllama = false } = opts;
+  const { infra = 'standalone', includeOllama = false, projectName = 'contexa' } = opts;
+  const defaultProjectName = sanitizeProjectName(projectName || 'contexa');
   await fs.ensureDir(infraDir);
   const composePath = path.join(infraDir, 'docker-compose.yml');
 
@@ -48,13 +50,13 @@ async function generateDockerCompose(infraDir, opts = {}) {
 #   CONTEXA_OLLAMA_IMAGE_TAG       ollama image tag              (default latest - PIN IN PROD)
 #   CONTEXA_REDIS_IMAGE_TAG        redis image tag               (default 7.2-alpine)
 #   CONTEXA_KAFKA_PLATFORM_VERSION confluentinc cp-* version     (default 7.4.0)
-name: \${CONTEXA_PROJECT:-contexa}
+name: \${CONTEXA_PROJECT:-${defaultProjectName}}
 
 services:
   # PostgreSQL with PGVector
   postgres:
     image: pgvector/pgvector:\${CONTEXA_PGVECTOR_IMAGE_TAG:-pg16}
-    container_name: \${CONTEXA_PROJECT:-contexa}-postgres
+    container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-postgres
     environment:
       POSTGRES_DB: \${CONTEXA_DB_NAME:-contexa}
       POSTGRES_USER: \${CONTEXA_DB_USERNAME:-contexa}
@@ -79,7 +81,7 @@ services:
   # CONTEXA_OLLAMA_IMAGE_TAG to a specific version for reproducibility.
   ollama:
     image: ollama/ollama:\${CONTEXA_OLLAMA_IMAGE_TAG:-latest}
-    container_name: \${CONTEXA_PROJECT:-contexa}-ollama
+    container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-ollama
     ports:
       - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_OLLAMA_PORT:-11434}:11434"
     volumes:
@@ -101,7 +103,7 @@ services:
   # Redis - Session store, cache, distributed locks (PoC/demo only)
   redis:
     image: redis:\${CONTEXA_REDIS_IMAGE_TAG:-7.2-alpine}
-    container_name: \${CONTEXA_PROJECT:-contexa}-redis
+    container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-redis
     ports:
       - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_REDIS_PORT:-6379}:6379"
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
@@ -117,7 +119,7 @@ services:
   # Zookeeper - Kafka coordinator
   zookeeper:
     image: confluentinc/cp-zookeeper:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
-    container_name: \${CONTEXA_PROJECT:-contexa}-zookeeper
+    container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -136,7 +138,7 @@ services:
   # Kafka - Event streaming
   kafka:
     image: confluentinc/cp-kafka:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
-    container_name: \${CONTEXA_PROJECT:-contexa}-kafka
+    container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-kafka
     depends_on:
       zookeeper:
         condition: service_healthy

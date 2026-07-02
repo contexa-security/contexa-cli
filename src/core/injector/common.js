@@ -9,7 +9,7 @@ const fs = require('fs-extra');
 
 const CONTEXA_GROUP_ID = 'ai.ctxa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
-const CONTEXA_VERSION = '0.1.0';
+const CONTEXA_VERSION = '0.1.0-SNAPSHOT';
 
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

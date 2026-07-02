@@ -243,7 +243,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     let changed = false;
     let updated = content;
 
-    // 1. Dependency Management??spring-ai-bom ì¶”ê?
+    // 1. Add spring-ai-bom to dependencyManagement when needed.
     if (!content.includes('spring-ai-bom')) {
       const mgmtTag = '</dependencyManagement>';
       const mgmtIndex = content.indexOf(mgmtTag);
@@ -283,7 +283,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
       }
     }
 
-    // 2. <dependencies> ë¸”ë¡??ëª¨ë¸ ?¤í???ì¶”ê?/?? œ
+    // 2. Add or remove selected model starters in the top-level dependencies block.
     const cleanMavenDep = (provName) => {
       const pat = new RegExp(`<dependency>\\s*<groupId>org\\.springframework\\.ai</groupId>\\s*<artifactId>spring-ai-starter-model-${provName}</artifactId>\\s*</dependency>\\s*`, 'g');
       updated = updated.replace(pat, '');
@@ -422,9 +422,9 @@ async function injectEnableAiSecurity(projectDir) {
           let text = await fs.readFile(full, 'utf8');
           if (text.includes('@SpringBootApplication')) {
             if (text.includes('@EnableAISecurity') || text.includes('EnableAISecurity')) {
-              return false;
+              return { changed: false, filePath: full };
             }
-            
+
             await backupFile(full);
 
             const importLine = "import io.contexa.contexacommon.annotation.EnableAISecurity;\n";
@@ -452,13 +452,13 @@ async function injectEnableAiSecurity(projectDir) {
             }
 
             await fs.writeFile(full, text);
-            return true;
+            return { changed: true, filePath: full };
           }
         } catch {}
       }
     }
   }
-  return false;
+  return { changed: false, filePath: null };
 }
 
 module.exports = {

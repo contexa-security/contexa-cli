@@ -39,7 +39,7 @@ function normalizeProviders(providerOpt, includeOllama) {
     }
     return [...new Set(values)];
   }
-  return includeOllama ? ['openai', 'anthropic', 'ollama'] : ['openai'];
+  return includeOllama ? ['ollama'] : [];
 }
 
 function aiProviderSelected(answers) {
@@ -47,31 +47,34 @@ function aiProviderSelected(answers) {
 }
 
 function printPlannedChanges(answers, project, paths) {
-  const isKo = getLocale() === 'ko';
-  console.log(chalk.cyan(`\n  ${isKo ? '적용 예정 변경' : 'Planned changes'}`));
+  const msg = (key, fallback) => {
+    const value = t(key);
+    return value && value !== key ? value : fallback;
+  };
+
+  console.log(chalk.cyan(`\n  ${msg('planned.title', 'Planned changes')}`));
   const items = [];
   if (answers.integrationMode === 'standalone') {
-    items.push(`${isKo ? 'Contexa 전용 파일 생성' : 'Create Contexa-only files'}: ${paths.standaloneDir}`);
+    items.push(`${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
   } else {
-    items.push(`${isKo ? 'starter 의존성 추가' : 'Add starter dependency'}: ${paths.buildPath}`);
-    items.push(`${isKo ? '최소 Contexa 설정 적용' : 'Apply minimal Contexa settings'}: ${paths.ymlPath}`);
+    items.push(`${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
+    items.push(`${msg('planned.applyMinimal', 'Apply minimal Contexa settings')}: ${paths.ymlPath}`);
   }
   if (answers.enableAiSecurity) {
-    items.push(`${isKo ? 'AI 보안 설정 적용' : 'Enable AI security settings'} (${answers.llmProviders.join(', ')})`);
+    items.push(`${msg('planned.enableAi', 'Enable AI security settings')} (${answers.llmProviders.join(', ')})`);
     if (answers.autoAnnotate) {
-      items.push(isKo ? '@EnableAISecurity 자동 추가' : 'Auto-add @EnableAISecurity');
+      items.push(msg('planned.autoAnnotate', 'Auto-add @EnableAISecurity'));
     } else if (!project.hasEnableAiSecurity) {
-      items.push(isKo ? '@EnableAISecurity는 직접 추가' : 'You will add @EnableAISecurity manually');
+      items.push(msg('planned.manualAnnotate', 'Add @EnableAISecurity manually after init'));
     }
   } else {
-    items.push(isKo ? 'AI 보안은 아직 켜지 않음' : 'AI security remains disabled for now');
+    items.push(msg('planned.aiDisabled', 'AI security remains disabled for now'));
   }
   if (answers.infra !== 'skip') {
-    items.push(isKo ? '선택한 인프라 파일 생성' : 'Create selected infrastructure files');
+    items.push(msg('planned.createInfra', 'Create selected infrastructure files'));
   }
   for (const item of items) console.log(chalk.gray(`    - ${item}`));
 }
-
 function downloadFile(url, dest) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
@@ -97,7 +100,7 @@ const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
 const { t, setLocale, getLocale } = require('../core/i18n');
-const { recordChange } = require('../core/manifest');
+const { recordChange, recordInstallMetadata } = require('../core/manifest');
 
 module.exports = function (program) {
   program
@@ -205,17 +208,22 @@ module.exports = function (program) {
           console.log(chalk.gray(`    -> FIX: Install JDK 17 and configure JAVA_HOME. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
         }
 
-        // Check Docker
-        const hasDockerCli = isDockerCliInstalled();
-        const hasDockerDaemon = isDockerDaemonRunning();
-        if (!hasDockerCli) {
-          checkPass = false;
-          console.log(chalk.red(`  x Docker CLI is not installed.`));
-          console.log(chalk.gray(`    -> FIX: Install Docker Desktop: https://www.docker.com/products/docker-desktop \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
-        } else if (!hasDockerDaemon) {
-          checkPass = false;
-          console.log(chalk.red(`  x Docker daemon is not running.`));
-          console.log(chalk.gray(`    -> FIX: Open Docker Desktop or run 'sudo systemctl start docker'. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
+        // Docker is required only when the user explicitly asks for local infrastructure.
+        const needsDockerPrecheck = !!(opts.distributed || opts.simulate);
+        if (needsDockerPrecheck) {
+          const hasDockerCli = isDockerCliInstalled();
+          const hasDockerDaemon = hasDockerCli && isDockerDaemonRunning();
+          if (!hasDockerCli) {
+            checkPass = false;
+            console.log(chalk.red(`  x Docker CLI is not installed.`));
+            console.log(chalk.gray(`    -> FIX: Install Docker Desktop: https://www.docker.com/products/docker-desktop \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
+          } else if (!hasDockerDaemon) {
+            checkPass = false;
+            console.log(chalk.red(`  x Docker daemon is not running.`));
+            console.log(chalk.gray(`    -> FIX: Open Docker Desktop or run 'sudo systemctl start docker'. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
+          }
+        } else {
+          console.log(chalk.gray(`  - Docker check skipped. Basic init does not install local infrastructure.`));
         }
 
         if (!checkPass) {
@@ -250,6 +258,13 @@ module.exports = function (program) {
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
       console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing'))}`));
+
+      const cliProjectName = opts.simulate
+        ? 'ctxa-sim'
+        : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
+      if (!process.env.CONTEXA_PROJECT) {
+        process.env.CONTEXA_PROJECT = cliProjectName;
+      }
 
       // Docker is only consulted when the user explicitly opted into infra
       // provisioning via --distributed. Without --distributed, init does not
@@ -340,8 +355,8 @@ module.exports = function (program) {
       // after the answer naturally, giving a consistent breathing-room layout
       // (asked for explicitly by the operator).
       if (opts.simulate) {
-        console.log(chalk.cyan('\n  i --simulate 플래그가 감지되었습니다. 인프라 설정이 자동으로 결정됩니다.'));
-        console.log(chalk.gray('    분산 인프라 (PostgreSQL + Redis + Kafka + Ollama) 를 설치합니다.\n'));
+        console.log(chalk.cyan('\n  i --simulate selected. Contexa will prepare simulation infrastructure automatically.'));
+        console.log(chalk.gray('    Distributed simulation infrastructure includes PostgreSQL, Redis, Kafka, and Ollama.\n'));
       }
 
       const answers = opts.yes ? defaults : await inquirer.prompt([
@@ -461,7 +476,7 @@ module.exports = function (program) {
         {
           type: 'input', name: 'infraDir',
           message: '\n' + t('prompt.infraDir'),
-          default: () => resolveInfraDir(resolveProjectName(), {}),
+          default: () => resolveInfraDir(cliProjectName, {}),
           when: a => {
             if (a.setupMode !== 'advanced') return false;
             const infra = opts.distributed ? 'distributed' : a.infra;
@@ -508,11 +523,11 @@ module.exports = function (program) {
       }
 
       answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
-      answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
-      if (answers.autoAnnotate && !answers.enableAiSecurity) {
-        answers.enableAiSecurity = true;
-        if (!aiProviderSelected(answers)) answers.llmProviders = ['openai'];
+      if (answers.autoAnnotate && !aiProviderSelected(answers)) {
+        console.error(chalk.red('  x --auto-annotate requires an explicit AI provider. Re-run with --provider openai, anthropic, or ollama.'));
+        process.exit(1);
       }
+      answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
 
       answers.simulate = !!opts.simulate;
       answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
@@ -532,6 +547,15 @@ module.exports = function (program) {
         || normalizePath(answers.infraDir, opts.dir)
         || null;
 
+      await recordInstallMetadata(opts.dir, {
+        projectName: cliProjectName,
+        integrationMode: answers.integrationMode,
+        infra: answers.infra,
+        infraDir: answers.infra !== 'skip' ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride }) : null,
+        simInfraDir: opts.simulate ? resolveInfraDir('ctxa-sim', { infraDir: infraDirOverride }) : null,
+        aiSecurityEnabled: !!answers.enableAiSecurity,
+      });
+
       if (answers.enableAiSecurity || answers.simulate) {
         // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
         const startGeo = process.hrtime.bigint();
@@ -542,8 +566,8 @@ module.exports = function (program) {
           await fs.ensureDir(targetDataDir);
 
           if (!(await fs.pathExists(targetMmdbPath))) {
-            const localSource = 'E:\\projects\\contexa\\data\\GeoLite2-City.mmdb';
-            if (await fs.pathExists(localSource)) {
+            const localSource = process.env.CONTEXA_GEOLITE2_SOURCE_PATH;
+            if (localSource && await fs.pathExists(localSource)) {
               await fs.copy(localSource, targetMmdbPath);
               await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' });
               sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
@@ -728,7 +752,7 @@ module.exports = function (program) {
             + (includesOllama ? ' + Ollama' : '')));
         }
 
-        infraDir = resolveInfraDir(resolveProjectName(), { infraDir: infraDirOverride });
+        infraDir = resolveInfraDir(cliProjectName, { infraDir: infraDirOverride });
         console.log(chalk.gray(`  Infrastructure files location: ${infraDir}`));
         console.log(chalk.gray('  Database schema and seed data will be installed by contexa-iam when the application starts.'));
 
@@ -736,6 +760,7 @@ module.exports = function (program) {
         const s3 = ora(t('step.generatingCompose')).start();
         await generateDockerCompose(infraDir, {
           ...answers,
+          projectName: cliProjectName,
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
         });
         const elapsedCompose = Number(process.hrtime.bigint() - startCompose) / 1e6;
@@ -804,8 +829,7 @@ module.exports = function (program) {
               const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
               if (!isValidOllamaModel(chatModel)) throw new Error(`Invalid OLLAMA_CHAT_MODEL value: ${chatModel}`);
               if (!isValidOllamaModel(embedModel)) throw new Error(`Invalid OLLAMA_EMBEDDING_MODEL value: ${embedModel}`);
-
-              // Ollama 모델 다운로드 자동 진행
+              // Pull selected Ollama models when local Ollama is enabled.
               const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
                 const s5 = ora(t('step.pullingChat', chatModel)).start();
                 try {
@@ -844,32 +868,30 @@ module.exports = function (program) {
     }
 
       // 8. Done - show visual Guide Board for FTX optimization
-      const isKo = getLocale() === 'ko';
-
+      // 8. Done - show visual guide
       console.log(chalk.cyan('\n  ============================================================'));
       console.log(chalk.cyan(`     Contexa ${t('init.done')}`));
       console.log(chalk.cyan('  ============================================================\n'));
 
-      console.log(chalk.green(`  [${isKo ? '자동 완료된 작업' : 'Automated Tasks'}]:`));
+      console.log(chalk.green('  [Automated Tasks]:'));
       if (answers.integrationMode === 'standalone') {
-        console.log(chalk.gray(`    v ${isKo ? 'Standalone 폴더 생성 완료' : 'Standalone folder created'}: ${standaloneDir}`));
+        console.log(chalk.gray(`    v Standalone folder created: ${standaloneDir}`));
       } else {
-        console.log(chalk.gray(`    v ${isKo ? 'application.yml 내 Contexa 보안 구성 적용 완료' : 'Contexa security config merged into application.yml'}`));
-        console.log(chalk.gray(`    v ${isKo ? '빌드 파일 내 spring-boot-starter-contexa 의존성 추가 완료' : 'spring-boot-starter-contexa dependency added to build file'}`));
+        console.log(chalk.gray('    v Contexa configuration merged into application.yml'));
+        console.log(chalk.gray('    v spring-boot-starter-contexa dependency added to build file'));
       }
 
       if (answers.infra !== 'skip') {
-        console.log(chalk.gray(`    v ${isKo ? '인프라 파일 생성 및 컨테이너 가동 작업 완료' : 'Infrastructure files created and docker stack processed'}`));
+        console.log(chalk.gray('    v Infrastructure files created and Docker stack processed'));
       }
 
-      // Show Standalone wire-up guide if applicable
       if (standaloneResult) {
-        console.log(chalk.yellow(`\n  [${isKo ? 'Standalone 추가 설정 안내' : 'Standalone Wiring Instructions'}]:`));
+        console.log(chalk.yellow('\n  [Standalone Wiring Instructions]:'));
         console.log(chalk.gray(`    ${t('standalone.imports.yml')}`));
         console.log(chalk.cyan('       spring:'));
         console.log(chalk.cyan('         config:'));
         console.log(chalk.cyan('           import: "optional:file:./contexa/application.yml"'));
-        
+
         if (standaloneResult.importHints.isMaven) {
           console.log(chalk.gray(`\n    ${t('standalone.imports.maven')}`));
           console.log(chalk.cyan(`       ${standaloneResult.buildFragmentPath}`));
@@ -880,13 +902,10 @@ module.exports = function (program) {
         }
       }
 
-      // Show seed password and gitignore instructions
-
-
-      console.log(chalk.yellow(`\n  [${isKo ? '다음 확인 사항' : 'Next checks'}]:`));
+      console.log(chalk.yellow('\n  [Next checks]:'));
       let manualStep = 1;
       if (answers.enableAiSecurity && !aiAnnotationApplied) {
-        console.log(chalk.white(`    ${manualStep++}. ${isKo ? '메인 애플리케이션 클래스에 @EnableAISecurity를 추가하세요' : 'Add @EnableAISecurity to your main Application class'}:`));
+        console.log(chalk.white(`    ${manualStep++}. Add @EnableAISecurity to your main Application class:`));
         console.log(chalk.cyan('       ----------------------------------------------------'));
         if (answers.securityMode === 'sandbox') {
           console.log(chalk.cyan('       @EnableAISecurity('));
@@ -902,33 +921,34 @@ module.exports = function (program) {
       }
 
       if (answers.enableAiSecurity) {
-        console.log(chalk.white(`    ${manualStep++}. ${isKo ? '선택한 AI provider 설정을 확인하세요' : 'Verify the selected AI provider settings'}:`));
-        console.log(chalk.gray(`       - ${isKo ? '선택 provider' : 'Providers'}: ${answers.llmProviders.join(', ')}`));
-        console.log(chalk.gray(`       - ${isKo ? 'API key와 모델 값은 사용자 환경 변수나 애플리케이션 설정에서 관리하세요.' : 'Keep API keys and model values in your environment or application config.'}`));
+        console.log(chalk.white(`    ${manualStep++}. Verify selected AI provider settings:`));
+        console.log(chalk.gray(`       - Providers: ${answers.llmProviders.join(', ')}`));
+        console.log(chalk.gray('       - Keep API keys and model values in environment variables or application config.'));
         if (aiDependenciesProcessed) {
-          console.log(chalk.gray(`       - ${isKo ? '명시 선택한 AI provider 의존성 처리가 완료되었습니다.' : 'Explicit AI provider dependencies were processed.'}`));
+          console.log(chalk.gray('       - Explicit AI provider dependencies were processed.'));
         }
       } else {
-        console.log(chalk.white(`    ${manualStep++}. ${isKo ? 'AI 보안은 아직 비활성 상태입니다' : 'AI security is not enabled yet'}:`));
-        console.log(chalk.gray(`       ${isKo ? '나중에 켜려면 contexa init을 다시 실행하고 AI 보안 질문에서 예를 선택하세요.' : 'To enable later, run contexa init again and choose Yes when asked about AI security.'}`));
+        console.log(chalk.white(`    ${manualStep++}. AI security is not enabled yet:`));
+        console.log(chalk.gray('       Re-run contexa init and choose AI security when you are ready.'));
       }
 
-      console.log(chalk.white(`    ${manualStep++}. ${isKo ? '로컬 서버를 기동하고 환경 상태를 진단하세요' : 'Run the server and diagnose your environment'}:`));
-      console.log(chalk.gray(`       - ${isKo ? '서버 기동' : 'Start Server'} : ${project.buildTool === 'maven' ? './mvnw spring-boot:run' : './gradlew bootRun'}`));
+      console.log(chalk.white(`    ${manualStep++}. Run the server and diagnose your environment:`));
+      console.log(chalk.gray(`       - Start server : ${project.buildTool === 'maven' ? './mvnw spring-boot:run' : './gradlew bootRun'}`));
       const doctorProvider = aiProviderSelected(answers) ? ` --provider ${answers.llmProviders.join(',')}` : '';
-      console.log(chalk.gray(`       - ${isKo ? '환경 진단' : 'Diagnose'}     : contexa doctor${doctorProvider}`));
+      console.log(chalk.gray(`       - Diagnose     : contexa doctor${doctorProvider}`));
 
       if (answers.enableAiSecurity && answers.mode === 'shadow') {
-        console.log(chalk.yellow(`\n  * ${isKo ? '현재 SHADOW 모드로 설정되었습니다 (차단 없이 관찰만 수행).' : 'SHADOW mode is active (observe only, no blocking).'}`));
-        console.log(chalk.gray(`    ${isKo ? '준비되면 다음 명령어로 실시간 차단을 활성화하세요:' : 'Switch to blocking mode when ready:'} contexa mode --enforce`));
+        console.log(chalk.yellow('\n  * SHADOW mode is active: analysis/logging only, no blocking.'));
+        console.log(chalk.gray('    Switch to enforce mode only after operational validation.'));
       }
 
-      console.log(chalk.red.bold(`\n  [${isKo ? '외부 배포 전 보안 체크리스트' : 'Security Checklist before external deployment'}]:`));
+      console.log(chalk.red.bold('\n  [Security Checklist before external deployment]:'));
       console.log(chalk.red(`    - ${t('warn.security.envVars')}`));
       console.log(chalk.red(`    - ${t('warn.security.gitignore')}`));
       console.log(chalk.red(`    - ${t('warn.security.demoUsers')}`));
 
       console.log(chalk.cyan('\n  ============================================================\n'));
+
     });
 };
 
@@ -997,8 +1017,7 @@ function pullOllamaModelWithProgress(port, modelName, spinnerInstance, stepTextT
     req.end();
   });
 }
-
-// Ollama model identifiers follow the pattern <name>[:tag] where name segments
+              // Pull selected Ollama models when local Ollama is enabled.
 // are alphanumerics with limited punctuation (`-`, `_`, `.`, `/`). Values come
 // from OLLAMA_CHAT_MODEL / OLLAMA_EMBEDDING_MODEL env vars and end up as a
 // docker exec argv entry. We pass via spawnSync (no shell) but still reject

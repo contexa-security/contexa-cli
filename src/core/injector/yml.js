@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 // YAML injection: build the contexa.* tree the CLI is responsible for, merge
 // it onto the host application's parsed yml object, force-overwrite the small
@@ -216,13 +216,7 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     rootObj.spring.kafka['bootstrap-servers'] = '${CONTEXA_KAFKA_SERVERS:localhost:29092}';
   }
 
-  // Disable Lettuce latency metrics to avoid deadlock during startup between Lettuce and Actuator MeterRegistry
-  if (!rootObj.management) rootObj.management = {};
-  if (!rootObj.management.metrics) rootObj.management.metrics = {};
-  if (!rootObj.management.metrics.enable) rootObj.management.metrics.enable = {};
-  if (rootObj.management.metrics.enable.lettuce === undefined) {
-    rootObj.management.metrics.enable.lettuce = false;
-  }
+
 }
 
 // Strip a marker block written by older CLI versions. Idempotent on input

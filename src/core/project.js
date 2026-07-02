@@ -25,9 +25,10 @@
 const path = require('path');
 const os = require('os');
 
-function resolveProjectName() {
-  return (process.env.CONTEXA_PROJECT && process.env.CONTEXA_PROJECT.trim())
-    || 'contexa';
+function resolveProjectName(fallbackName = 'contexa') {
+  const explicitFallback = fallbackName && fallbackName !== 'contexa' ? fallbackName : null;
+  const envName = process.env.CONTEXA_PROJECT && process.env.CONTEXA_PROJECT.trim();
+  return sanitizeProjectName(explicitFallback || envName || fallbackName || 'contexa');
 }
 
 function containerName(svc) {
