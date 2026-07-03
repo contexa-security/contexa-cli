@@ -178,7 +178,9 @@ module.exports = function (program) {
         console.log(chalk.gray(`    Ollama   : 127.0.0.1:${process.env.CONTEXA_OLLAMA_PORT}  (production stays on 11434)`));
         console.log(chalk.gray(`    Redis    : 127.0.0.1:${process.env.CONTEXA_REDIS_PORT}`));
         console.log(chalk.gray(`    Kafka    : 127.0.0.1:${process.env.CONTEXA_KAFKA_PORT}`));
-        console.log(chalk.gray('    Reset anytime: docker compose -p ctxa-sim down -v && docker compose -p ctxa-sim up -d'));
+        console.log(chalk.gray('    Host spring.redis/kafka settings are not overwritten by simulate mode.'));
+        console.log(chalk.gray('    Reset anytime: contexa reset --simulate'));
+        console.log(chalk.gray('    Start/stop only the simulation stack: contexa simulate up | down | reset'));
       }
       if (opts.distributed) {
         console.log(chalk.yellow('\n  ! ' + t('init.distributed.warning')));

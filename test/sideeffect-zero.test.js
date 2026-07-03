@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 // Regression lock for the "user claim 0" guarantees:
 //   1. contexa-cli must not touch any customer file beyond build.gradle/pom.xml
@@ -416,6 +416,10 @@ test('A2b: reset flows restore project files and keep infra cleanup scoped', () 
     'plain reset must remove project infrastructure and restore project files by default');
   assert.match(resetSrc, /if \(targets\.code\)/,
     'project file restore must still be guarded by the resolved code target');
+  assert.match(resetSrc, /function printResetPlan\(/,
+    'reset must print the resolved reset scope before taking action');
+  assert.match(resetSrc, /Production\/project Docker stack is not targeted by --simulate/,
+    'reset --simulate must explicitly state that the production/project stack is not targeted');
 });
 
 // =====================================================================

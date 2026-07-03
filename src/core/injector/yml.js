@@ -81,9 +81,10 @@ function buildCliContexaTree(opts = {}) {
       geoip: { enabled: true, dbPath: 'contexa/data/GeoLite2-City.mmdb' },
     };
 
-    if (!isSimulate) {
-      tree.llm.selection.embedding = { mode: 'fixed', priority: embeddingPriority };
-    }
+    tree.llm.selection.embedding = {
+      mode: 'fixed',
+      priority: isSimulate ? 'ollama' : embeddingPriority,
+    };
   }
 
   if ((enableAiSecurity || isSimulate) && llmProviders.includes('ollama')) {
@@ -167,11 +168,7 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
       cliTree.llm.selection.chat.priority);
 
-    if (opts.simulate) {
-      if (rootObj.contexa.llm && rootObj.contexa.llm.selection) {
-        delete rootObj.contexa.llm.selection.embedding;
-      }
-    } else if (cliTree.llm.selection.embedding) {
+    if (cliTree.llm.selection.embedding) {
       setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
         cliTree.llm.selection.embedding.mode);
       setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
@@ -201,22 +198,10 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
       }
     }
   }
-  // Inject spring.data.redis and spring.kafka configurations if simulate mode
-  if (opts.simulate) {
-    if (!rootObj.spring) rootObj.spring = {};
-
-    // spring.data.redis (Force overwrite in simulate mode to route to simulated ports)
-    if (!rootObj.spring.data) rootObj.spring.data = {};
-    if (!rootObj.spring.data.redis) rootObj.spring.data.redis = {};
-    rootObj.spring.data.redis.host = '${CONTEXA_REDIS_HOST:localhost}';
-    rootObj.spring.data.redis.port = '${CONTEXA_REDIS_PORT:26379}';
-
-    // spring.kafka (Force overwrite in simulate mode to route to simulated ports)
-    if (!rootObj.spring.kafka) rootObj.spring.kafka = {};
-    rootObj.spring.kafka['bootstrap-servers'] = '${CONTEXA_KAFKA_SERVERS:localhost:29092}';
-  }
-
-
+  // Never write spring.* runtime settings from the CLI, including simulate mode.
+  // Redis/Kafka provider defaults are owned by starter/autoconfigure or by the
+  // user's explicit application configuration. This prevents `init --simulate`
+  // from silently overriding a customer application's real Redis/Kafka setup.
 }
 
 // Strip a marker block written by older CLI versions. Idempotent on input

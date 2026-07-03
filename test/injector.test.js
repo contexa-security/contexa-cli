@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -86,6 +86,30 @@ test('injectYml: distributed sets contexa.infrastructure.mode and never spring.d
   } finally { await fs.remove(dir); }
 });
 
+test('injectYml: simulate uses isolated Contexa settings without writing spring.*', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application.yml');
+    await injectYml(ymlPath, {
+      mode: 'shadow',
+      enableAiSecurity: true,
+      llmProviders: ['ollama'],
+      infra: 'distributed',
+      simulate: true,
+    });
+    const root = loadYml(ymlPath);
+    assert.equal(root.contexa.datasource.url,
+      '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:25432/contexa_sim}}');
+    assert.equal(root.contexa.datasource.username,
+      '${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa_sim}}');
+    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
+    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
+    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
+    assert.equal(root.contexa.llm.selection.embedding.mode, 'fixed');
+    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
+    assert.equal(root.spring, undefined, 'simulate must not overwrite host spring.redis/kafka settings');
+  } finally { await fs.remove(dir); }
+});
 test('injectYml: never writes any spring.* key across all provider/infra combinations', async () => {
   const dir = await tempDir();
   try {

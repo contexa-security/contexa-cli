@@ -203,6 +203,25 @@ function resolveTargets(opts) {
 function hasAnyTarget(targets) {
   return targets.simulate || targets.infra || targets.code;
 }
+function printResetPlan(targets, details) {
+  console.log(chalk.cyan('  Reset plan'));
+  if (targets.simulate) {
+    console.log(chalk.gray('    - Simulation Docker stack: ctxa-sim containers and volumes only'));
+    console.log(chalk.gray(`      compose dir: ${details.simInfraDir}`));
+  }
+  if (targets.infra) {
+    console.log(chalk.gray(`    - Project Docker stack: ${details.projectName} containers and volumes`));
+    console.log(chalk.gray(`      compose dir: ${details.infraDir}`));
+  }
+  if (targets.code) {
+    console.log(chalk.gray('    - Project files: restore only CLI-tracked changes from contexa/manifest.json backups'));
+    console.log(chalk.gray('      user-modified files are skipped and reported as conflicts'));
+  }
+  if (targets.simulate && !targets.infra) {
+    console.log(chalk.gray('    - Production/project Docker stack is not targeted by --simulate'));
+  }
+  console.log('');
+}
 
 module.exports = function (program) {
   program
@@ -274,6 +293,22 @@ module.exports = function (program) {
           };
         }
       }
+
+      const planSimInfraDir = targets.simulate
+        ? ((resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
+          ? resetManifest.metadata.simInfraDir
+          : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir }))
+        : null;
+      const planInfraDir = targets.infra
+        ? ((resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
+          ? resetManifest.metadata.infraDir
+          : resolveInfraDir(projectName, { infraDir: opts.infraDir }))
+        : null;
+      printResetPlan(targets, {
+        projectName,
+        simInfraDir: planSimInfraDir,
+        infraDir: planInfraDir,
+      });
 
       if (isDockerCliInstalled() && (targets.simulate || targets.infra)) {
         const spinner = ora(t('reset.stoppingContainers') || 'Stopping and removing Docker containers...').start();
