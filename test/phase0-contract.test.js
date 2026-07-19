@@ -14,6 +14,7 @@ const cliPath = path.join(root, 'src', 'index.js');
 const releaseManifest = require('../release-manifest.json');
 const packageJson = require('../package.json');
 const { backupFile } = require('../src/core/injector/common');
+const { buildContext: buildSimulationContext } = require('../src/commands/simulate');
 const {
   INSTALL_MODES,
   backupRoot,
@@ -627,6 +628,7 @@ test('normal and simulation command states coexist and reset independently', {
     assert.equal(normalInit.status, 0, normalInit.stderr + normalInit.stdout);
     const normalBuild = await fs.readFile(build);
     const normalYml = await fs.readFile(yml);
+    const normalManifestBytes = await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL));
 
     const simulationInit = spawnSync(process.execPath, [
       cliPath, 'init', '--simulate', '--no-docker', '--yes', '--dir', project, '--infra-dir', infraDir,
@@ -635,13 +637,46 @@ test('normal and simulation command states coexist and reset independently', {
     assert.match(simulationInit.stdout, /COPY: GeoLite2-City\.mmdb/);
     assert.match(simulationInit.stdout, /DOCKER: SKIP service start/);
     assert.match(simulationInit.stdout, /DELETE: NONE/);
+    assert.deepEqual(await fs.readFile(build), normalBuild);
+    assert.deepEqual(await fs.readFile(yml), normalYml);
+    assert.deepEqual(await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL)), normalManifestBytes);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.NORMAL)), true);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), true);
+    const overlayPath = path.join(project, 'src/main/resources/application-contexa-sim.yml');
+    const configurationPath = path.join(project, 'src/main/java/example/ContexaSimulationConfiguration.java');
+    const simulationGeoIp = path.join(project, 'contexa/simulation/data/GeoLite2-City.mmdb');
+    const overlay = yaml.load(await fs.readFile(overlayPath, 'utf8'));
+    assert.equal(overlay.spring.config.activate['on-profile'], 'contexa-sim');
+    assert.equal(overlay.server.port, '${CONTEXA_SIMULATION_SERVER_PORT:9080}');
+    assert.equal(overlay.contexa.datasource.url, '${CONTEXA_DB_URL}');
+    assert.equal(overlay.spring.datasource, undefined);
+    assert.equal(overlay.spring.data.redis.host, '${REDIS_HOST}');
+    assert.equal(overlay.spring.data.redis.port, '${REDIS_PORT}');
+    assert.equal(overlay.spring.kafka['bootstrap-servers'], '${KAFKA_BOOTSTRAP_SERVERS}');
+    assert.match(await fs.readFile(configurationPath, 'utf8'), /@Profile\("contexa-sim"\)/);
+    assert.equal(await fs.pathExists(simulationGeoIp), true);
     const normalManifest = await loadManifest(project, INSTALL_MODES.NORMAL);
     const simulationManifest = await loadManifest(project, INSTALL_MODES.SIMULATION);
     assert.notEqual(normalManifest.metadata.installationId, simulationManifest.metadata.installationId);
     assert.ok(simulationManifest.files.every(entry => entry.installationId === simulationManifest.metadata.installationId));
     assert.equal(path.resolve(simulationManifest.metadata.infraDir), path.resolve(infraDir));
+    const previousProjectEnv = process.env.CONTEXA_PROJECT;
+    const previousDbEnv = process.env.CONTEXA_DB_URL;
+    process.env.CONTEXA_PROJECT = 'production-project';
+    process.env.CONTEXA_DB_URL = 'jdbc:postgresql://production/database';
+    try {
+      const freshShellContext = await buildSimulationContext({ dir: project });
+      assert.equal(freshShellContext.env.CONTEXA_PROJECT, 'ctxa-sim');
+      assert.equal(freshShellContext.env.CONTEXA_DB_URL,
+        'jdbc:postgresql://127.0.0.1:25432/contexa_sim');
+      assert.equal(freshShellContext.overlayPath, overlayPath);
+      assert.equal(freshShellContext.configurationPath, configurationPath);
+    } finally {
+      if (previousProjectEnv === undefined) delete process.env.CONTEXA_PROJECT;
+      else process.env.CONTEXA_PROJECT = previousProjectEnv;
+      if (previousDbEnv === undefined) delete process.env.CONTEXA_DB_URL;
+      else process.env.CONTEXA_DB_URL = previousDbEnv;
+    }
     const compose = yaml.load(await fs.readFile(path.join(infraDir, 'docker-compose.yml'), 'utf8'));
     assert.equal(compose['x-contexa-ownership']['io.ctxa.mode'], 'simulation');
     assert.equal(compose['x-contexa-ownership']['io.ctxa.installation-id'], simulationManifest.metadata.installationId);
@@ -652,6 +687,12 @@ test('normal and simulation command states coexist and reset independently', {
       assert.equal(volume.labels['io.ctxa.mode'], 'simulation');
     }
     assert.equal(compose.networks.default.labels['io.ctxa.mode'], 'simulation');
+
+    const repeatNormalInit = spawnSync(process.execPath,
+      [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8', env: childEnv });
+    assert.equal(repeatNormalInit.status, 0, repeatNormalInit.stderr + repeatNormalInit.stdout);
+    assert.deepEqual(await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL)), normalManifestBytes);
+    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), true);
     const combinedStatus = spawnSync(process.execPath, [cliPath, 'status', '--dir', project], { encoding: 'utf8', env: childEnv });
     assert.equal(combinedStatus.status, 0, combinedStatus.stderr + combinedStatus.stdout);
     assert.match(combinedStatus.stdout, /Normal installation: COMMITTED/);
@@ -660,14 +701,18 @@ test('normal and simulation command states coexist and reset independently', {
     const simulationReset = spawnSync(process.execPath, [
       cliPath, 'reset', '--simulate', '--yes', '--dir', project, '--infra-dir', infraDir,
     ], { encoding: 'utf8', env: childEnv });
-    assert.equal(simulationReset.status, 0, simulationReset.stderr + simulationReset.stdout);
+    assert.notEqual(simulationReset.status, 0, simulationReset.stderr + simulationReset.stdout);
+    assert.match(simulationReset.stdout + simulationReset.stderr, /Docker CLI is unavailable/);
     assert.deepEqual(await fs.readFile(build), normalBuild);
     assert.deepEqual(await fs.readFile(yml), normalYml);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.NORMAL)), true);
-    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), false);
+    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), true);
+    assert.equal(await fs.pathExists(overlayPath), true);
+    assert.equal(await fs.pathExists(configurationPath), true);
+    assert.equal(await fs.pathExists(simulationGeoIp), true);
     const afterSimulationResetStatus = spawnSync(process.execPath, [cliPath, 'status', '--dir', project], { encoding: 'utf8', env: childEnv });
     assert.match(afterSimulationResetStatus.stdout, /Normal installation: COMMITTED/);
-    assert.match(afterSimulationResetStatus.stdout, /Simulation installation: not installed/);
+    assert.match(afterSimulationResetStatus.stdout, /Simulation installation: COMMITTED/);
 
     const normalReset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8', env: childEnv });
     assert.equal(normalReset.status, 0, normalReset.stderr + normalReset.stdout);

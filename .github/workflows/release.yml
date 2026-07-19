@@ -85,6 +85,27 @@ jobs:
           name: phase3-acceptance-evidence
           path: phase3-evidence/
 
+      - name: Validate Phase 4 simulation isolation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase4-evidence
+          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
+          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
+          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
+            "$geo_url" --output phase4-evidence/GeoLite2-City.mmdb
+          echo "$geo_sha  phase4-evidence/GeoLite2-City.mmdb" | sha256sum --check
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH="$PWD/phase4-evidence/GeoLite2-City.mmdb" \
+            node --test --test-name-pattern "normal and simulation command states coexist" \
+            test/phase0-contract.test.js > phase4-evidence/simulation-coexistence.tap
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: phase4-acceptance-evidence
+          path: phase4-evidence/
+
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs
 

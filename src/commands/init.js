@@ -73,16 +73,26 @@ function printPlannedChanges(answers, project, paths) {
     items.push(`CREATE: ${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
   } else {
     items.push('INTEGRATION: MERGE (starter dependency only unless explicitly activated)');
-    items.push(`${paths.buildExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
+    if (answers.simulate) {
+      items.push('NORMAL BUILD: NONE (existing starter is reused)');
+      items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: Simulation profile overlay: ${paths.ymlPath}`);
+      items.push(`${paths.simulationConfigExists ? 'KEEP' : 'CREATE'}: Profile-only @EnableAISecurity configuration: ${paths.simulationConfigPath}`);
+    } else {
+      items.push(`${paths.buildExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
+    }
     if (paths.writeHostConfig) {
-      items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply explicit Contexa settings')}: ${paths.ymlPath}`);
+      if (!answers.simulate) {
+        items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply explicit Contexa settings')}: ${paths.ymlPath}`);
+      }
     } else {
       items.push('HOST CONFIG: NONE (module defaults)');
     }
   }
   if (answers.enableAiSecurity) {
     items.push(`${msg('planned.enableAi', 'Enable AI security settings')} (${answers.llmProviders.join(', ')})`);
-    if (answers.autoAnnotate) {
+    if (answers.simulate) {
+      items.push('SIMULATION ACTIVATION: contexa-sim profile only');
+    } else if (answers.autoAnnotate) {
       items.push(msg('planned.autoAnnotate', 'Auto-add @EnableAISecurity'));
     } else if (!project.hasEnableAiSecurity) {
       items.push(msg('planned.manualAnnotate', 'Add @EnableAISecurity manually after init'));
@@ -117,6 +127,7 @@ const {
   beginInstallTransaction,
   commitInstallTransaction,
   loadManifest,
+  manifestPath,
   prepareExternalFileChange,
   recordExternalFileChange,
   recordChange,
@@ -125,6 +136,18 @@ const {
   sha256FileSync,
 } = require('../core/manifest');
 const { buildDockerResourceContract } = require('../core/reset-service');
+const {
+  SIMULATION_PORTS,
+  SIMULATION_PROFILE,
+  SIMULATION_PROJECT,
+  simulationConfigurationPath,
+  simulationEnvironment,
+  simulationGeoIpPath,
+  simulationOverlayPath,
+  simulationRunCommand,
+  waitForSimulationInfrastructure,
+  writeSimulationConfiguration,
+} = require('../core/simulation');
 
 module.exports = function (program) {
   program
@@ -179,6 +202,7 @@ module.exports = function (program) {
       let transactionInfraExisted = false;
       let transactionComposeExisted = false;
       let transactionDockerStarted = false;
+      let transactionManifestExisted = false;
       try {
       // --simulate isolates this run from any other contexa stack on the same
       // host: separate compose project name, separate container names, and
@@ -191,27 +215,13 @@ module.exports = function (program) {
         // without external API keys; Ollama is auto-included here so the demo
         // works end-to-end with no cloud credentials.
         opts.includeOllama = true;
-        const setIfAbsent = (k, v) => { if (!process.env[k]) process.env[k] = v; };
-        setIfAbsent('CONTEXA_PROJECT',          'ctxa-sim');
-        setIfAbsent('CONTEXA_POSTGRES_PORT',    '25432');
-        setIfAbsent('CONTEXA_OLLAMA_PORT',      '31434');
-        setIfAbsent('CONTEXA_REDIS_PORT',       '26379');
-        setIfAbsent('CONTEXA_ZOOKEEPER_PORT',   '22181');
-        setIfAbsent('CONTEXA_KAFKA_PORT',       '29092');
-        setIfAbsent('CONTEXA_DB_NAME',          'contexa_sim');
-        setIfAbsent('CONTEXA_DB_USERNAME',      'contexa_sim');
-        setIfAbsent('CONTEXA_DB_PASSWORD',      'contexa_sim_pw');
-        setIfAbsent('CONTEXA_DB_URL',           `jdbc:postgresql://localhost:${process.env.CONTEXA_POSTGRES_PORT}/${process.env.CONTEXA_DB_NAME}`);
-        setIfAbsent('OLLAMA_BASE_URL',          `http://127.0.0.1:${process.env.CONTEXA_OLLAMA_PORT}`);
-        setIfAbsent('REDIS_HOST',               'localhost');
-        setIfAbsent('REDIS_PORT',               process.env.CONTEXA_REDIS_PORT);
-        setIfAbsent('KAFKA_BOOTSTRAP_SERVERS',  `localhost:${process.env.CONTEXA_KAFKA_PORT}`);
+        Object.assign(process.env, simulationEnvironment(process.env, 'preflight'));
         console.log(chalk.cyan('\n  Simulation mode: isolated stack "ctxa-sim"'));
-        console.log(chalk.gray(`    Postgres : 127.0.0.1:${process.env.CONTEXA_POSTGRES_PORT}  (production stays on 5432)`));
-        console.log(chalk.gray(`    Ollama   : 127.0.0.1:${process.env.CONTEXA_OLLAMA_PORT}  (production stays on 11434)`));
-        console.log(chalk.gray(`    Redis    : 127.0.0.1:${process.env.CONTEXA_REDIS_PORT}`));
-        console.log(chalk.gray(`    Kafka    : 127.0.0.1:${process.env.CONTEXA_KAFKA_PORT}`));
-        console.log(chalk.gray('    Host spring.redis/kafka settings are not overwritten by simulate mode.'));
+        console.log(chalk.gray(`    Postgres : 127.0.0.1:${SIMULATION_PORTS.postgres}  (production stays on 5432)`));
+        console.log(chalk.gray(`    Ollama   : 127.0.0.1:${SIMULATION_PORTS.ollama}  (production stays on 11434)`));
+        console.log(chalk.gray(`    Redis    : 127.0.0.1:${SIMULATION_PORTS.redis}`));
+        console.log(chalk.gray(`    Kafka    : 127.0.0.1:${SIMULATION_PORTS.kafka}`));
+        console.log(chalk.gray('    Base application settings remain byte-identical; only contexa-sim uses isolated Redis/Kafka endpoints.'));
         console.log(chalk.gray('    Reset anytime: contexa reset --simulate'));
         console.log(chalk.gray('    Start/stop only the simulation stack: contexa simulate up | down | reset'));
       }
@@ -289,6 +299,12 @@ module.exports = function (program) {
         console.log(chalk.gray('    ' + t('init.notSpring.hint') + '\n'));
         throw new Error('The target directory is not a Spring Boot project.');
       }
+      if (opts.simulate && !await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL))) {
+        throw new Error('Simulation requires a completed normal Contexa installation. Run "contexa init" first.');
+      }
+      if (opts.simulate && !project.hasContexta) {
+        throw new Error('Simulation requires the normal Contexa starter dependency; project files were not changed.');
+      }
 
       console.log(chalk.green('  v ' + t('init.detected')));
       console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || 'unknown'}`));
@@ -299,7 +315,7 @@ module.exports = function (program) {
         : 'not requested'}`));
 
       const cliProjectName = opts.simulate
-        ? 'ctxa-sim'
+        ? SIMULATION_PROJECT
         : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
       transactionProjectName = cliProjectName;
       if (!process.env.CONTEXA_PROJECT) {
@@ -513,6 +529,9 @@ module.exports = function (program) {
       );
 
       answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
+      if (opts.simulate && answers.integrationMode !== 'merge') {
+        throw new Error('Simulation must use merge integration so the normal application remains the execution target.');
+      }
       answers.securityMode = opts.securityMode || answers.securityMode || 'sandbox';
       answers.mode = answers.mode || 'shadow';
       answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
@@ -538,7 +557,7 @@ module.exports = function (program) {
       answers.simulate = !!opts.simulate;
       answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
       answers.hostSecurityFilterChain = !!project.hasHostSecurityFilterChain;
-      answers.injectDep = true;
+      answers.injectDep = !opts.simulate;
       if (opts.distributed) answers.infra = 'distributed';
       if (opts.docker === false) answers.startDocker = false;
 
@@ -555,13 +574,18 @@ module.exports = function (program) {
         || null;
 
       const projectOwnerDir = project.projectDir || opts.dir;
-      const plannedYmlPath = project.appYmlPath || path.join(projectOwnerDir, 'src/main/resources/application.yml');
+      const plannedYmlPath = opts.simulate
+        ? simulationOverlayPath(projectOwnerDir)
+        : (project.appYmlPath || path.join(projectOwnerDir, 'src/main/resources/application.yml'));
+      const plannedSimulationConfigPath = opts.simulate ? simulationConfigurationPath(project) : null;
       const shouldWriteHostConfig = answers.integrationMode === 'merge'
         && (answers.enableAiSecurity || answers.infra !== 'skip' || answers.simulate);
       const plannedBuildPath = project.buildFilePath
         || (project.buildTool === 'maven' ? path.join(projectOwnerDir, 'pom.xml') : path.join(projectOwnerDir, 'build.gradle'));
       const plannedGeoIpPath = (answers.enableAiSecurity || answers.simulate)
-        ? path.join(opts.dir, 'contexa', installMode === INSTALL_MODES.SIMULATION ? 'simulation/data' : 'data', 'GeoLite2-City.mmdb')
+        ? (opts.simulate
+            ? simulationGeoIpPath(opts.dir)
+            : path.join(opts.dir, 'contexa', 'data', 'GeoLite2-City.mmdb'))
         : null;
       const plannedInfraDir = answers.infra !== 'skip'
         ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride })
@@ -569,6 +593,8 @@ module.exports = function (program) {
       const plannedComposePath = plannedInfraDir ? path.join(plannedInfraDir, 'docker-compose.yml') : null;
       const plannedYmlExists = await fs.pathExists(plannedYmlPath);
       const plannedBuildExists = await fs.pathExists(plannedBuildPath);
+      const plannedSimulationConfigExists = plannedSimulationConfigPath
+        ? await fs.pathExists(plannedSimulationConfigPath) : false;
       const plannedGeoIpExists = plannedGeoIpPath ? await fs.pathExists(plannedGeoIpPath) : false;
       const plannedComposeExists = plannedComposePath ? await fs.pathExists(plannedComposePath) : false;
       const plannedStandaloneBuildPath = answers.integrationMode === 'standalone'
@@ -587,8 +613,13 @@ module.exports = function (program) {
             { filePath: plannedStandaloneBuildPath, kind: 'standalone-build', generated: !plannedStandaloneBuildExists },
           ]
         : [
-            { filePath: plannedBuildPath, kind: 'build-file' },
+            ...(!opts.simulate ? [{ filePath: plannedBuildPath, kind: 'build-file' }] : []),
             ...(shouldWriteHostConfig ? [{ filePath: plannedYmlPath, kind: 'application-yml' }] : []),
+            ...(plannedSimulationConfigPath ? [{
+              filePath: plannedSimulationConfigPath,
+              kind: 'simulation-profile-configuration',
+              generated: !plannedSimulationConfigExists,
+            }] : []),
           ];
       if (plannedGeoIpPath) {
         plannedFiles.push({ filePath: plannedGeoIpPath, kind: 'geoip-data', generated: true });
@@ -615,6 +646,8 @@ module.exports = function (program) {
         : {
             ymlPath: plannedYmlPath,
             buildPath: plannedBuildPath,
+            simulationConfigPath: plannedSimulationConfigPath,
+            simulationConfigExists: plannedSimulationConfigExists,
             ymlExists: plannedYmlExists,
             writeHostConfig: shouldWriteHostConfig,
             buildExists: plannedBuildExists,
@@ -631,6 +664,7 @@ module.exports = function (program) {
           infra: answers.infra,
           startDocker: answers.startDocker,
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
+          strictIsolation: !!opts.simulate,
         });
         for (const issue of plannedInfraIssues) {
           const paint = issue.severity === 'error' ? chalk.red : issue.severity === 'warning' ? chalk.yellow : chalk.gray;
@@ -643,6 +677,7 @@ module.exports = function (program) {
         }
       }
 
+      transactionManifestExisted = await fs.pathExists(manifestPath(opts.dir, installMode));
       installTransactionId = await beginInstallTransaction(opts.dir, {
         projectName: cliProjectName,
         integrationMode: answers.integrationMode,
@@ -653,6 +688,18 @@ module.exports = function (program) {
       }, installMode, plannedFiles);
       const installManifest = await loadManifest(opts.dir, installMode);
       const installationId = installManifest.metadata.installationId;
+      if (opts.simulate) {
+        Object.assign(process.env, simulationEnvironment(process.env, installationId));
+        await recordInstallMetadata(opts.dir, {
+          simulation: {
+            projectName: SIMULATION_PROJECT,
+            profile: SIMULATION_PROFILE,
+            ports: SIMULATION_PORTS,
+            overlayPath: path.relative(opts.dir, plannedYmlPath).split(path.sep).join('/'),
+            configurationPath: path.relative(opts.dir, plannedSimulationConfigPath).split(path.sep).join('/'),
+          },
+        }, installMode);
+      }
 
       if (answers.enableAiSecurity || answers.simulate) {
         // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
@@ -761,6 +808,17 @@ module.exports = function (program) {
             console.log('');
             throw err;
           }
+        }
+
+        if (opts.simulate) {
+          const simulationConfig = await writeSimulationConfiguration(
+            project, plannedSimulationConfigPath);
+          await recordChange(opts.dir, simulationConfig.filePath, {
+            kind: 'simulation-profile-configuration',
+            generated: !plannedSimulationConfigExists,
+            reason: 'Profile-only simulation activation',
+          }, installMode);
+          aiAnnotationApplied = true;
         }
 
 
@@ -891,6 +949,9 @@ module.exports = function (program) {
           mode: installMode,
           installationId,
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
+          // The ownership transaction already preserves the previous external
+          // file. A second sibling backup would survive a successful reset.
+          backupExisting: false,
         });
         await recordExternalFileChange(opts.dir, installTransactionId, composePath, installMode);
         await recordInstallMetadata(opts.dir, {
@@ -928,7 +989,16 @@ module.exports = function (program) {
           } else {
             const s4 = ora(`${t('step.startingDocker')} (${servicesToUp.join(', ')})`).start();
             try {
-              const upResult = dockerCompose(['up', '-d', ...servicesToUp], { cwd: infraDir, stdio: 'inherit' });
+              const upArgs = opts.simulate
+                ? ['-p', SIMULATION_PROJECT, 'up', '-d', ...servicesToUp]
+                : ['up', '-d', ...servicesToUp];
+              if (opts.simulate) transactionDockerStarted = true;
+              const upResult = dockerCompose(upArgs, {
+                cwd: infraDir,
+                env: opts.simulate ? simulationEnvironment(process.env, installationId) : process.env,
+                stdio: 'inherit',
+                timeout: opts.simulate ? 150000 : undefined,
+              });
               if (upResult.error) throw upResult.error;
               if (upResult.status !== 0) throw new Error(`docker compose up exited with status ${upResult.status}`);
               transactionDockerStarted = true;
@@ -937,7 +1007,7 @@ module.exports = function (program) {
             // 7. Pull Ollama models (only if Ollama was explicitly included)
             // Container name is project-aware (production: contexa-ollama,
             // simulate: ctxa-sim-ollama, custom CONTEXA_PROJECT: <name>-ollama).
-            if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
+              if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
               const ollamaContainer = containerName('ollama');
               const chatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
               const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
@@ -972,6 +1042,10 @@ module.exports = function (program) {
                   s5.fail(t('step.modelPullFailed', chatModel));
                   throw e;
                 }
+              }
+              if (opts.simulate) {
+                await waitForSimulationInfrastructure(installationId,
+                  !!(answers.llmProviders && answers.llmProviders.includes('ollama')));
               }
             } catch (e) {
               s4.fail(t('step.dockerFailed'));
@@ -1022,7 +1096,12 @@ module.exports = function (program) {
       }
 
       console.log(chalk.yellow('\n  [Next checks]:'));
-      let manualStep = 1;
+      if (opts.simulate) {
+        console.log(chalk.white('    Run the simulation application with this single command:'));
+        console.log(chalk.cyan(`       ${simulationRunCommand(opts.dir)}`));
+        console.log(chalk.gray('    The launcher activates only the contexa-sim profile and supplies the isolated endpoints.'));
+      } else {
+        let manualStep = 1;
       if (answers.enableAiSecurity && !aiAnnotationApplied) {
         console.log(chalk.white(`    ${manualStep++}. Add @EnableAISecurity to your main Application class:`));
         console.log(chalk.cyan('       ----------------------------------------------------'));
@@ -1048,8 +1127,9 @@ module.exports = function (program) {
       console.log(chalk.gray(`       - Start server : ${project.buildTool === 'maven' ? './mvnw spring-boot:run' : './gradlew bootRun'}`));
       const doctorProvider = aiProviderSelected(answers) ? ` --provider ${answers.llmProviders.join(',')}` : '';
       console.log(chalk.gray(`       - Diagnose     : contexa doctor${doctorProvider}`));
+      }
 
-      if (answers.enableAiSecurity && answers.mode === 'shadow') {
+      if (!opts.simulate && answers.enableAiSecurity && answers.mode === 'shadow') {
         console.log(chalk.yellow('\n  * SHADOW mode is active: analysis/logging only, no blocking.'));
         console.log(chalk.gray('    Switch to enforce mode only after operational validation.'));
       }
@@ -1065,9 +1145,16 @@ module.exports = function (program) {
         const infrastructureRollbackErrors = [];
         if (transactionDockerStarted && transactionInfraDir && transactionProjectName) {
           try {
-            const downResult = dockerCompose(['-p', transactionProjectName, 'down', '-v'], {
+            const downArgs = ['-p', transactionProjectName, 'down', '--timeout', '0'];
+            if (!transactionManifestExisted) downArgs.push('-v');
+            const downResult = dockerCompose(downArgs, {
               cwd: transactionInfraDir,
               stdio: 'pipe',
+              env: opts.simulate
+                ? simulationEnvironment(process.env,
+                  (await loadManifest(opts.dir, installMode)).metadata.installationId)
+                : process.env,
+              timeout: 30000,
             });
             if (downResult.error || downResult.status !== 0) {
               throw downResult.error || new Error(`docker compose down exited with status ${downResult.status}`);

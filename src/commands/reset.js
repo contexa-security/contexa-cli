@@ -14,6 +14,7 @@ const {
 const {
   auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
 } = require('../core/reset-service');
+const { simulationEnvironment } = require('../core/simulation');
 
 function dockerTry(args, opts = {}) {
   try {
@@ -56,21 +57,14 @@ function composeEnv(projectName, extra = {}) {
   };
 }
 
-function simulateComposeEnv() {
-  return composeEnv('ctxa-sim', {
-    CONTEXA_POSTGRES_PORT: process.env.CONTEXA_POSTGRES_PORT || '25432',
-    CONTEXA_OLLAMA_PORT: process.env.CONTEXA_OLLAMA_PORT || '31434',
-    CONTEXA_REDIS_PORT: process.env.CONTEXA_REDIS_PORT || '26379',
-    CONTEXA_ZOOKEEPER_PORT: process.env.CONTEXA_ZOOKEEPER_PORT || '22181',
-    CONTEXA_KAFKA_PORT: process.env.CONTEXA_KAFKA_PORT || '29092',
-    CONTEXA_DB_NAME: process.env.CONTEXA_DB_NAME || 'contexa_sim',
-    CONTEXA_DB_USERNAME: process.env.CONTEXA_DB_USERNAME || 'contexa_sim',
-    CONTEXA_DB_PASSWORD: process.env.CONTEXA_DB_PASSWORD || 'contexa_sim_pw'
-  });
+function simulateComposeEnv(installationId) {
+  return simulationEnvironment(process.env, installationId);
 }
 
 async function composeDown(projectName, infraDir, env) {
-  const result = dockerCompose(['-p', projectName, 'down', '-v'], { cwd: infraDir, stdio: 'pipe', env });
+  const result = dockerCompose(['-p', projectName, 'down', '-v', '--timeout', '0'], {
+    cwd: infraDir, stdio: 'pipe', env, timeout: 30000,
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const stderr = result.stderr ? result.stderr.toString() : 'Unknown error';
@@ -127,7 +121,9 @@ function printResetPlan(targets, details) {
     console.log(chalk.gray(`      compose dir: ${details.infraDir}`));
   }
   if (targets.code) {
-    console.log(chalk.gray('    - Project files: restore only CLI-tracked changes from contexa/manifest.json backups'));
+    console.log(chalk.gray(targets.simulate
+      ? '    - Simulation-managed overlay, profile configuration, and data only'
+      : '    - Project files: restore only CLI-tracked changes from contexa/manifest.json backups'));
     console.log(chalk.gray('      later user changes are preserved by 3-way restore; overlapping edits are reported as conflicts'));
   }
   if (targets.simulate && !targets.infra) {
@@ -247,7 +243,9 @@ module.exports = function (program) {
             projectName,
             infraDir: ownedInfraDir,
             composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
-            env: installMode === INSTALL_MODES.SIMULATION ? simulateComposeEnv() : composeEnv(projectName),
+            env: installMode === INSTALL_MODES.SIMULATION
+              ? simulateComposeEnv(resetManifest.metadata.installationId)
+              : composeEnv(projectName),
           }, {
             isCliInstalled: isDockerCliInstalled,
             isDaemonRunning: isDockerDaemonRunning,
@@ -262,6 +260,19 @@ module.exports = function (program) {
           resetAudit.failed.push({ resource: 'docker', detail: error.message });
           spinner.fail(`Docker cleanup failed: ${error.message}`);
         }
+      }
+
+      if ((targets.simulate || targets.infra) && !infraCompleted) {
+        resetAudit.preserved.push({
+          resource: installMode === INSTALL_MODES.SIMULATION
+            ? 'simulation project files and ownership manifest'
+            : 'project files and ownership manifest',
+          detail: 'Docker cleanup did not complete; no project-managed state was changed.',
+        });
+        printAudit(resetAudit);
+        console.log(chalk.yellow('\n  ! Contexa reset stopped safely. Resolve Docker access and run the same command again.\n'));
+        process.exitCode = 1;
+        return;
       }
 
       if (targets.code) {

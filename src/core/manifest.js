@@ -295,7 +295,9 @@ async function recordChange(projectDir, filePath, meta = {}, mode = INSTALL_MODE
     mode: normalizedMode,
     installationId: manifest.metadata.installationId,
     kind: meta.kind || 'modified',
-    generated: !!meta.generated,
+    generated: previous
+      ? (previous.generated || previous.originalChecksum === null)
+      : !!meta.generated,
     reason: meta.reason || 'contexa init',
     ownership: 'CLI_OWNED',
     cliApplied: true,
@@ -450,6 +452,8 @@ async function commitInstallTransaction(projectDir, transactionId, mode = INSTAL
     transaction.committedAt = new Date().toISOString();
     delete transaction.previousState;
     delete transaction.files;
+    delete transaction.externalFiles;
+    delete transaction.changedRelativePaths;
   }
   await saveManifest(projectDir, manifest, normalizedMode);
   const transactionBackups = transactionBackupRoot(projectDir, transactionId, normalizedMode);
@@ -522,7 +526,7 @@ async function prepareExternalFileChange(
   }
   const existed = await fs.pathExists(canonicalFile);
   const backupName = crypto.createHash('sha256').update(canonicalFile).digest('hex') + '.bak';
-  const relativeBackupPath = path.join('__external__', backupName);
+  const relativeBackupPath = path.join('__transactions__', transactionId, '__external__', backupName);
   const externalBackupPath = path.join(backupRoot(projectDir, normalizedMode), relativeBackupPath);
   if (existed) {
     const stat = await fs.stat(canonicalFile);

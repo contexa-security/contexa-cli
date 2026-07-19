@@ -13,7 +13,9 @@ const {
   commitInstallTransaction,
   loadManifest,
   manifestPath,
+  prepareExternalFileChange,
   recordChange,
+  recordExternalFileChange,
   rollbackInstallTransaction,
   saveManifest,
   sha256FileSync,
@@ -118,6 +120,56 @@ test('failed re-init restores the previous CLI-applied snapshot separately from 
     assert.equal(reset.audit.conflict.length, 0);
     assert.equal((await fs.readFile(build, 'utf8')).includes('ai.ctxa:first'), false);
     assert.equal((await fs.readFile(build, 'utf8')).includes('host:user-added'), true);
+  } finally {
+    await fs.remove(project);
+  }
+});
+
+test('repeated external transactions roll back to the immediately previous compose bytes', async () => {
+  const project = await tempProject();
+  const infraDir = await tempProject();
+  const composePath = path.join(infraDir, 'docker-compose.yml');
+  try {
+    await fs.writeFile(composePath, 'version: one\n');
+    const first = await beginInstallTransaction(project, { infraDir }, INSTALL_MODES.NORMAL, []);
+    await prepareExternalFileChange(project, first, composePath, infraDir, INSTALL_MODES.NORMAL);
+    await fs.writeFile(composePath, 'version: two\n');
+    await recordExternalFileChange(project, first, composePath, INSTALL_MODES.NORMAL);
+    await commitInstallTransaction(project, first, INSTALL_MODES.NORMAL);
+    assert.equal((await loadManifest(project)).transaction.externalFiles, undefined);
+
+    const second = await beginInstallTransaction(project, { infraDir }, INSTALL_MODES.NORMAL, []);
+    await prepareExternalFileChange(project, second, composePath, infraDir, INSTALL_MODES.NORMAL);
+    await fs.writeFile(composePath, 'version: three\n');
+    await recordExternalFileChange(project, second, composePath, INSTALL_MODES.NORMAL);
+    const rollback = await rollbackInstallTransaction(project, second, INSTALL_MODES.NORMAL);
+    assert.equal(rollback.rolledBack, true);
+    assert.equal(await fs.readFile(composePath, 'utf8'), 'version: two\n');
+  } finally {
+    await fs.remove(project);
+    await fs.remove(infraDir);
+  }
+});
+
+test('repeated init preserves original CLI-generated file ownership', async () => {
+  const project = await tempProject();
+  const generated = path.join(project, 'generated.yml');
+  try {
+    const first = await beginInstallTransaction(project, {}, INSTALL_MODES.NORMAL,
+            [{ filePath: generated, generated: true }]);
+    await fs.writeFile(generated, 'version: one\n');
+    await recordChange(project, generated, { generated: true }, INSTALL_MODES.NORMAL);
+    await commitInstallTransaction(project, first, INSTALL_MODES.NORMAL);
+
+    const second = await beginInstallTransaction(project, {}, INSTALL_MODES.NORMAL,
+            [{ filePath: generated, generated: false }]);
+    await fs.writeFile(generated, 'version: two\n');
+    await recordChange(project, generated, { generated: false }, INSTALL_MODES.NORMAL);
+    await commitInstallTransaction(project, second, INSTALL_MODES.NORMAL);
+
+    const entry = (await loadManifest(project)).files.find(file => file.relativePath === 'generated.yml');
+    assert.equal(entry.generated, true);
+    assert.equal(entry.originalChecksum, null);
   } finally {
     await fs.remove(project);
   }
@@ -472,6 +524,7 @@ test('reset command retains compose and manifest on deterministic infrastructure
       files: [],
       transaction: null,
     });
+    const manifestBeforeReset = await fs.readFile(manifestPath(project));
 
     const result = spawnSync(process.execPath,
       [cliPath, 'reset', '--yes', '--infra', '--dir', project, '--infra-dir', infraDir], { encoding: 'utf8' });
@@ -484,7 +537,8 @@ test('reset command retains compose and manifest on deterministic infrastructure
     assert.doesNotMatch(output, /successfully completed/);
     const retained = await loadManifest(project);
     assert.equal(retained.metadata.infra, 'standalone');
-    assert.equal(retained.metadata.lastReset.result.failed.length, 1);
+    assert.equal(retained.metadata.lastReset, undefined);
+    assert.deepEqual(await fs.readFile(manifestPath(project)), manifestBeforeReset);
   } finally {
     await fs.remove(project);
     await fs.remove(infraDir);

@@ -1,41 +1,28 @@
 'use strict';
 
 const chalk = require('chalk');
-const path = require('path');
 const fs = require('fs-extra');
-const { osDefaultInfraDir } = require('../core/project');
-const { dockerTry, dockerCompose: dockerComposeExec } = require('../core/docker');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { dockerCompose: dockerComposeExec } = require('../core/docker');
+const { detectSpringProject } = require('../core/detector');
+const { INSTALL_MODES, manifestPath, loadManifest, sha256FileSync } = require('../core/manifest');
+const {
+  SIMULATION_PROJECT,
+  SIMULATION_PROFILE,
+  SIMULATION_PORTS,
+  simulationEnvironment,
+  verifySimulationInfrastructure,
+  waitForSimulationInfrastructure,
+} = require('../core/simulation');
 
-// `contexa simulate` is the lifecycle helper for the SIMULATION stack created
-// by `contexa init --simulate` (compose project name "ctxa-sim", containers
-// ctxa-sim-postgres / ctxa-sim-redis / ..., on +20000 ports).
-//
-// Design rule: the user is NOT expected to know any flag names, environment
-// variables, or directory paths. `contexa simulate <subcommand>` MUST work
-// out of the box right after `contexa init --simulate`, with no flags and
-// no environment setup. To make that possible, this command is HARD-WIRED
-// to the ctxa-sim project (osDefaultInfraDir('ctxa-sim')) and never reads
-// CONTEXA_PROJECT or any user-side env variable. The "production" stack
-// is intentionally NOT covered here - that one is the customer's existing
-// docker-compose, not contexa-cli's responsibility.
-//
-// Subcommands:
-//   contexa simulate up     - start (or restart) the ctxa-sim stack
-//   contexa simulate down   - stop it (keeps volumes)
-//   contexa simulate reset  - down -v + up -d (clean slate)
-//   contexa simulate ps     - status of ctxa-sim containers
-//   contexa simulate logs   - stream logs from the ctxa-sim stack
-//
-// docker-compose.yml is read from the contexa-owned infra directory
-// (~/.contexa/ctxa-sim or %LOCALAPPDATA%\Contexa\ctxa-sim), NEVER from the
-// customer project directory.
-
-const SIM_PROJECT = 'ctxa-sim';
-
-// `args` is an array of compose arguments (e.g. ['-p', 'ctxa-sim', 'up', '-d']).
-// No shell expansion: each entry is passed verbatim as a separate argv slot.
-function dockerCompose(args, cwd) {
-  const result = dockerComposeExec(args, { cwd, stdio: 'inherit' });
+function dockerCompose(args, context, stdio = 'inherit') {
+  const result = dockerComposeExec(args, {
+    cwd: context.infraDir,
+    env: context.env,
+    stdio,
+    timeout: 150000,
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(`docker compose ${args.join(' ')} exited with status ${result.status}`);
@@ -43,125 +30,165 @@ function dockerCompose(args, cwd) {
   return result;
 }
 
-function findCompose(infraDir) {
-  const candidate = path.join(infraDir, 'docker-compose.yml');
-  return fs.existsSync(candidate) ? candidate : null;
+async function buildContext(opts = {}) {
+  const projectDir = path.resolve(opts.dir || process.cwd());
+  if (!await fs.pathExists(manifestPath(projectDir, INSTALL_MODES.SIMULATION))) {
+    throw new Error(`Simulation is not initialized for this project. Run: contexa init --simulate --dir "${projectDir}"`);
+  }
+  const manifest = await loadManifest(projectDir, INSTALL_MODES.SIMULATION);
+  const metadata = manifest.metadata || {};
+  const simulation = metadata.simulation || {};
+  if (!metadata.installationId || metadata.projectName !== SIMULATION_PROJECT
+      || simulation.projectName !== SIMULATION_PROJECT || simulation.profile !== SIMULATION_PROFILE) {
+    throw new Error('Simulation manifest identity is incomplete or inconsistent. No Docker resource was changed.');
+  }
+  if (JSON.stringify(simulation.ports || {}) !== JSON.stringify(SIMULATION_PORTS)) {
+    throw new Error('Simulation manifest port contract does not match this CLI release. No Docker resource was changed.');
+  }
+  const infraDir = metadata.infraDir && path.resolve(metadata.infraDir);
+  if (!infraDir || (opts.infraDir && path.resolve(opts.infraDir) !== infraDir)) {
+    throw new Error('The requested infrastructure directory does not match the simulation ownership manifest.');
+  }
+  const composePath = path.join(infraDir, 'docker-compose.yml');
+  if (!await fs.pathExists(composePath)) {
+    throw new Error(`Manifest-owned simulation compose file is missing: ${composePath}`);
+  }
+  if (!metadata.composeChecksum || sha256FileSync(composePath) !== metadata.composeChecksum) {
+    throw new Error('Simulation compose file has changed since initialization. It was not executed.');
+  }
+  const containers = metadata.dockerResources && Array.isArray(metadata.dockerResources.containers)
+    ? metadata.dockerResources.containers : [];
+  const expectedContainers = ['postgres', 'redis', 'zookeeper', 'kafka', 'ollama']
+    .map(service => `${SIMULATION_PROJECT}-${service}`).sort();
+  if (JSON.stringify([...containers].sort()) !== JSON.stringify(expectedContainers)) {
+    throw new Error('Simulation Docker resource contract is incomplete or contains an unexpected container.');
+  }
+  const ownedPath = relativePath => {
+    if (typeof relativePath !== 'string' || !relativePath) {
+      throw new Error('Simulation manifest is missing a managed project path.');
+    }
+    const candidate = path.resolve(projectDir, relativePath);
+    if (candidate !== projectDir && !candidate.startsWith(projectDir + path.sep)) {
+      throw new Error(`Simulation manifest path escapes the project: ${relativePath}`);
+    }
+    return candidate;
+  };
+  return {
+    projectDir,
+    infraDir,
+    installationId: metadata.installationId,
+    includeOllama: true,
+    overlayPath: ownedPath(simulation.overlayPath),
+    configurationPath: ownedPath(simulation.configurationPath),
+    env: simulationEnvironment(process.env, metadata.installationId),
+  };
 }
 
-// Resolve the simulation infra directory. The user can still override the
-// location with --infra-dir for advanced setups (e.g. CI runners that need
-// the artifacts on a tmpfs), but a plain `contexa simulate up` works with
-// no flags whatsoever - that's the whole point.
-function buildContext(opts = {}) {
-  const explicit = opts && opts.infraDir;
-  const infraDir = explicit
-    ? path.resolve(String(explicit))
-    : osDefaultInfraDir(SIM_PROJECT);
-
-  const setIfAbsent = (k, v) => { if (!process.env[k]) process.env[k] = v; };
-  setIfAbsent('CONTEXA_PROJECT',          'ctxa-sim');
-  setIfAbsent('CONTEXA_POSTGRES_PORT',    '25432');
-  setIfAbsent('CONTEXA_OLLAMA_PORT',      '31434');
-  setIfAbsent('CONTEXA_REDIS_PORT',       '26379');
-  setIfAbsent('CONTEXA_ZOOKEEPER_PORT',   '22181');
-  setIfAbsent('CONTEXA_KAFKA_PORT',       '29092');
-  setIfAbsent('CONTEXA_DB_NAME',          'contexa_sim');
-  setIfAbsent('CONTEXA_DB_USERNAME',      'contexa_sim');
-  setIfAbsent('CONTEXA_DB_PASSWORD',      'contexa_sim_pw');
-
-  return { projectName: SIM_PROJECT, infraDir };
+function executeBuild(project, env) {
+  let command;
+  let args;
+  let cwd = project.projectDir;
+  if (project.buildTool === 'gradle') {
+    const root = project.gradleRootDir || project.projectDir;
+    const relativeModule = path.relative(root, project.projectDir);
+    const task = relativeModule && relativeModule !== '.'
+      ? `:${relativeModule.split(path.sep).join(':')}:bootRun`
+      : 'bootRun';
+    cwd = root;
+    const wrapperName = process.platform === 'win32' ? 'gradlew.bat' : 'gradlew';
+    if (fs.existsSync(path.join(root, wrapperName))) {
+      if (process.platform === 'win32') {
+        command = process.env.ComSpec || 'cmd.exe';
+        args = ['/d', '/s', '/c', `gradlew.bat ${task}`];
+      } else {
+        command = './gradlew';
+        args = [task];
+      }
+    } else {
+      command = 'gradle';
+      args = [task];
+    }
+  } else if (project.buildTool === 'maven') {
+    const wrapperName = process.platform === 'win32' ? 'mvnw.cmd' : 'mvnw';
+    if (fs.existsSync(path.join(project.projectDir, wrapperName))) {
+      if (process.platform === 'win32') {
+        command = process.env.ComSpec || 'cmd.exe';
+        args = ['/d', '/s', '/c', 'mvnw.cmd spring-boot:run'];
+      } else {
+        command = './mvnw';
+        args = ['spring-boot:run'];
+      }
+    } else {
+      command = 'mvn';
+      args = ['spring-boot:run'];
+    }
+  } else {
+    throw new Error('The simulation project must use Gradle or Maven.');
+  }
+  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit', shell: false });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`Application process exited with status ${result.status}`);
 }
 
-function notReadyHint(infraDir) {
-  console.log(chalk.gray(`    Expected location  : ${infraDir}`));
-  console.log(chalk.gray('    To create it, run  : contexa init --simulate'));
-  console.log(chalk.gray('    (this prepares an isolated PostgreSQL + Redis + Kafka stack'));
-  console.log(chalk.gray('     that does NOT collide with any production stack on the same host)\n'));
+function addContextOptions(command) {
+  return command
+    .option('--dir <path>', 'Spring project directory', process.cwd())
+    .option('--infra-dir <path>', 'Require this exact manifest-owned infrastructure directory');
 }
 
-module.exports = function (program) {
-  const sim = program
-    .command('simulate')
-    .description('Manage the simulation stack (ctxa-sim) created by "contexa init --simulate"');
+module.exports = function registerSimulationCommands(program) {
+  const sim = program.command('simulate')
+    .description('Manage the isolated stack created by "contexa init --simulate"');
 
-  sim.command('up')
-    .description('Start (or restart) the simulation stack')
-    .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action((opts) => {
-      const { projectName, infraDir } = buildContext(opts);
-      const compose = findCompose(infraDir);
-      if (!compose) {
-        console.log(chalk.red('\n  x Simulation stack not initialized.'));
-        notReadyHint(infraDir);
-        throw new Error('Simulation stack is not initialized.');
-      }
-      console.log(chalk.cyan(`\n  Starting simulation stack "${projectName}"`));
-      console.log(chalk.gray(`    Infra dir : ${infraDir}\n`));
-      dockerCompose(['-p', projectName, 'up', '-d'], infraDir);
+  addContextOptions(sim.command('up').description('Start and verify the simulation stack'))
+    .action(async opts => {
+      const context = await buildContext(opts);
+      dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
+      await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+      console.log(chalk.green('  v Simulation infrastructure is healthy and ownership-verified.'));
     });
 
-  sim.command('down')
-    .description('Stop the simulation stack (keeps volumes)')
-    .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action((opts) => {
-      const { projectName, infraDir } = buildContext(opts);
-      const compose = findCompose(infraDir);
-      if (!compose) {
-        console.log(chalk.gray('\n  Simulation stack not initialized; nothing to stop.\n'));
-        return;
-      }
-      console.log(chalk.cyan(`\n  Stopping simulation stack "${projectName}"\n`));
-      dockerCompose(['-p', projectName, 'down'], infraDir);
+  addContextOptions(sim.command('down').description('Stop the simulation stack and keep its volumes'))
+    .action(async opts => {
+      const context = await buildContext(opts);
+      dockerCompose(['-p', SIMULATION_PROJECT, 'down', '--timeout', '0'], context);
     });
 
-  sim.command('reset')
-    .description('Stop the simulation stack AND delete its volumes (clean slate)')
-    .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action(async (opts) => {
-      const { projectName, infraDir } = buildContext(opts);
-      const compose = findCompose(infraDir);
-      if (!compose) {
-        console.log(chalk.red('\n  x Simulation stack not initialized.'));
-        notReadyHint(infraDir);
-        throw new Error('Simulation stack is not initialized.');
-      }
-      console.log(chalk.yellow(`\n  Resetting simulation stack "${projectName}" (down -v + up -d)...\n`));
-      dockerCompose(['-p', projectName, 'down', '-v'], infraDir);
-
-      dockerCompose(['-p', projectName, 'up', '-d'],   infraDir);
+  addContextOptions(sim.command('reset').description('Recreate only the simulation stack and its volumes'))
+    .action(async opts => {
+      const context = await buildContext(opts);
+      dockerCompose(['-p', SIMULATION_PROJECT, 'down', '-v', '--timeout', '0'], context);
+      dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
+      await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
     });
 
-  sim.command('ps')
-    .description('Show simulation stack container status')
-    .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action((opts) => {
-      const { projectName } = buildContext(opts);
-      // Array-arg invocation: --filter / --format values include user-derived
-      // text (projectName) and template tokens like {{.Names}}. Passing as
-      // argv slots keeps both safe against shell metacharacter expansion.
-      const r = dockerTry(['ps', '-a',
-        '--filter', `label=com.docker.compose.project=${projectName}`,
-        '--format', 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'],
-        { stdio: 'inherit' });
-      if (r.error || r.status !== 0) {
-        console.log(chalk.red('  x Docker not reachable.'));
-        throw r.error || new Error(`docker ps exited with status ${r.status}`);
-      }
-    });
+  addContextOptions(sim.command('ps').description('Show simulation container status'))
+    .action(async opts => dockerCompose(['-p', SIMULATION_PROJECT, 'ps'], await buildContext(opts)));
 
-  sim.command('logs [service]')
-    .description('Stream logs from the simulation stack (optional: specific service)')
-    .option('--infra-dir <path>', 'Override the simulation infra directory (advanced)')
-    .action((service, opts) => {
-      const { projectName, infraDir } = buildContext(opts);
-      const compose = findCompose(infraDir);
-      if (!compose) {
-        console.log(chalk.red('\n  x Simulation stack not initialized.'));
-        notReadyHint(infraDir);
-        throw new Error('Simulation stack is not initialized.');
-      }
-      const args = ['-p', projectName, 'logs', '-f'];
+  addContextOptions(sim.command('logs [service]').description('Stream simulation logs'))
+    .action(async (service, opts) => {
+      const context = await buildContext(opts);
+      const args = ['-p', SIMULATION_PROJECT, 'logs', '-f'];
       if (service) args.push(service);
-      dockerCompose(args, infraDir);
+      dockerCompose(args, context);
+    });
+
+  addContextOptions(sim.command('run').description('Run the host application with only the simulation profile'))
+    .action(async opts => {
+      const context = await buildContext(opts);
+      if (!await fs.pathExists(context.overlayPath)) {
+        throw new Error(`Simulation overlay is missing: ${context.overlayPath}`);
+      }
+      if (!await fs.pathExists(context.configurationPath)) {
+        throw new Error(`Simulation profile configuration is missing: ${context.configurationPath}`);
+      }
+      const project = await detectSpringProject(context.projectDir);
+      if (!project.isSpring || !project.hasContexta) {
+        throw new Error('The manifest project is not a Contexa Spring Boot application.');
+      }
+      verifySimulationInfrastructure(context.installationId, context.includeOllama);
+      executeBuild(project, simulationEnvironment(context.env, context.installationId, true));
     });
 };
+
+module.exports.buildContext = buildContext;

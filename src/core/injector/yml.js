@@ -13,6 +13,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const yaml = require('js-yaml');
 const { escapeRegex, backupFile } = require('./common');
+const { SIMULATION_PROFILE } = require('../simulation');
 
 // Legacy marker block written by pre-1.1 versions. Kept here only so that
 // re-running init on an older project strips and rewrites the block as a
@@ -52,11 +53,6 @@ function buildCliContexaTree(opts = {}) {
   }
 
   const isSimulate = !!simulate;
-  const dbPort = isSimulate ? '25432' : '5432';
-  const dbName = isSimulate ? 'contexa_sim' : 'contexa';
-  const dbUser = isSimulate ? 'contexa_sim' : 'contexa';
-  const ollamaPort = isSimulate ? '31434' : '11434';
-
   const tree = {
     security: {
       zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
@@ -64,10 +60,11 @@ function buildCliContexaTree(opts = {}) {
   };
 
   if (isSimulate) {
+    tree.iam = { websocket: { enabled: false } };
     tree.datasource = {
-      url: `\${CONTEXA_DB_URL:\${DB_URL:jdbc:postgresql://localhost:${dbPort}/${dbName}}}`,
-      username: `\${CONTEXA_DB_USERNAME:\${DB_USERNAME:${dbUser}}}`,
-      password: `\${CONTEXA_DB_PASSWORD:\${DB_PASSWORD:}}`,
+      url: '${CONTEXA_DB_URL}',
+      username: '${CONTEXA_DB_USERNAME}',
+      password: '${CONTEXA_DB_PASSWORD}',
       'driver-class-name': '${CONTEXA_DB_DRIVER:org.postgresql.Driver}',
       isolation: { 'contexa-owned-application': true },
     };
@@ -88,7 +85,12 @@ function buildCliContexaTree(opts = {}) {
       },
     };
     tree.hcad = {
-      geoip: { enabled: true, dbPath: 'contexa/data/GeoLite2-City.mmdb' },
+      geoip: {
+        enabled: true,
+        dbPath: isSimulate
+          ? 'contexa/simulation/data/GeoLite2-City.mmdb'
+          : 'contexa/data/GeoLite2-City.mmdb',
+      },
     };
 
     tree.llm.selection.embedding = {
@@ -100,7 +102,9 @@ function buildCliContexaTree(opts = {}) {
   if ((enableAiSecurity || isSimulate) && llmProviders.includes('ollama')) {
     tree.llm.chat = {
       ollama: {
-        baseUrl: `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${ollamaPort}}`,
+        baseUrl: isSimulate
+          ? '${CONTEXA_CHAT_OLLAMA_BASE_URL}'
+          : '${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:11434}',
         model: '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}',
         keepAlive: '${CONTEXA_OLLAMA_CHAT_KEEP_ALIVE:30m}',
       }
@@ -224,6 +228,62 @@ async function injectYml(ymlPath, opts = {}) {
       ].join('\n  ');
       throw new Error(guidance);
     }
+  }
+
+  if (opts.simulate) {
+    rootObj.server = rootObj.server && typeof rootObj.server === 'object' ? rootObj.server : {};
+    rootObj.server.port = '${CONTEXA_SIMULATION_SERVER_PORT:9080}';
+    rootObj.spring = rootObj.spring && typeof rootObj.spring === 'object' ? rootObj.spring : {};
+    rootObj.spring.config = rootObj.spring.config && typeof rootObj.spring.config === 'object'
+      ? rootObj.spring.config : {};
+    rootObj.spring.config.activate = rootObj.spring.config.activate
+      && typeof rootObj.spring.config.activate === 'object' ? rootObj.spring.config.activate : {};
+    const existingProfile = rootObj.spring.config.activate['on-profile'];
+    if (existingProfile && existingProfile !== SIMULATION_PROFILE) {
+      throw new Error(`Simulation overlay is already bound to another profile: ${existingProfile}`);
+    }
+    rootObj.spring.config.activate['on-profile'] = SIMULATION_PROFILE;
+    rootObj.spring.ai = rootObj.spring.ai && typeof rootObj.spring.ai === 'object'
+      ? rootObj.spring.ai : {};
+    rootObj.spring.ai.model = rootObj.spring.ai.model && typeof rootObj.spring.ai.model === 'object'
+      ? rootObj.spring.ai.model : {};
+    for (const modelType of ['chat', 'embedding']) {
+      const selected = rootObj.spring.ai.model[modelType];
+      if (selected && selected !== 'ollama') {
+        throw new Error(`Simulation overlay already selects another Spring AI ${modelType} model: ${selected}`);
+      }
+      rootObj.spring.ai.model[modelType] = 'ollama';
+    }
+    rootObj.spring.ai.model.image = 'none';
+    rootObj.spring.ai.model.moderation = 'none';
+    rootObj.spring.ai.model.audio = rootObj.spring.ai.model.audio
+      && typeof rootObj.spring.ai.model.audio === 'object' ? rootObj.spring.ai.model.audio : {};
+    rootObj.spring.ai.model.audio.speech = 'none';
+    rootObj.spring.ai.model.audio.transcription = 'none';
+    rootObj.spring.ai.ollama = rootObj.spring.ai.ollama
+      && typeof rootObj.spring.ai.ollama === 'object' ? rootObj.spring.ai.ollama : {};
+    rootObj.spring.ai.ollama['base-url'] = '${OLLAMA_BASE_URL}';
+    rootObj.spring.ai.ollama.chat = rootObj.spring.ai.ollama.chat
+      && typeof rootObj.spring.ai.ollama.chat === 'object' ? rootObj.spring.ai.ollama.chat : {};
+    rootObj.spring.ai.ollama.chat.options = rootObj.spring.ai.ollama.chat.options
+      && typeof rootObj.spring.ai.ollama.chat.options === 'object'
+      ? rootObj.spring.ai.ollama.chat.options : {};
+    rootObj.spring.ai.ollama.chat.options.model = '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}';
+    rootObj.spring.ai.ollama.embedding = rootObj.spring.ai.ollama.embedding
+      && typeof rootObj.spring.ai.ollama.embedding === 'object' ? rootObj.spring.ai.ollama.embedding : {};
+    rootObj.spring.ai.ollama.embedding.options = rootObj.spring.ai.ollama.embedding.options
+      && typeof rootObj.spring.ai.ollama.embedding.options === 'object'
+      ? rootObj.spring.ai.ollama.embedding.options : {};
+    rootObj.spring.ai.ollama.embedding.options.model = '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}';
+    rootObj.spring.data = rootObj.spring.data && typeof rootObj.spring.data === 'object'
+      ? rootObj.spring.data : {};
+    rootObj.spring.data.redis = rootObj.spring.data.redis
+      && typeof rootObj.spring.data.redis === 'object' ? rootObj.spring.data.redis : {};
+    rootObj.spring.data.redis.host = '${REDIS_HOST}';
+    rootObj.spring.data.redis.port = '${REDIS_PORT}';
+    rootObj.spring.kafka = rootObj.spring.kafka && typeof rootObj.spring.kafka === 'object'
+      ? rootObj.spring.kafka : {};
+    rootObj.spring.kafka['bootstrap-servers'] = '${KAFKA_BOOTSTRAP_SERVERS}';
   }
 
   const application = applyCliContexaTree(rootObj, cliTree, opts);

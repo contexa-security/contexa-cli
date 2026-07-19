@@ -21,6 +21,7 @@ async function inspectInfra(opts = {}) {
   const issues = [];
   const distributed = opts.infra === 'distributed';
   const includeOllama = !!opts.includeOllama;
+  const strictIsolation = !!opts.strictIsolation;
 
   // Step 1: is the docker CLI even installed? Distinguish "not installed" from
   // "installed but daemon stopped" - the user-visible fix is very different.
@@ -82,14 +83,22 @@ async function inspectInfra(opts = {}) {
   }
   for (const [name, port, serviceKey] of ports) {
     if (await isPortBound(port)) {
-      skippedServices.push(serviceKey);
-      issues.push({
-        severity: 'warning',
-        message: `Port ${port} (${name}) is already in use on 127.0.0.1.`,
-        hint: [
-          `Local service ${name} is already running on host. Contexa will skip starting this docker container and reuse the host service.`,
-        ],
-      });
+      if (strictIsolation) {
+        issues.push({
+          severity: 'error',
+          message: `Simulation port ${port} (${name}) is already in use on 127.0.0.1.`,
+          hint: ['Simulation never reuses an unverified host service. Stop the owner or choose a verified isolated environment.'],
+        });
+      } else {
+        skippedServices.push(serviceKey);
+        issues.push({
+          severity: 'warning',
+          message: `Port ${port} (${name}) is already in use on 127.0.0.1.`,
+          hint: [
+            `Local service ${name} is already running on host. Contexa will skip starting this docker container and reuse the host service.`,
+          ],
+        });
+      }
     }
   }
 
@@ -118,7 +127,7 @@ async function inspectInfra(opts = {}) {
 
   // If a container already exists, skip it to avoid conflicts and data loss
   for (const svc of services) {
-    if (existing.includes(svc.container)) {
+    if (!strictIsolation && existing.includes(svc.container)) {
       if (!skippedServices.includes(svc.key)) {
         skippedServices.push(svc.key);
       }
@@ -127,7 +136,14 @@ async function inspectInfra(opts = {}) {
 
   const present = names.filter(n => existing.includes(n));
   const missing = names.filter(n => !existing.includes(n));
-  if (present.length === names.length) {
+  if (strictIsolation && present.length > 0) {
+    issues.push({
+      severity: 'error',
+      code: 'simulation-container-collision',
+      message: `Simulation container name collision: ${present.join(', ')}.`,
+      hint: ['Reset the matching manifest-owned simulation installation before creating a new one.'],
+    });
+  } else if (present.length === names.length) {
     issues.push({
       severity: 'info',
       code: 'all-containers-exist',

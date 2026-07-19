@@ -28,7 +28,7 @@ function buildDockerResourceContract(projectName, options = {}) {
   }
   if (options.infra === 'distributed') {
     services.push('redis', 'zookeeper', 'kafka');
-    volumes.push('redis-data', 'zookeeper-data', 'kafka-data');
+    volumes.push('redis-data', 'zookeeper-data', 'zookeeper-log', 'kafka-data');
   }
   return {
     owner: 'contexa-cli',

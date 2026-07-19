@@ -24,6 +24,7 @@ const {
 } = require('../src/core/injector');
 const { containerName, resolveProjectName } = require('../src/core/project');
 const { detectSpringProject } = require('../src/core/detector');
+const { SIMULATION_PROJECT, simulationEnvironment } = require('../src/core/simulation');
 
 async function tempDir(prefix = 'ctxa-claim0-') {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -377,14 +378,25 @@ test('F3: detector ignores commented-out include lines in parent settings.gradle
 test('A1: simulate.js targets ctxa-sim regardless of CONTEXA_PROJECT', () => {
   const simSrc = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'commands', 'simulate.js'), 'utf8');
-  // The hard-coded SIM_PROJECT constant must exist and equal 'ctxa-sim'.
-  assert.match(simSrc, /SIM_PROJECT\s*=\s*['"]ctxa-sim['"]/,
-    'simulate.js must hard-wire SIM_PROJECT = "ctxa-sim"');
-  // simulate.js must NOT call resolveProjectName() (which reads
-  // CONTEXA_PROJECT). Doing so would make `contexa simulate up` fail in
-  // a fresh shell where init's in-process env is gone.
+  const env = simulationEnvironment({
+    CONTEXA_PROJECT: 'production-project',
+    CONTEXA_POSTGRES_PORT: '5432',
+    CONTEXA_DB_URL: 'jdbc:postgresql://production/db',
+    REDIS_HOST: 'production-redis',
+    KAFKA_BOOTSTRAP_SERVERS: 'production-kafka:9092',
+    OLLAMA_BASE_URL: 'http://production-ollama:11434',
+  }, 'test-installation');
+  assert.equal(SIMULATION_PROJECT, 'ctxa-sim');
+  assert.equal(env.CONTEXA_PROJECT, 'ctxa-sim');
+  assert.equal(env.CONTEXA_POSTGRES_PORT, '25432');
+  assert.equal(env.CONTEXA_DB_URL, 'jdbc:postgresql://127.0.0.1:25432/contexa_sim');
+  assert.equal(env.REDIS_HOST, '127.0.0.1');
+  assert.equal(env.KAFKA_BOOTSTRAP_SERVERS, '127.0.0.1:29092');
+  assert.equal(env.OLLAMA_BASE_URL, 'http://127.0.0.1:31434');
   assert.equal(simSrc.includes('resolveProjectName'), false,
     'simulate.js must not depend on CONTEXA_PROJECT via resolveProjectName()');
+  assert.match(simSrc, /loadManifest\(projectDir, INSTALL_MODES\.SIMULATION\)/,
+    'fresh-shell simulation commands must load their exact ownership manifest');
 });
 
 test('A2: simulate reset does not regenerate initdb SQL copies', () => {
@@ -410,7 +422,7 @@ test('A2b: reset flows restore project files and keep infra cleanup scoped', () 
     'reset must not run docker compose down -v from an implicit project directory');
   assert.equal(resetSrc.includes('yaml.load'), false,
     'reset must not inspect application.yml to guess production vs simulation target');
-  assert.match(resetSrc, /env: installMode === INSTALL_MODES\.SIMULATION \? simulateComposeEnv\(\) : composeEnv\(projectName\)/,
+  assert.match(resetSrc, /\? simulateComposeEnv\(resetManifest\.metadata\.installationId\)/,
     'simulate reset must pass the ctxa-sim compose environment explicitly');
   assert.match(resetServiceSrc, /validateDockerContract\(contract, expected\)/,
     'cleanup must validate the exact manifest-owned Docker resource contract');

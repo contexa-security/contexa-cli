@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const net = require('net');
 
 const { inspectInfra } = require('../src/core/preflight');
+const { waitForSimulationInfrastructure } = require('../src/core/simulation');
 
 test('inspectInfra: respects --no-docker (startDocker=false) by skipping all docker checks', async () => {
   const issues = await inspectInfra({ infra: 'standalone', startDocker: false });
@@ -68,4 +69,46 @@ test('inspectInfra: distributed mode adds redis/zookeeper/kafka to the port chec
   // are environment-dependent and covered by the function shape itself.
   const issues = await inspectInfra({ infra: 'distributed', startDocker: false });
   assert.ok(Array.isArray(issues));
+});
+
+test('inspectInfra: strict simulation isolation rejects an occupied port instead of reusing it', async () => {
+  const blocker = net.createServer();
+  await new Promise((resolve, reject) => {
+    blocker.once('error', reject);
+    blocker.listen(0, '127.0.0.1', resolve);
+  });
+  const previous = process.env.CONTEXA_POSTGRES_PORT;
+  process.env.CONTEXA_POSTGRES_PORT = String(blocker.address().port);
+  try {
+    const issues = await inspectInfra({
+      infra: 'standalone',
+      startDocker: false,
+      strictIsolation: true,
+    });
+    const collision = issues.find(issue => issue.message.includes(String(blocker.address().port)));
+    assert.equal(collision.severity, 'error');
+    assert.match(collision.message, /Simulation port/);
+    assert.deepEqual(issues.skippedServices, []);
+    assert.deepEqual(issues.servicesToUp, ['postgres']);
+  } finally {
+    if (previous === undefined) delete process.env.CONTEXA_POSTGRES_PORT;
+    else process.env.CONTEXA_POSTGRES_PORT = previous;
+    await new Promise(resolve => blocker.close(resolve));
+  }
+});
+
+test('simulation health gate tolerates transient failure and returns the recovered evidence', async () => {
+  let attempts = 0;
+  const result = await waitForSimulationInfrastructure('test-installation', true, {
+    timeoutMs: 100,
+    intervalMs: 0,
+    delay: async () => {},
+    verify: () => {
+      attempts++;
+      if (attempts < 3) throw new Error('transient unhealthy');
+      return { services: ['postgres', 'redis', 'zookeeper', 'kafka', 'ollama'] };
+    },
+  });
+  assert.equal(attempts, 3);
+  assert.equal(result.services.length, 5);
 });

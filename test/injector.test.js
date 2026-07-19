@@ -83,7 +83,7 @@ test('injectYml: distributed sets contexa.infrastructure.mode and never spring.d
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: simulate uses isolated Contexa settings without writing spring.*', async () => {
+test('injectYml: simulate writes only isolated profile and Ollama selection under spring.*', async () => {
   const dir = await tempDir();
   try {
     const ymlPath = path.join(dir, 'application.yml');
@@ -95,18 +95,32 @@ test('injectYml: simulate uses isolated Contexa settings without writing spring.
       simulate: true,
     });
     const root = loadYml(ymlPath);
-    assert.equal(root.contexa.datasource.url,
-      '${CONTEXA_DB_URL:${DB_URL:jdbc:postgresql://localhost:25432/contexa_sim}}');
-    assert.equal(root.contexa.datasource.username,
-      '${CONTEXA_DB_USERNAME:${DB_USERNAME:contexa_sim}}');
-    assert.equal(root.contexa.datasource.password,
-      '${CONTEXA_DB_PASSWORD:${DB_PASSWORD:}}');
+    assert.equal(root.contexa.datasource.url, '${CONTEXA_DB_URL}');
+    assert.equal(root.contexa.datasource.username, '${CONTEXA_DB_USERNAME}');
+    assert.equal(root.contexa.datasource.password, '${CONTEXA_DB_PASSWORD}');
+    assert.equal(root.contexa.iam.websocket.enabled, false);
     assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
     assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
     assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
     assert.equal(root.contexa.llm.selection.embedding.mode, 'fixed');
     assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
-    assert.equal(root.spring, undefined, 'simulate must not overwrite host spring.redis/kafka settings');
+    assert.equal(root.spring.config.activate['on-profile'], 'contexa-sim');
+    assert.equal(root.spring.ai.model.chat, 'ollama');
+    assert.equal(root.spring.ai.model.embedding, 'ollama');
+    assert.equal(root.spring.ai.model.image, 'none');
+    assert.equal(root.spring.ai.model.moderation, 'none');
+    assert.equal(root.spring.ai.model.audio.speech, 'none');
+    assert.equal(root.spring.ai.model.audio.transcription, 'none');
+    assert.equal(root.spring.ai.ollama['base-url'], '${OLLAMA_BASE_URL}');
+    assert.equal(root.spring.ai.ollama.chat.options.model,
+      '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}');
+    assert.equal(root.spring.ai.ollama.embedding.options.model,
+      '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}');
+    assert.equal(root.server.port, '${CONTEXA_SIMULATION_SERVER_PORT:9080}');
+    assert.equal(root.spring.datasource, undefined);
+    assert.equal(root.spring.data.redis.host, '${REDIS_HOST}');
+    assert.equal(root.spring.data.redis.port, '${REDIS_PORT}');
+    assert.equal(root.spring.kafka['bootstrap-servers'], '${KAFKA_BOOTSTRAP_SERVERS}');
   } finally { await fs.remove(dir); }
 });
 
@@ -550,6 +564,10 @@ test('generateDockerCompose: distributed mode adds redis/zookeeper/kafka with lo
     assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_REDIS_PORT:-6379}:6379'));
     assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_ZOOKEEPER_PORT:-2181}:2181'));
     assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_KAFKA_PORT:-9092}:9092'));
+    assert.ok(yml.includes('zookeeper-log:/var/lib/zookeeper/log'));
+    assert.ok(yml.includes('zookeeper-log:\n    labels: *contexa-ownership'));
+    assert.ok(yml.includes('kafka-broker-api-versions", "--bootstrap-server", "kafka:9093"'));
+    assert.ok(!yml.includes('kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"'));
   } finally { await fs.remove(dir); }
 });
 
@@ -560,6 +578,9 @@ test('generateDockerCompose: backs up existing compose file before overwrite', a
     await fs.writeFile(composePath, 'services: {}\n');
     await generateDockerCompose(dir, { infra: 'standalone' });
     assert.ok(await fs.pathExists(composePath + '.bak'));
+    await fs.remove(composePath + '.bak');
+    await generateDockerCompose(dir, { infra: 'standalone', backupExisting: false });
+    assert.equal(await fs.pathExists(composePath + '.bak'), false);
   } finally { await fs.remove(dir); }
 });
 

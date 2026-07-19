@@ -33,7 +33,7 @@ async function generateDockerCompose(infraDir, opts = {}) {
 
   // Inside contexa-owned dir we still keep a .bak as a safety net for the
   // unlikely case where the user manually edited the previous output.
-  if (await fs.pathExists(composePath)) {
+  if (opts.backupExisting !== false && await fs.pathExists(composePath)) {
     await fs.copy(composePath, composePath + '.bak');
   }
 
@@ -141,6 +141,7 @@ services:
       - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_ZOOKEEPER_PORT:-2181}:2181"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
@@ -171,7 +172,7 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "kafka:9093"]
       interval: 10s
       timeout: 10s
       retries: 5
@@ -195,6 +196,8 @@ volumes:
   redis-data:
     labels: *contexa-ownership
   zookeeper-data:
+    labels: *contexa-ownership
+  zookeeper-log:
     labels: *contexa-ownership
   kafka-data:
     labels: *contexa-ownership`;
