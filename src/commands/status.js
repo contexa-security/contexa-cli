@@ -5,6 +5,7 @@ const fs    = require('fs-extra');
 const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
+const { INSTALL_MODES, loadManifest, manifestPath } = require('../core/manifest');
 
 function getPath(obj, pathArr) {
   let cur = obj;
@@ -29,6 +30,18 @@ module.exports = function (program) {
       console.log(`  ${t('status.spring')}   : ${project.isSpring  ? chalk.green('v') : chalk.red('x')}`);
       console.log(`  ${t('status.contexa')}  : ${project.hasContexta ? chalk.green(t('status.installed')) : chalk.red(t('status.notInstalled'))}`);
       console.log(`  ${t('status.security')} : ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`);
+
+      for (const mode of [INSTALL_MODES.NORMAL, INSTALL_MODES.SIMULATION]) {
+        const exists = await fs.pathExists(manifestPath(opts.dir, mode));
+        const label = mode === INSTALL_MODES.NORMAL ? 'Normal installation' : 'Simulation installation';
+        if (!exists) {
+          console.log(`  ${label}: not installed`);
+          continue;
+        }
+        const manifest = await loadManifest(opts.dir, mode);
+        const transactionState = manifest.transaction ? manifest.transaction.status : 'UNKNOWN';
+        console.log(`  ${label}: ${transactionState} (installationId=${manifest.metadata.installationId || 'missing'})`);
+      }
 
       if (project.appYmlPath && await fs.pathExists(project.appYmlPath)) {
         const content = await fs.readFile(project.appYmlPath, 'utf8');

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "channel": "snapshot",
+  "releaseTag": "v0.1.1",
+  "cliVersion": "0.1.1",
+  "starter": {
+    "groupId": "ai.ctxa",
+    "artifactId": "spring-boot-starter-contexa",
+    "version": "0.1.0-SNAPSHOT"
+  },
+  "assets": [
+    {"os": "linux", "arch": "x64", "file": "contexa-linux-x64", "checksumFile": "contexa-linux-x64.sha256"},
+    {"os": "macos", "arch": "arm64", "file": "contexa-macos-arm64", "checksumFile": "contexa-macos-arm64.sha256"},
+    {"os": "windows", "arch": "x64", "file": "contexa-win-x64.exe", "checksumFile": "contexa-win-x64.exe.sha256"}
+  ],
+  "signature": {"required": false, "status": "snapshot-channel-pending"},
+  "primaryCommands": [
+    "contexa init",
+    "contexa reset",
+    "contexa init --simulate",
+    "contexa reset --simulate"
+  ]
+}

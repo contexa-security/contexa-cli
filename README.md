@@ -123,13 +123,18 @@ Infrastructure setup, only when selected:
 
 ## Commands
 
+The four primary workflows are:
+
 ```bash
-contexa init       # guided installation
-contexa status     # show current Contexa status
-contexa doctor     # check selected provider and infrastructure
-contexa scan       # static configuration scan
-contexa reset      # reset selected Contexa-created resources
+contexa init                 # normal installation
+contexa reset                # restore normal installation changes
+contexa init --simulate      # isolated simulation installation
+contexa reset --simulate     # remove only isolated simulation changes
 ```
+
+`status`, `doctor`, and `scan` are optional support commands. They are not
+required installation steps. The machine-readable command and version contract
+is `release-manifest.json`.
 
 ### Advanced Automation
 
@@ -149,7 +154,7 @@ not required for normal installation.
 
 For automation, run `contexa init --help` and use only the flags your CI flow needs.
 
-The normal user-facing command remains:
+The normal installation entry point remains:
 
 ```bash
 contexa init

@@ -21,7 +21,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION, backupFile } = require('./common');
 
-async function injectMavenDep(pomPath) {
+async function injectMavenDep(pomPath, options = {}) {
   if (!await fs.pathExists(pomPath)) return false;
   const pom = await fs.readFile(pomPath, 'utf8');
   if (pom.includes(CONTEXA_ARTIFACT_ID)) return false;
@@ -48,7 +48,7 @@ async function injectMavenDep(pomPath) {
   if (target === -1) return false;
 
   // Backup
-  await backupFile(pomPath);
+  await backupFile(pomPath, options);
 
   const dep =
     `        <dependency>\n` +
@@ -118,13 +118,13 @@ function insertIntoTopLevelDependencies(content, lines) {
   return content.slice(0, insertPos) + block + content.slice(insertPos);
 }
 
-async function injectGradleDep(gradlePath) {
+async function injectGradleDep(gradlePath, options = {}) {
   if (!await fs.pathExists(gradlePath)) return false;
   let gradle = await fs.readFile(gradlePath, 'utf8');
   if (gradle.includes(CONTEXA_ARTIFACT_ID)) return false;
 
   // Backup
-  await backupFile(gradlePath);
+  await backupFile(gradlePath, options);
 
   // Kotlin DSL uses double-quoted, parenthesized form: implementation("group:artifact:version")
   // Groovy DSL uses single-quoted form: implementation 'group:artifact:version'
@@ -144,7 +144,7 @@ async function injectGradleDep(gradlePath) {
 // spring-kafka version is omitted: Spring Boot's BOM manages it. redisson's
 // version can be overridden via CONTEXA_REDISSON_VERSION env var so that
 // customers whose own BOM pins a different redisson can avoid a clash.
-async function injectDistributedDeps(buildPath) {
+async function injectDistributedDeps(buildPath, options = {}) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
   const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
@@ -184,6 +184,7 @@ async function injectDistributedDeps(buildPath) {
     }
     if (additions.length === 0) return false;
 
+    await backupFile(buildPath, options);
     // Reuse the same project-level <dependencies> location logic.
     const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
     const mgmtRanges = [];
@@ -229,12 +230,13 @@ async function injectDistributedDeps(buildPath) {
       : `    implementation 'org.springframework.statemachine:spring-statemachine-data-redis:4.0.0'`);
   }
   if (lines.length === 0) return false;
+  await backupFile(buildPath, options);
   const updated = insertIntoTopLevelDependencies(content, lines);
   await fs.writeFile(buildPath, updated);
   return true;
 }
 
-async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropic']) {
+async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropic'], options = {}) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
 
@@ -346,7 +348,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     }
 
     if (changed) {
-      await backupFile(buildPath);
+      await backupFile(buildPath, options);
       await fs.writeFile(buildPath, updated);
       return true;
     }
@@ -396,14 +398,14 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     }
 
     if (lines.length === 0 && updated === content) return false;
-    await backupFile(buildPath);
+    await backupFile(buildPath, options);
     const finalContent = lines.length > 0 ? insertIntoTopLevelDependencies(updated, lines) : updated;
     await fs.writeFile(buildPath, finalContent);
     return true;
   }
 }
 
-async function injectEnableAiSecurity(projectDir) {
+async function injectEnableAiSecurity(projectDir, options = {}) {
   const javaRoot = path.join(projectDir, 'src/main/java');
   if (!await fs.pathExists(javaRoot)) return { changed: false, filePath: null };
 
@@ -425,7 +427,7 @@ async function injectEnableAiSecurity(projectDir) {
               return { changed: false, filePath: full };
             }
 
-            await backupFile(full);
+            await backupFile(full, options);
 
             const importLine = "import io.contexa.contexacommon.annotation.EnableAISecurity;\n";
             const lastImportIndex = text.lastIndexOf('import ');

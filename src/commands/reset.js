@@ -7,12 +7,12 @@ const fs = require('fs-extra');
 const inquirer = require('inquirer');
 const { spawnSync } = require('child_process');
 const { dockerCompose, isDockerCliInstalled } = require('../core/docker');
-const { resolveProjectName, resolveInfraDir } = require('../core/project');
+const { resolveInfraDir } = require('../core/project');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
 const { findBackupFiles } = require('../core/cleanup');
-const { loadManifest, manifestPath, sha256FileSync } = require('../core/manifest');
+const { INSTALL_MODES, backupRoot, loadManifest, manifestPath, sha256FileSync } = require('../core/manifest');
 
 const COMPOSE_SERVICES = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka'];
 const COMPOSE_VOLUMES = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'kafka-data'];
@@ -115,9 +115,9 @@ function fileChangedSinceInit(entry, originalFile) {
   return sha256FileSync(originalFile) !== entry.currentChecksum;
 }
 
-async function restoreProjectFiles(projectDir) {
-  const backupsDir = path.join(projectDir, 'contexa', 'bak');
-  const manifest = await loadManifest(projectDir);
+async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
+  const backupsDir = backupRoot(projectDir, mode);
+  const manifest = await loadManifest(projectDir, mode);
   const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
   const conflicts = [];
 
@@ -151,7 +151,7 @@ async function restoreProjectFiles(projectDir) {
     }
 
     if (conflicts.length === 0) {
-      const mPath = manifestPath(projectDir);
+      const mPath = manifestPath(projectDir, mode);
       if (fs.existsSync(mPath)) fs.removeSync(mPath);
       if (fs.existsSync(backupsDir)) fs.removeSync(backupsDir);
       const parentContexa = path.join(projectDir, 'contexa');
@@ -257,17 +257,22 @@ module.exports = function (program) {
       console.log(chalk.cyan('  =============================================\n'));
 
       const projectDir = path.resolve(opts.dir);
-      const resetManifest = await loadManifest(projectDir);
-      const projectName = (resetManifest.metadata && resetManifest.metadata.projectName) || resolveProjectName();
+      const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
+      const resetManifestPath = manifestPath(projectDir, installMode);
+      const hasOwnedManifest = fs.existsSync(resetManifestPath);
+      const resetManifest = await loadManifest(projectDir, installMode);
+      const projectName = resetManifest.metadata && resetManifest.metadata.projectName;
       let targets = resolveTargets(opts);
       let dockerFailed = false;
       let resetHadIssues = false;
 
       if (!hasAnyTarget(targets)) {
         if (opts.yes) {
-          targets.infra = true;
           targets.code = true;
-          console.log(chalk.cyan('  i Reset target: project infrastructure and project file restore. Use --simulate for the ctxa-sim flow.'));
+          targets.infra = hasOwnedManifest && resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip';
+          console.log(chalk.cyan(targets.infra
+            ? '  i Reset target: manifest-owned project infrastructure and project file restore.'
+            : '  i Reset target: manifest-owned project file restore only.'));
         } else {
           const answer = await inquirer.prompt([{
             type: 'checkbox',
@@ -292,6 +297,18 @@ module.exports = function (program) {
             code: answer.targets.includes('code')
           };
         }
+      }
+
+      if (!hasOwnedManifest && (targets.infra || targets.simulate)) {
+        console.log(chalk.yellow('  i No matching Contexa ownership manifest exists. No infrastructure or volume was changed.'));
+        return;
+      }
+      if (!hasOwnedManifest && targets.code) {
+        console.log(chalk.yellow('  i No matching Contexa ownership manifest exists. No project file was changed.'));
+        return;
+      }
+      if ((targets.infra || targets.simulate) && !projectName) {
+        throw new Error('The ownership manifest does not contain a project name; infrastructure reset was refused.');
       }
 
       const planSimInfraDir = targets.simulate
@@ -352,7 +369,7 @@ module.exports = function (program) {
       if (targets.code) {
         const spinner = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
         try {
-          const restoreResult = await restoreProjectFiles(projectDir);
+          const restoreResult = await restoreProjectFiles(projectDir, installMode);
           if (restoreResult.conflicts && restoreResult.conflicts.length > 0) {
             resetHadIssues = true;
             spinner.warn(`Project file restore skipped ${restoreResult.conflicts.length} user-modified file(s).`);

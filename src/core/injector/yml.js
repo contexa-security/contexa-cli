@@ -219,7 +219,7 @@ async function injectYml(ymlPath, opts = {}) {
 
   let rootObj = {};
   if (await fs.pathExists(ymlPath)) {
-    await backupFile(ymlPath);
+    await backupFile(ymlPath, { mode: opts.simulate ? 'simulation' : 'normal' });
     const content = await fs.readFile(ymlPath, 'utf8');
     const stripped = stripLegacyMarker(content);
     try {

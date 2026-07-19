@@ -4,6 +4,7 @@
 const { program, Option } = require('commander');
 const chalk = require('chalk');
 const { detectLocale, setLocale, t } = require('./core/i18n');
+const releaseManifest = require('../release-manifest.json');
 
 // Pre-parse --lang so that i18n is initialized before any subcommand action runs.
 // CLI arg wins over env vars; absent arg falls back to env / OS default.
@@ -35,14 +36,17 @@ ${chalk.cyan(' ██║     ██║   ██║██╔██╗ ██║  
 ${chalk.cyan(' ██║     ██║   ██║██║╚██╗██║   ██║   ██╔══╝   ██╔██╗ ██╔══██║')}
 ${chalk.cyan(' ╚██████╗╚██████╔╝██║ ╚████║   ██║   ███████╗██╔╝ ██╗██║  ██║')}
 ${chalk.cyan('  ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝')}
-${chalk.gray('  ' + t('banner.tagline') + ' / ' + t('banner.subtitle'))}  ${chalk.yellow('v1.0.0')}
+${chalk.gray('  ' + t('banner.tagline') + ' / ' + t('banner.subtitle'))}  ${chalk.yellow('v' + releaseManifest.cliVersion)}
 `;
 
 program
   .name('contexa')
   .description('Contexa CLI - AI-Native Zero Trust Security Platform')
-  .version('1.0.0')
-  .addOption(new Option('--lang <code>', 'Interface language (en|ko)').choices(['en', 'ko']));
+  .version(releaseManifest.cliVersion)
+  .addOption(new Option('--lang <code>', 'Interface language (en|ko)').choices(['en', 'ko']))
+  .addHelpText('after', '\nPrimary workflows:\n' + releaseManifest.primaryCommands
+    .map(command => '  ' + command)
+    .join('\n') + '\n');
 
 require('./commands/init')(program);
 require('./commands/mode')(program);
@@ -53,9 +57,16 @@ require('./commands/doctor')(program);
 require('./commands/reset')(program);
 require('./commands/ollama')(program);
 
-program.parse(process.argv);
-
-if (!process.argv.slice(2).length) {
-  console.log(banner);
-  program.outputHelp();
+async function main() {
+  if (!process.argv.slice(2).length) {
+    console.log(banner);
+    program.outputHelp();
+    return;
+  }
+  await program.parseAsync(process.argv);
 }
+
+main().catch((error) => {
+  console.error(chalk.red('  x ' + (error && error.message ? error.message : error)));
+  process.exitCode = 1;
+});

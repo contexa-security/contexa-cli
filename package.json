@@ -1,6 +1,6 @@
 {
   "name": "contexa-cli",
-  "version": "1.0.0",
+  "version": "0.1.1",
   "description": "Contexa CLI - AI-Native Zero Trust Security for Spring Boot",
   "main": "src/index.js",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "src/",
+    "release-manifest.json",
     "sea-config.json",
     "README.md"
   ],

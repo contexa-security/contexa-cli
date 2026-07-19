@@ -55,10 +55,10 @@ function printPlannedChanges(answers, project, paths) {
   console.log(chalk.cyan(`\n  ${msg('planned.title', 'Planned changes')}`));
   const items = [];
   if (answers.integrationMode === 'standalone') {
-    items.push(`${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
+    items.push(`CREATE: ${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
   } else {
-    items.push(`${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
-    items.push(`${msg('planned.applyMinimal', 'Apply minimal Contexa settings')}: ${paths.ymlPath}`);
+    items.push(`${paths.buildExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
+    items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply minimal Contexa settings')}: ${paths.ymlPath}`);
   }
   if (answers.enableAiSecurity) {
     items.push(`${msg('planned.enableAi', 'Enable AI security settings')} (${answers.llmProviders.join(', ')})`);
@@ -71,8 +71,17 @@ function printPlannedChanges(answers, project, paths) {
     items.push(msg('planned.aiDisabled', 'AI security remains disabled for now'));
   }
   if (answers.infra !== 'skip') {
-    items.push(msg('planned.createInfra', 'Create selected infrastructure files'));
+    items.push(`${paths.composeExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.createInfra', 'Create selected infrastructure files')}: ${paths.composePath}`);
+    items.push(`DOCKER: ${answers.startDocker ? 'START selected infrastructure services' : 'SKIP service start (--no-docker)'}`);
+  } else {
+    items.push('DOCKER: NONE');
   }
+  if (paths.geoIpPath) {
+    items.push(`${paths.geoIpExists ? 'KEEP' : (paths.geoIpLocalSource ? 'COPY' : 'DOWNLOAD')}: GeoLite2-City.mmdb: ${paths.geoIpPath}`);
+  } else {
+    items.push('EXTERNAL DOWNLOAD: NONE');
+  }
+  items.push('DELETE: NONE');
   for (const item of items) console.log(chalk.gray(`    - ${item}`));
 }
 function downloadFile(url, dest) {
@@ -100,7 +109,16 @@ const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
 const { t, setLocale, getLocale } = require('../core/i18n');
-const { recordChange, recordInstallMetadata } = require('../core/manifest');
+const {
+  INSTALL_MODES,
+  beginInstallTransaction,
+  commitInstallTransaction,
+  loadManifest,
+  prepareExternalFileChange,
+  recordExternalFileChange,
+  recordChange,
+  rollbackInstallTransaction,
+} = require('../core/manifest');
 
 module.exports = function (program) {
   program
@@ -147,6 +165,14 @@ module.exports = function (program) {
     .option('--infra-dir <path>', 'Override the contexa-owned directory used for docker-compose.yml')
     .option('--check', 'Run environment diagnostic check and exit')
     .action(async (opts) => {
+      const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
+      let installTransactionId = null;
+      let transactionProjectName = null;
+      let transactionInfraDir = null;
+      let transactionInfraExisted = false;
+      let transactionComposeExisted = false;
+      let transactionDockerStarted = false;
+      try {
       // --simulate isolates this run from any other contexa stack on the same
       // host: separate compose project name, separate container names, and
       // separate ports. Implemented as preset env vars consumed by both the
@@ -232,13 +258,13 @@ module.exports = function (program) {
           console.log(chalk.yellow(`\n  ! Pre-installation checks encountered issues.`));
           console.log(chalk.yellow(`    Please run 'contexa doctor' for a full diagnostic report.`));
           if (opts.check) {
-            process.exit(1);
+            throw new Error('Pre-installation checks failed.');
           }
         } else {
           console.log(chalk.green(`  v Pre-installation checks passed.`));
           if (opts.check) {
             console.log(chalk.green(`\n  v Environment check successful. You can safely run 'contexa init'.\n`));
-            process.exit(0);
+            return;
           }
         }
         console.log('');
@@ -252,7 +278,7 @@ module.exports = function (program) {
       if (!project.isSpring) {
         console.log(chalk.red('  x ' + t('init.notSpring')));
         console.log(chalk.gray('    ' + t('init.notSpring.hint') + '\n'));
-        process.exit(1);
+        throw new Error('The target directory is not a Spring Boot project.');
       }
 
       console.log(chalk.green('  v ' + t('init.detected')));
@@ -264,6 +290,7 @@ module.exports = function (program) {
       const cliProjectName = opts.simulate
         ? 'ctxa-sim'
         : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
+      transactionProjectName = cliProjectName;
       if (!process.env.CONTEXA_PROJECT) {
         process.env.CONTEXA_PROJECT = cliProjectName;
       }
@@ -294,7 +321,7 @@ module.exports = function (program) {
         if (!opts.force && !opts.yes) {
           console.log(chalk.yellow('  ' + t('init.alreadyDetected')));
           console.log(chalk.gray('    ' + t('init.alreadyDetected.hint') + '\n'));
-          process.exit(0);
+          return;
         }
         console.log(chalk.yellow('  ' + t('init.alreadyDetected.update') + '\n'));
       }
@@ -527,7 +554,7 @@ module.exports = function (program) {
       answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
       if (answers.autoAnnotate && !aiProviderSelected(answers)) {
         console.error(chalk.red('  x --auto-annotate requires an explicit AI provider. Re-run with --provider openai, anthropic, or ollama.'));
-        process.exit(1);
+        throw new Error('--auto-annotate requires an explicit AI provider.');
       }
       answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
 
@@ -549,21 +576,86 @@ module.exports = function (program) {
         || normalizePath(answers.infraDir, opts.dir)
         || null;
 
-      await recordInstallMetadata(opts.dir, {
+      const plannedYmlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
+      const plannedBuildPath = project.buildFilePath
+        || (project.buildTool === 'maven' ? path.join(opts.dir, 'pom.xml') : path.join(opts.dir, 'build.gradle'));
+      const plannedGeoIpPath = (answers.enableAiSecurity || answers.simulate)
+        ? path.join(opts.dir, 'contexa', installMode === INSTALL_MODES.SIMULATION ? 'simulation/data' : 'data', 'GeoLite2-City.mmdb')
+        : null;
+      const plannedInfraDir = answers.infra !== 'skip'
+        ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride })
+        : null;
+      const plannedComposePath = plannedInfraDir ? path.join(plannedInfraDir, 'docker-compose.yml') : null;
+      const plannedYmlExists = await fs.pathExists(plannedYmlPath);
+      const plannedBuildExists = await fs.pathExists(plannedBuildPath);
+      const plannedGeoIpExists = plannedGeoIpPath ? await fs.pathExists(plannedGeoIpPath) : false;
+      const plannedComposeExists = plannedComposePath ? await fs.pathExists(plannedComposePath) : false;
+      const plannedFiles = answers.integrationMode === 'standalone'
+        ? [{ filePath: standaloneDir, kind: 'standalone-output', generated: true }]
+        : [
+            { filePath: plannedYmlPath, kind: 'application-yml' },
+            { filePath: plannedBuildPath, kind: 'build-file' },
+          ];
+      if (plannedGeoIpPath) {
+        plannedFiles.push({ filePath: plannedGeoIpPath, kind: 'geoip-data', generated: true });
+      }
+
+      printPlannedChanges(answers, project, answers.integrationMode === 'standalone'
+        ? {
+            standaloneDir,
+            composePath: plannedComposePath,
+            composeExists: plannedComposeExists,
+            geoIpPath: plannedGeoIpPath,
+            geoIpExists: plannedGeoIpExists,
+            geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
+          }
+        : {
+            ymlPath: plannedYmlPath,
+            buildPath: plannedBuildPath,
+            ymlExists: plannedYmlExists,
+            buildExists: plannedBuildExists,
+            composePath: plannedComposePath,
+            composeExists: plannedComposeExists,
+            geoIpPath: plannedGeoIpPath,
+            geoIpExists: plannedGeoIpExists,
+            geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
+          });
+
+      let plannedInfraIssues = [];
+      if (answers.infra !== 'skip') {
+        plannedInfraIssues = await inspectInfra({
+          infra: answers.infra,
+          startDocker: answers.startDocker,
+          includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
+        });
+        for (const issue of plannedInfraIssues) {
+          const paint = issue.severity === 'error' ? chalk.red : issue.severity === 'warning' ? chalk.yellow : chalk.gray;
+          console.log(paint(`  ${issue.severity === 'error' ? 'x' : issue.severity === 'warning' ? '!' : 'i'} ${issue.message}`));
+          for (const hint of (issue.hint || [])) console.log(chalk.gray(`    - ${hint}`));
+        }
+        const preflightErrors = plannedInfraIssues.filter(issue => issue.severity === 'error');
+        if (preflightErrors.length > 0) {
+          throw new Error('Infrastructure preflight failed before project files were changed.');
+        }
+      }
+
+      installTransactionId = await beginInstallTransaction(opts.dir, {
         projectName: cliProjectName,
         integrationMode: answers.integrationMode,
         infra: answers.infra,
-        infraDir: answers.infra !== 'skip' ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride }) : null,
+        infraDir: plannedInfraDir,
         simInfraDir: opts.simulate ? resolveInfraDir('ctxa-sim', { infraDir: infraDirOverride }) : null,
         aiSecurityEnabled: !!answers.enableAiSecurity,
-      });
+      }, installMode, plannedFiles);
+      const installManifest = await loadManifest(opts.dir, installMode);
+      const installationId = installManifest.metadata.installationId;
 
       if (answers.enableAiSecurity || answers.simulate) {
         // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
         const startGeo = process.hrtime.bigint();
         const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
         try {
-          const targetDataDir = path.join(opts.dir, 'contexa', 'data');
+          const targetDataDir = path.dirname(plannedGeoIpPath);
           const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
           await fs.ensureDir(targetDataDir);
 
@@ -571,19 +663,20 @@ module.exports = function (program) {
             const localSource = process.env.CONTEXA_GEOLITE2_SOURCE_PATH;
             if (localSource && await fs.pathExists(localSource)) {
               await fs.copy(localSource, targetMmdbPath);
-              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' });
+              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' }, installMode);
               sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
             } else {
               const downloadUrl = 'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb';
               await downloadFile(downloadUrl, targetMmdbPath);
-              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' });
+              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' }, installMode);
               sGeo.succeed(`GeoLite2-City.mmdb downloaded successfully (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
             }
           } else {
             sGeo.succeed('GeoLite2-City.mmdb already present in data directory');
           }
         } catch (err) {
-          sGeo.warn(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
+          sGeo.fail(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
+          throw err;
         }
       }
 
@@ -602,7 +695,6 @@ module.exports = function (program) {
       if (answers.integrationMode === 'standalone') {
         console.log(chalk.cyan('\n  ' + t('standalone.intro')));
         console.log(chalk.gray(`  ${t('standalone.location')} ${standaloneDir}`));
-        printPlannedChanges(answers, project, { standaloneDir });
         const startStandalone = process.hrtime.bigint();
         const sStandalone = ora(t('step.writingStandalone')).start();
         try {
@@ -612,7 +704,7 @@ module.exports = function (program) {
           standaloneResult = await injectStandalone(standaloneDir, project, {
             ...answers, force: !!opts.force,
           });
-          await recordChange(opts.dir, standaloneDir, { kind: 'standalone-output', generated: true, reason: 'Contexa standalone configuration output' });
+          await recordChange(opts.dir, standaloneDir, { kind: 'standalone-output', generated: true, reason: 'Contexa standalone configuration output' }, installMode);
           const elapsed = Number(process.hrtime.bigint() - startStandalone) / 1e6;
           sStandalone.succeed(`${t('step.standaloneWritten')} (${elapsed.toFixed(0)}ms)`);
         } catch (err) {
@@ -621,7 +713,7 @@ module.exports = function (program) {
           console.log(chalk.red('  x Standalone artifacts could not be written.'));
           console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
           console.log('');
-          process.exit(1);
+          throw err;
         }
       } else {
         // Merge mode: yml + build mutation as a SINGLE transaction. If any step
@@ -633,18 +725,14 @@ module.exports = function (program) {
           || (project.buildTool === 'maven'
             ? path.join(opts.dir, 'pom.xml')
             : path.join(opts.dir, 'build.gradle'));
-        let ymlChanged = false;
-        let buildChanged = false;
         const ymlExistedBefore = await fs.pathExists(ymlPath);
-        printPlannedChanges(answers, project, { ymlPath, buildPath });
 
         // 3. Inject application.yml
         const startYml = process.hrtime.bigint();
         const s1 = ora(t('step.updatingYml')).start();
         try {
           await injectYml(ymlPath, answers);
-          ymlChanged = true;
-          await recordChange(opts.dir, ymlPath, { kind: 'application-yml', generated: !ymlExistedBefore, reason: answers.enableAiSecurity ? 'Contexa AI security configuration' : 'Contexa starter configuration' });
+          await recordChange(opts.dir, ymlPath, { kind: 'application-yml', generated: !ymlExistedBefore, reason: answers.enableAiSecurity ? 'Contexa AI security configuration' : 'Contexa starter configuration' }, installMode);
           const elapsed = Number(process.hrtime.bigint() - startYml) / 1e6;
           s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
         } catch (err) {
@@ -653,7 +741,7 @@ module.exports = function (program) {
           console.log(chalk.red('  x application.yml could not be updated.'));
           console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
           console.log('');
-          process.exit(1);
+          throw err;
         }
 
 
@@ -673,10 +761,10 @@ module.exports = function (program) {
             if (answers.enableAiSecurity && answers.autoAnnotate) {
               try {
                 const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
-                const injected = await injectEnableAiSecurity(opts.dir);
+                const injected = await injectEnableAiSecurity(opts.dir, { mode: installMode });
                 if (injected && injected.changed) {
                   sAnnot.succeed('@EnableAISecurity injected into main class');
-                  await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' });
+                  await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' }, installMode);
                   project.hasEnableAiSecurity = true;
                   aiAnnotationApplied = true;
                 } else {
@@ -684,18 +772,18 @@ module.exports = function (program) {
                   sAnnot.info('@EnableAISecurity already present or main class not found');
                 }
               } catch (err) {
-                console.log(chalk.yellow(`  ! Could not automatically inject @EnableAISecurity: ${err.message}`));
+                console.log(chalk.red(`  x Could not automatically inject @EnableAISecurity: ${err.message}`));
+                throw err;
               }
             }
 
             const startDep = process.hrtime.bigint();
             const s2 = ora(t('step.addingDep')).start();
             const ok = project.buildTool === 'maven'
-              ? await injectMavenDep(buildPath)
-              : await injectGradleDep(buildPath);
+              ? await injectMavenDep(buildPath, { mode: installMode })
+              : await injectGradleDep(buildPath, { mode: installMode });
             if (ok) {
-              buildChanged = true;
-              await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Contexa starter dependency' });
+              await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Contexa starter dependency' }, installMode);
             }
             const elapsed = Number(process.hrtime.bigint() - startDep) / 1e6;
             ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
@@ -704,10 +792,9 @@ module.exports = function (program) {
             if (answers.enableAiSecurity && aiProviderSelected(answers)) {
               const startAiDep = process.hrtime.bigint();
               const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
-              const addedAi = await injectSpringAiDeps(buildPath, answers.llmProviders);
+              const addedAi = await injectSpringAiDeps(buildPath, answers.llmProviders, { mode: installMode });
               if (addedAi) {
-                buildChanged = true;
-                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit AI provider dependencies' });
+                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit AI provider dependencies' }, installMode);
               }
               aiDependenciesProcessed = true;
               const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
@@ -717,10 +804,9 @@ module.exports = function (program) {
             if (answers.infra === 'distributed') {
               const startDistDep = process.hrtime.bigint();
               const s2b = ora(t('step.addingDistributedDeps')).start();
-              const added = await injectDistributedDeps(buildPath);
+              const added = await injectDistributedDeps(buildPath, { mode: installMode });
               if (added) {
-                buildChanged = true;
-                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit distributed infrastructure dependencies' });
+                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit distributed infrastructure dependencies' }, installMode);
               }
               const elapsedDist = Number(process.hrtime.bigint() - startDistDep) / 1e6;
               added ? s2b.succeed(`${t('step.distributedDepsAdded')} (${elapsedDist.toFixed(0)}ms)`) : s2b.info(t('step.distributedDepsPresent'));
@@ -730,8 +816,7 @@ module.exports = function (program) {
             console.log(chalk.red('  x Build dependency injection failed.'));
             console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
             console.log('');
-            await rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged, opts.dir);
-            process.exit(1);
+            throw err;
           }
         }
       }
@@ -755,16 +840,24 @@ module.exports = function (program) {
         }
 
         infraDir = resolveInfraDir(cliProjectName, { infraDir: infraDirOverride });
+        transactionInfraDir = infraDir;
+        transactionInfraExisted = await fs.pathExists(infraDir);
+        transactionComposeExisted = await fs.pathExists(path.join(infraDir, 'docker-compose.yml'));
         console.log(chalk.gray(`  Infrastructure files location: ${infraDir}`));
         console.log(chalk.gray('  Database schema and seed data will be installed by contexa-iam when the application starts.'));
 
         const startCompose = process.hrtime.bigint();
         const s3 = ora(t('step.generatingCompose')).start();
+        const composePath = path.join(infraDir, 'docker-compose.yml');
+        await prepareExternalFileChange(opts.dir, installTransactionId, composePath, infraDir, installMode);
         await generateDockerCompose(infraDir, {
           ...answers,
           projectName: cliProjectName,
+          mode: installMode,
+          installationId,
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
         });
+        await recordExternalFileChange(opts.dir, installTransactionId, composePath, installMode);
         const elapsedCompose = Number(process.hrtime.bigint() - startCompose) / 1e6;
         s3.succeed((answers.infra === 'distributed'
           ? t('step.composeGenerated.distributed')
@@ -773,33 +866,7 @@ module.exports = function (program) {
         // 5b. Pre-flight checks before docker compose up. We do this even when
         // --no-docker is set so the user knows what conflicts to expect when
         // they run compose manually later.
-        const sPre = ora('Running infrastructure pre-flight checks').start();
-        const issues = await inspectInfra({
-          infra: answers.infra,
-          startDocker: answers.startDocker,
-          includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
-        });
-        sPre.stop();
-        const errs  = issues.filter(i => i.severity === 'error');
-        const warns = issues.filter(i => i.severity === 'warning');
-        const infos = issues.filter(i => i.severity === 'info');
-        for (const i of errs) {
-          console.log(chalk.red(`  x ${i.message}`));
-          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
-        }
-        for (const i of warns) {
-          console.log(chalk.yellow(`  ! ${i.message}`));
-          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
-        }
-        for (const i of infos) {
-          console.log(chalk.gray(`  i ${i.message}`));
-          for (const h of (i.hint || [])) console.log(chalk.gray(`    - ${h}`));
-        }
-        if (errs.length > 0) {
-          console.log(chalk.red('\n  Infrastructure cannot start. Resolve the errors above and re-run "contexa init".'));
-          console.log('');
-          process.exit(1);
-        }
+        const issues = plannedInfraIssues;
 
         const servicesToUp = issues.servicesToUp || [];
         const skippedServices = issues.skippedServices || [];
@@ -820,6 +887,7 @@ module.exports = function (program) {
               const upResult = dockerCompose(['up', '-d', ...servicesToUp], { cwd: infraDir, stdio: 'inherit' });
               if (upResult.error) throw upResult.error;
               if (upResult.status !== 0) throw new Error(`docker compose up exited with status ${upResult.status}`);
+              transactionDockerStarted = true;
               s4.succeed(t('step.dockerStarted'));
 
             // 7. Pull Ollama models (only if Ollama was explicitly included)
@@ -854,20 +922,23 @@ module.exports = function (program) {
                     await pullOllamaModelWithProgress(ollamaPort, embedModel, s6, t('step.pullingEmbedding', embedModel).replace('...', ''));
                     s6.succeed(t('step.embeddingPulled'));
                   } else {
-                    s5.warn(t('step.ollamaNotReady', chatModel));
-                    console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
+                    throw new Error(`Ollama was not ready before the configured deadline: ${ollamaContainer}`);
                   }
                 } catch (e) {
-                  s5.warn(t('step.modelPullFailed', chatModel));
-                  console.log(chalk.gray(`    To retry manually: docker exec ${ollamaContainer} ollama pull ${chatModel}`));
+                  s5.fail(t('step.modelPullFailed', chatModel));
+                  throw e;
                 }
               }
             } catch (e) {
               s4.fail(t('step.dockerFailed'));
+              throw e;
             }
         }
       }
     }
+
+      await commitInstallTransaction(opts.dir, installTransactionId, installMode);
+      installTransactionId = null;
 
       // 8. Done - show visual Guide Board for FTX optimization
       // 8. Done - show visual guide
@@ -951,6 +1022,51 @@ module.exports = function (program) {
 
       console.log(chalk.cyan('\n  ============================================================\n'));
 
+      } catch (error) {
+        const infrastructureRollbackErrors = [];
+        if (transactionDockerStarted && transactionInfraDir && transactionProjectName) {
+          try {
+            const downResult = dockerCompose(['-p', transactionProjectName, 'down', '-v'], {
+              cwd: transactionInfraDir,
+              stdio: 'pipe',
+            });
+            if (downResult.error || downResult.status !== 0) {
+              throw downResult.error || new Error(`docker compose down exited with status ${downResult.status}`);
+            }
+          } catch (cleanupError) {
+            infrastructureRollbackErrors.push(`Docker rollback: ${cleanupError.message}`);
+          }
+        }
+        if (transactionInfraDir) {
+          try {
+            const composePath = path.join(transactionInfraDir, 'docker-compose.yml');
+            const composeBackup = composePath + '.bak';
+            if (transactionComposeExisted && await fs.pathExists(composeBackup)) {
+              await fs.copy(composeBackup, composePath, { overwrite: true });
+              await fs.remove(composeBackup);
+            } else if (!transactionComposeExisted && await fs.pathExists(composePath)) {
+              await fs.remove(composePath);
+            }
+            if (!transactionInfraExisted && await fs.pathExists(transactionInfraDir)) {
+              await fs.remove(transactionInfraDir);
+            }
+          } catch (cleanupError) {
+            infrastructureRollbackErrors.push(`Infrastructure file rollback: ${cleanupError.message}`);
+          }
+        }
+        if (installTransactionId) {
+          const rollback = await rollbackInstallTransaction(opts.dir, installTransactionId, installMode);
+          if (!rollback.rolledBack) {
+            infrastructureRollbackErrors.push(...rollback.failures);
+          } else {
+            console.log(chalk.yellow('  ! Init failed. All transaction-tracked project changes were restored.'));
+          }
+        }
+        if (infrastructureRollbackErrors.length > 0) {
+          throw new Error(`${error.message}; automatic rollback failed: ${infrastructureRollbackErrors.join('; ')}`);
+        }
+        throw error;
+      }
     });
 };
 
@@ -1026,60 +1142,4 @@ function pullOllamaModelWithProgress(port, modelName, spinnerInstance, stepTextT
 // obviously malformed input so the failure mode is a clean CLI error.
 function isValidOllamaModel(s) {
   return typeof s === 'string' && s.length > 0 && s.length <= 200 && /^[A-Za-z0-9._:/\-]+$/.test(s);
-}
-
-// Restore application.yml and the build file from their .bak siblings when a
-// later step in the (yml + build) transaction fails. The .bak files are left
-// in place after restore so the operator can still inspect what we attempted.
-async function rollbackOnFailure(ymlPath, ymlChanged, buildPath, buildChanged, projectDir) {
-  const restored = [];
-  if (buildChanged) {
-    const bak1 = buildPath + '.bak';
-    const bak2 = projectDir ? path.join(projectDir, 'contexa', 'bak', path.relative(projectDir, buildPath)) : null;
-    const bak = (await fs.pathExists(bak1)) ? bak1 : (bak2 && (await fs.pathExists(bak2)) ? bak2 : null);
-    if (bak) {
-      try {
-        await fs.copy(bak, buildPath, { overwrite: true });
-        restored.push(path.basename(buildPath));
-      } catch (e) {
-        console.log(chalk.red(`    Failed to restore ${path.basename(buildPath)}: ${e.message}`));
-      }
-    }
-  }
-  if (ymlChanged) {
-    const bak1 = ymlPath + '.bak';
-    const bak2 = projectDir ? path.join(projectDir, 'contexa', 'bak', path.relative(projectDir, ymlPath)) : null;
-    const bak = (await fs.pathExists(bak1)) ? bak1 : (bak2 && (await fs.pathExists(bak2)) ? bak2 : null);
-    if (bak) {
-      try {
-        await fs.copy(bak, ymlPath, { overwrite: true });
-        restored.push(path.basename(ymlPath));
-      } catch (e) {
-        console.log(chalk.red(`    Failed to restore ${path.basename(ymlPath)}: ${e.message}`));
-      }
-    }
-  }
-  // Clean up backups dir if empty or after restore
-  if (projectDir) {
-    try {
-      const backupsDir = path.join(projectDir, 'contexa', 'bak');
-      if (await fs.pathExists(backupsDir)) {
-        await fs.remove(backupsDir);
-        const parentContexa = path.join(projectDir, 'contexa');
-        if (await fs.pathExists(parentContexa) && (await fs.readdir(parentContexa)).length === 0) {
-          await fs.remove(parentContexa);
-        }
-      }
-    } catch (e) {
-      // Ignore
-    }
-  }
-  if (restored.length > 0) {
-    console.log(chalk.yellow('  ! Rolled back: ' + restored.join(', ')));
-    console.log(chalk.gray('    Your project files have been restored to their pre-init state.'));
-    console.log('');
-  } else {
-    console.log(chalk.yellow('  ! No automatic rollback was performed (no .bak files found or no changes made).'));
-    console.log('');
-  }
 }

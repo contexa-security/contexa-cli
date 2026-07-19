@@ -6,16 +6,21 @@
 
 const path = require('path');
 const fs = require('fs-extra');
+const releaseManifest = require('../../../release-manifest.json');
 
-const CONTEXA_GROUP_ID = 'ai.ctxa';
-const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
-const CONTEXA_VERSION = '0.1.0-SNAPSHOT';
+const CONTEXA_GROUP_ID = releaseManifest.starter.groupId;
+const CONTEXA_ARTIFACT_ID = releaseManifest.starter.artifactId;
+const CONTEXA_VERSION = releaseManifest.starter.version;
 
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function backupFile(filePath) {
+async function backupFile(filePath, options = {}) {
+  const mode = typeof options === 'string' ? options : options.mode;
+  const stateSegments = mode === 'simulation'
+    ? ['contexa', 'simulation', 'bak']
+    : ['contexa', 'bak'];
   let currentDir = path.dirname(filePath);
   let projectRoot = null;
   
@@ -37,7 +42,7 @@ async function backupFile(filePath) {
   }
 
   const relativePath = path.relative(projectRoot, filePath);
-  const backupDest = path.join(projectRoot, 'contexa', 'bak', relativePath);
+  const backupDest = path.join(projectRoot, ...stateSegments, relativePath);
   
   // Preserve the initial clean state. If backup already exists, do not overwrite it.
   if (await fs.pathExists(backupDest)) {

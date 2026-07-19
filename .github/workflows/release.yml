@@ -34,6 +34,11 @@ jobs:
 
       - run: npm install
 
+      - name: Validate release contract
+        shell: bash
+        run: |
+          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter')"
+
       - name: Run unit tests
         run: npm test
 
@@ -102,6 +107,7 @@ jobs:
             ```
             The installer verifies a SHA-256 digest published next to each binary.
           files: |
+            release-manifest.json
             dist/contexa-linux-x64/contexa-linux-x64
             dist/contexa-linux-x64/contexa-linux-x64.sha256
             dist/contexa-macos-arm64/contexa-macos-arm64

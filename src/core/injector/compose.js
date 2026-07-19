@@ -23,6 +23,11 @@ const { sanitizeProjectName } = require('../project');
 async function generateDockerCompose(infraDir, opts = {}) {
   const { infra = 'standalone', includeOllama = false, projectName = 'contexa' } = opts;
   const defaultProjectName = sanitizeProjectName(projectName || 'contexa');
+  const mode = opts.mode === 'simulation' ? 'simulation' : 'normal';
+  const installationId = String(opts.installationId || 'legacy-untracked');
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(installationId)) {
+    throw new Error('installationId contains unsupported Docker label characters');
+  }
   await fs.ensureDir(infraDir);
   const composePath = path.join(infraDir, 'docker-compose.yml');
 
@@ -52,9 +57,15 @@ async function generateDockerCompose(infraDir, opts = {}) {
 #   CONTEXA_KAFKA_PLATFORM_VERSION confluentinc cp-* version     (default 7.4.0)
 name: \${CONTEXA_PROJECT:-${defaultProjectName}}
 
+x-contexa-ownership: &contexa-ownership
+  io.ctxa.owner: contexa-cli
+  io.ctxa.mode: ${mode}
+  io.ctxa.installation-id: ${installationId}
+
 services:
   # PostgreSQL with PGVector
   postgres:
+    labels: *contexa-ownership
     image: pgvector/pgvector:\${CONTEXA_PGVECTOR_IMAGE_TAG:-pg16}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-postgres
     environment:
@@ -80,6 +91,7 @@ services:
   # Default tag is "latest" for evaluation. Production deployments MUST set
   # CONTEXA_OLLAMA_IMAGE_TAG to a specific version for reproducibility.
   ollama:
+    labels: *contexa-ownership
     image: ollama/ollama:\${CONTEXA_OLLAMA_IMAGE_TAG:-latest}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-ollama
     ports:
@@ -102,6 +114,7 @@ services:
     content += `
   # Redis - Session store, cache, distributed locks (PoC/demo only)
   redis:
+    labels: *contexa-ownership
     image: redis:\${CONTEXA_REDIS_IMAGE_TAG:-7.2-alpine}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-redis
     ports:
@@ -118,6 +131,7 @@ services:
 
   # Zookeeper - Kafka coordinator
   zookeeper:
+    labels: *contexa-ownership
     image: confluentinc/cp-zookeeper:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-zookeeper
     environment:
@@ -137,6 +151,7 @@ services:
 
   # Kafka - Event streaming
   kafka:
+    labels: *contexa-ownership
     image: confluentinc/cp-kafka:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-kafka
     depends_on:
@@ -168,18 +183,28 @@ services:
   // Volumes
   content += `
 volumes:
-  pgdata:`;
+  pgdata:
+    labels: *contexa-ownership`;
   if (includeOllama) {
     content += `
-  ollama-data:`;
+  ollama-data:
+    labels: *contexa-ownership`;
   }
   if (infra === 'distributed') {
     content += `
   redis-data:
+    labels: *contexa-ownership
   zookeeper-data:
-  kafka-data:`;
+    labels: *contexa-ownership
+  kafka-data:
+    labels: *contexa-ownership`;
   }
-  content += '\n';
+  content += `
+
+networks:
+  default:
+    labels: *contexa-ownership
+`;
 
   await fs.writeFile(composePath, content);
   return composePath;
