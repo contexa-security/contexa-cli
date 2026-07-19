@@ -77,10 +77,18 @@ jobs:
         env:
           CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
           CONTEXA_PHASE6_EVIDENCE_DIR: ${{ github.workspace }}/phase6-evidence/state-transitions
-        run: node --test test/phase6-state-transitions.test.js
+        run: |
+          set -o pipefail
+          node --test test/phase6-state-transitions.test.js 2>&1 | tee phase6-evidence/state-transitions.tap
+
+      - name: Publish Phase 6 failure detail
+        if: failure() && contains(github.ref_name, '-phase6.')
+        shell: bash
+        run: |
+          node -e "const f=require('fs');const p='phase6-evidence/state-transitions.tap';const s=f.existsSync(p)?f.readFileSync(p,'utf8').slice(-12000):'TAP output is missing';const e=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error file=test/phase6-state-transitions.test.js,line=1,title=Phase 6 state transition failure::'+e)"
 
       - uses: actions/upload-artifact@v4
-        if: contains(github.ref_name, '-phase6.')
+        if: always() && contains(github.ref_name, '-phase6.')
         with:
           name: phase6-state-transition-evidence-${{ matrix.label }}
           path: phase6-evidence/
