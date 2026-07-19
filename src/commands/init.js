@@ -120,8 +120,11 @@ const {
   prepareExternalFileChange,
   recordExternalFileChange,
   recordChange,
+  recordInstallMetadata,
   rollbackInstallTransaction,
+  sha256FileSync,
 } = require('../core/manifest');
+const { buildDockerResourceContract } = require('../core/reset-service');
 
 module.exports = function (program) {
   program
@@ -568,8 +571,21 @@ module.exports = function (program) {
       const plannedBuildExists = await fs.pathExists(plannedBuildPath);
       const plannedGeoIpExists = plannedGeoIpPath ? await fs.pathExists(plannedGeoIpPath) : false;
       const plannedComposeExists = plannedComposePath ? await fs.pathExists(plannedComposePath) : false;
+      const plannedStandaloneBuildPath = answers.integrationMode === 'standalone'
+        ? path.join(standaloneDir, project.buildTool === 'maven' ? 'pom-fragment.xml' : 'contexa.gradle')
+        : null;
+      const plannedStandaloneYmlPath = answers.integrationMode === 'standalone'
+        ? path.join(standaloneDir, 'application.yml')
+        : null;
+      const plannedStandaloneYmlExists = plannedStandaloneYmlPath
+        ? await fs.pathExists(plannedStandaloneYmlPath) : false;
+      const plannedStandaloneBuildExists = plannedStandaloneBuildPath
+        ? await fs.pathExists(plannedStandaloneBuildPath) : false;
       const plannedFiles = answers.integrationMode === 'standalone'
-        ? [{ filePath: standaloneDir, kind: 'standalone-output', generated: true }]
+        ? [
+            { filePath: plannedStandaloneYmlPath, kind: 'standalone-config', generated: !plannedStandaloneYmlExists },
+            { filePath: plannedStandaloneBuildPath, kind: 'standalone-build', generated: !plannedStandaloneBuildExists },
+          ]
         : [
             { filePath: plannedBuildPath, kind: 'build-file' },
             ...(shouldWriteHostConfig ? [{ filePath: plannedYmlPath, kind: 'application-yml' }] : []),
@@ -687,7 +703,14 @@ module.exports = function (program) {
           standaloneResult = await injectStandalone(standaloneDir, project, {
             ...answers, force: !!opts.force,
           });
-          await recordChange(opts.dir, standaloneDir, { kind: 'standalone-output', generated: true, reason: 'Contexa standalone configuration output' }, installMode);
+          await recordChange(opts.dir, standaloneResult.ymlPath, {
+            kind: 'standalone-config', generated: plannedFiles[0].generated,
+            reason: 'Contexa standalone configuration output',
+          }, installMode);
+          await recordChange(opts.dir, standaloneResult.buildFragmentPath, {
+            kind: 'standalone-build', generated: plannedFiles[1].generated,
+            reason: 'Contexa standalone build output',
+          }, installMode);
           const elapsed = Number(process.hrtime.bigint() - startStandalone) / 1e6;
           sStandalone.succeed(`${t('step.standaloneWritten')} (${elapsed.toFixed(0)}ms)`);
         } catch (err) {
@@ -870,6 +893,15 @@ module.exports = function (program) {
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
         });
         await recordExternalFileChange(opts.dir, installTransactionId, composePath, installMode);
+        await recordInstallMetadata(opts.dir, {
+          dockerResources: buildDockerResourceContract(cliProjectName, {
+            infra: answers.infra,
+            includeOllama: includesOllama,
+            mode: installMode,
+            installationId,
+          }),
+          composeChecksum: sha256FileSync(composePath),
+        }, installMode);
         const elapsedCompose = Number(process.hrtime.bigint() - startCompose) / 1e6;
         s3.succeed((answers.infra === 'distributed'
           ? t('step.composeGenerated.distributed')

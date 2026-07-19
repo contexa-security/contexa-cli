@@ -530,9 +530,12 @@ test('init provenance distinguishes user starter and preserves post-init user ch
     assert.deepEqual(await fs.readFile(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL)), firstManifestBytes);
 
     const resetCliOwned = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
-    assert.notEqual(resetCliOwned.status, 0);
-    assert.match(resetCliOwned.stdout, /Skipped user-modified file/);
-    assert.deepEqual(await fs.readFile(cliOwned.build), customerBuild);
+    assert.equal(resetCliOwned.status, 0, resetCliOwned.stderr + resetCliOwned.stdout);
+    assert.match(resetCliOwned.stdout, /preserved: build\.gradle/);
+    const mergedBuild = await fs.readFile(cliOwned.build, 'utf8');
+    assert.equal(mergedBuild.includes('spring-boot-starter-contexa'), false);
+    assert.equal(mergedBuild.includes('// customer change after init'), true);
+    assert.equal(await fs.pathExists(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL)), false);
 
     const preinstalled = userOwned.originalBuild.replace(
       `implementation 'org.springframework.boot:spring-boot-starter-web'`,
@@ -567,8 +570,8 @@ test('reset retry accepts a file already restored before a previous partial fail
     await fs.writeFile(fixture.build, fixture.originalBuild, 'utf8');
     const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', fixture.project], { encoding: 'utf8' });
     assert.equal(reset.status, 0, reset.stderr + reset.stdout);
-    assert.match(reset.stdout, /Already restored/);
-    assert.doesNotMatch(reset.stdout, /Skipped user-modified file/);
+    assert.match(reset.stdout, /restored: build\.gradle - already at original state/);
+    assert.doesNotMatch(reset.stdout, /conflict:|failed:/);
     assert.equal(await fs.readFile(fixture.build, 'utf8'), fixture.originalBuild);
     assert.equal(await fs.pathExists(manifestPath(fixture.project, INSTALL_MODES.NORMAL)), false);
   } finally {

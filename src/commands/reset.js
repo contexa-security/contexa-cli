@@ -6,16 +6,14 @@ const path = require('path');
 const fs = require('fs-extra');
 const inquirer = require('inquirer');
 const { spawnSync } = require('child_process');
-const { dockerCompose, isDockerCliInstalled } = require('../core/docker');
-const { resolveInfraDir } = require('../core/project');
-const { detectSpringProject } = require('../core/detector');
+const { dockerCompose, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
 const { t } = require('../core/i18n');
-
-const { findBackupFiles } = require('../core/cleanup');
-const { INSTALL_MODES, backupRoot, loadManifest, manifestPath, sha256FileSync } = require('../core/manifest');
-
-const COMPOSE_SERVICES = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka'];
-const COMPOSE_VOLUMES = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'kafka-data'];
+const {
+  INSTALL_MODES, backupRoot, loadManifest, manifestPath, saveManifest,
+} = require('../core/manifest');
+const {
+  auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
+} = require('../core/reset-service');
 
 function dockerTry(args, opts = {}) {
   try {
@@ -25,48 +23,35 @@ function dockerTry(args, opts = {}) {
   }
 }
 
-function collectDockerNames(args) {
-  const result = dockerTry(args);
-  if (result.error || result.status !== 0 || !result.stdout) return [];
-  return result.stdout
-    .toString()
-    .split(/\r?\n/)
-    .map(name => name.trim())
-    .filter(Boolean);
+function inspectDockerLabels(type, name) {
+  const args = type === 'container'
+    ? ['inspect', '--type', 'container', '--format', '{{json .Config.Labels}}', name]
+    : [type, 'inspect', '--format', '{{json .Labels}}', name];
+  const result = dockerTry(args, { stdio: 'pipe' });
+  if (result.error || result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout.toString().trim() || '{}') || {};
+  } catch {
+    throw new Error(`Docker ${type} labels are unreadable: ${name}`);
+  }
 }
 
-function forceCleanupComposeProject(projectName) {
-  if (!projectName) return;
-
-  const containers = new Set(collectDockerNames([
-    'ps',
-    '-a',
-    '--filter',
-    `label=com.docker.compose.project=${projectName}`,
-    '--format',
-    '{{.Names}}'
-  ]));
-  for (const service of COMPOSE_SERVICES) {
-    containers.add(`${projectName}-${service}`);
+function assertExactInfraDir(expectedInfraDir, requestedInfraDir) {
+  if (!expectedInfraDir) throw new Error('The ownership manifest does not contain an infrastructure directory.');
+  const expected = path.resolve(expectedInfraDir);
+  if (requestedInfraDir && path.resolve(requestedInfraDir) !== expected) {
+    throw new Error(`--infra-dir does not match the manifest-owned directory: ${expected}`);
   }
-  for (const name of containers) {
-    dockerTry(['rm', '-f', name], { stdio: 'ignore' });
+  let current = expected;
+  while (true) {
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
+      throw new Error(`Infrastructure path contains a symbolic link: ${current}`);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
-
-  const volumes = new Set(collectDockerNames([
-    'volume',
-    'ls',
-    '--filter',
-    `label=com.docker.compose.project=${projectName}`,
-    '--format',
-    '{{.Name}}'
-  ]));
-  for (const volume of COMPOSE_VOLUMES) {
-    volumes.add(`${projectName}_${volume}`);
-  }
-  for (const name of volumes) {
-    dockerTry(['volume', 'rm', '-f', name], { stdio: 'ignore' });
-  }
+  return expected;
 }
 
 function composeEnv(projectName, extra = {}) {
@@ -91,10 +76,6 @@ function simulateComposeEnv() {
 }
 
 async function composeDown(projectName, infraDir, env) {
-  const composePath = path.join(infraDir, 'docker-compose.yml');
-  if (!fs.existsSync(composePath)) {
-    return { skipped: true, reason: `compose file not found: ${composePath}` };
-  }
   const result = dockerCompose(['-p', projectName, 'down', '-v'], { cwd: infraDir, stdio: 'pipe', env });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -104,89 +85,18 @@ async function composeDown(projectName, infraDir, env) {
   return { skipped: false };
 }
 
-function removeIfEmpty(dir) {
-  if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) {
-    fs.removeSync(dir);
-  }
+function mergeAudit(target, source) {
+  for (const status of Object.keys(target)) target[status].push(...(source[status] || []));
 }
 
-function fileChangedSinceInit(entry, originalFile) {
-  if (!entry || !entry.currentChecksum || !fs.existsSync(originalFile)) return false;
-  return sha256FileSync(originalFile) !== entry.currentChecksum;
-}
-
-function fileAlreadyRestored(entry, originalFile) {
-  if (!entry || !entry.originalChecksum || !fs.existsSync(originalFile)) return false;
-  return sha256FileSync(originalFile) === entry.originalChecksum;
-}
-
-async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
-  const backupsDir = backupRoot(projectDir, mode);
-  const manifest = await loadManifest(projectDir, mode);
-  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
-  const conflicts = [];
-
-  if (manifestFiles.length > 0) {
-    const sorted = [...manifestFiles].sort((a, b) => {
-      if (a.relativePath === 'contexa') return 1;
-      if (b.relativePath === 'contexa') return -1;
-      return b.relativePath.length - a.relativePath.length;
-    });
-
-    for (const entry of sorted) {
-      const originalFile = path.join(projectDir, entry.relativePath);
-      const backupPath = path.join(backupsDir, entry.relativePath);
-      if (entry.relativePath === 'contexa' && fs.existsSync(originalFile)) {
-        removeIfEmpty(originalFile);
-        continue;
-      }
-      if (fileAlreadyRestored(entry, originalFile)) {
-        console.log(chalk.gray(`    - Already restored: ${originalFile}`));
-        continue;
-      }
-      if (fileChangedSinceInit(entry, originalFile)) {
-        conflicts.push(entry.relativePath);
-        console.log(chalk.yellow(`    - Skipped user-modified file: ${originalFile}`));
-        continue;
-      }
-      if (fs.existsSync(backupPath)) {
-        fs.ensureDirSync(path.dirname(originalFile));
-        fs.copySync(backupPath, originalFile, { overwrite: true });
-        console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
-      } else if (entry.generated && fs.existsSync(originalFile)) {
-        fs.removeSync(originalFile);
-        console.log(chalk.gray(`    - Removed CLI-generated file: ${originalFile}`));
-      }
+function printAudit(audit) {
+  console.log(chalk.cyan('  Reset audit'));
+  for (const status of ['removed', 'restored', 'preserved', 'conflict', 'failed']) {
+    for (const item of audit[status]) {
+      const suffix = item.detail ? ` - ${item.detail}` : '';
+      console.log(chalk.gray(`    - ${status}: ${item.resource}${suffix}`));
     }
-
-    if (conflicts.length === 0) {
-      const mPath = manifestPath(projectDir, mode);
-      if (fs.existsSync(mPath)) fs.removeSync(mPath);
-      if (fs.existsSync(backupsDir)) fs.removeSync(backupsDir);
-      const parentContexa = path.join(projectDir, 'contexa');
-      if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
-    } else {
-      console.log(chalk.yellow('    - Manifest and backups were kept so you can review skipped files.'));
-    }
-    return { conflicts };
   }
-
-  const backupFiles = fs.existsSync(backupsDir) ? findBackupFiles(backupsDir) : [];
-  if (backupFiles.length > 0) {
-    for (const item of backupFiles) {
-      const originalFile = path.join(projectDir, item.relativePath);
-      fs.ensureDirSync(path.dirname(originalFile));
-      fs.copySync(item.backupPath, originalFile, { overwrite: true });
-      console.log(chalk.gray(`    - ${t('reset.restored', originalFile) || `Restored ${path.basename(originalFile)}`}`));
-    }
-    fs.removeSync(backupsDir);
-    const parentContexa = path.join(projectDir, 'contexa');
-    if (fs.existsSync(parentContexa)) removeIfEmpty(parentContexa);
-    return { conflicts };
-  }
-
-  console.log(chalk.yellow(`    - ${t('reset.noBackup') || 'No manifest or backup files found; project source files were not modified.'}`));
-  return { conflicts };
 }
 
 function resolveTargets(opts) {
@@ -224,7 +134,7 @@ function printResetPlan(targets, details) {
   }
   if (targets.code) {
     console.log(chalk.gray('    - Project files: restore only CLI-tracked changes from contexa/manifest.json backups'));
-    console.log(chalk.gray('      user-modified files are skipped and reported as conflicts'));
+    console.log(chalk.gray('      later user changes are preserved by 3-way restore; overlapping edits are reported as conflicts'));
   }
   if (targets.simulate && !targets.infra) {
     console.log(chalk.gray('    - Production/project Docker stack is not targeted by --simulate'));
@@ -272,8 +182,9 @@ module.exports = function (program) {
       const resetManifest = await loadManifest(projectDir, installMode);
       const projectName = resetManifest.metadata && resetManifest.metadata.projectName;
       let targets = resolveTargets(opts);
-      let dockerFailed = false;
       let resetHadIssues = false;
+      let infraCompleted = false;
+      const resetAudit = emptyAudit();
 
       if (!hasAnyTarget(targets)) {
         if (opts.yes) {
@@ -320,68 +231,53 @@ module.exports = function (program) {
         throw new Error('The ownership manifest does not contain a project name; infrastructure reset was refused.');
       }
 
+      const manifestInfraDir = resetManifest.metadata && resetManifest.metadata.infraDir;
       const planSimInfraDir = targets.simulate
-        ? ((resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
-          ? resetManifest.metadata.simInfraDir
-          : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir }))
-        : null;
+        ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
       const planInfraDir = targets.infra
-        ? ((resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
-          ? resetManifest.metadata.infraDir
-          : resolveInfraDir(projectName, { infraDir: opts.infraDir }))
-        : null;
+        ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
       printResetPlan(targets, {
         projectName,
         simInfraDir: planSimInfraDir,
         infraDir: planInfraDir,
       });
 
-      if (isDockerCliInstalled() && (targets.simulate || targets.infra)) {
+      if (targets.simulate || targets.infra) {
         const spinner = ora(t('reset.stoppingContainers') || 'Stopping and removing Docker containers...').start();
-        const errors = [];
-
-        if (targets.simulate) {
-          const simInfraDir = (resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
-            ? resetManifest.metadata.simInfraDir
-            : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
-          try {
-            await composeDown('ctxa-sim', simInfraDir, simulateComposeEnv());
-          } catch (error) {
-            errors.push(error.message);
-          }
-        }
-
-        if (targets.infra) {
-          const infraDir = (resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
-            ? resetManifest.metadata.infraDir
-            : resolveInfraDir(projectName, { infraDir: opts.infraDir });
-          try {
-            await composeDown(projectName, infraDir, composeEnv(projectName));
-          } catch (error) {
-            errors.push(error.message);
-          }
-        }
-
-        if (errors.length > 0) {
-          dockerFailed = true;
-          resetHadIssues = true;
-          spinner.fail(`Docker cleanup failed:\n${errors.join('\n')}`);
-        } else {
-          if (targets.simulate) forceCleanupComposeProject('ctxa-sim');
-          if (targets.infra) forceCleanupComposeProject(projectName);
+        const ownedInfraDir = planSimInfraDir || planInfraDir;
+        try {
+          const dockerAudit = await performOwnedDockerCleanup({
+            contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
+            mode: installMode,
+            installationId: resetManifest.metadata.installationId,
+            projectName,
+            infraDir: ownedInfraDir,
+            composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
+            env: installMode === INSTALL_MODES.SIMULATION ? simulateComposeEnv() : composeEnv(projectName),
+          }, {
+            isCliInstalled: isDockerCliInstalled,
+            isDaemonRunning: isDockerDaemonRunning,
+            inspectLabels: inspectDockerLabels,
+            composeDown,
+          });
+          mergeAudit(resetAudit, dockerAudit);
+          infraCompleted = true;
           spinner.succeed(t('reset.stoppingContainers') || 'Docker containers stopped and removed.');
+        } catch (error) {
+          resetHadIssues = true;
+          resetAudit.failed.push({ resource: 'docker', detail: error.message });
+          spinner.fail(`Docker cleanup failed: ${error.message}`);
         }
-      } else if (targets.simulate || targets.infra) {
-        console.log(chalk.gray(`  i ${t('reset.noContainers') || 'Docker CLI not found. Skipping container cleanup.'}`));
       }
 
       if (targets.code) {
         const spinner = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
         try {
           const restoreResult = await restoreProjectFiles(projectDir, installMode);
-          if (restoreResult.conflicts && restoreResult.conflicts.length > 0) {
+          mergeAudit(resetAudit, restoreResult.audit);
+          if (auditIssueCount(restoreResult.audit) > 0) {
             resetHadIssues = true;
-            spinner.warn(`Project file restore skipped ${restoreResult.conflicts.length} user-modified file(s).`);
+            spinner.warn(`Project file restore has ${auditIssueCount(restoreResult.audit)} conflict or failed item(s).`);
           } else {
             spinner.succeed(t('reset.restoringFiles') || 'Backup files restored.');
           }
@@ -391,27 +287,28 @@ module.exports = function (program) {
         }
       }
 
-      if ((targets.simulate || targets.infra) && !dockerFailed) {
-        const spinner = ora(t('reset.removingDir') || 'Cleaning Contexa owned cache/config...').start();
-        try {
-          if (targets.simulate) {
-            const simCacheDir = (resetManifest.metadata && resetManifest.metadata.simInfraDir && !opts.infraDir)
-              ? resetManifest.metadata.simInfraDir
-              : resolveInfraDir('ctxa-sim', { infraDir: opts.infraDir });
-            if (fs.existsSync(simCacheDir)) fs.removeSync(simCacheDir);
-          }
-          if (targets.infra) {
-            const infraCacheDir = (resetManifest.metadata && resetManifest.metadata.infraDir && !opts.infraDir)
-              ? resetManifest.metadata.infraDir
-              : resolveInfraDir(projectName, { infraDir: opts.infraDir });
-            if (fs.existsSync(infraCacheDir)) fs.removeSync(infraCacheDir);
-          }
-          spinner.succeed(t('reset.removingDir') || 'Contexa directories cleaned.');
-        } catch (error) {
-          resetHadIssues = true;
-          spinner.fail(`Failed to clean Contexa directories: ${error.message}`);
-        }
+      const finalManifest = await loadManifest(projectDir, installMode);
+      if (infraCompleted) {
+        finalManifest.metadata.infra = 'skip';
+        finalManifest.metadata.dockerResources = null;
+        finalManifest.metadata.composeChecksum = null;
       }
+      const safeAudit = JSON.parse(JSON.stringify(resetAudit).replace(
+        /((?:password|secret|credential|token)\s*[:=]\s*)[^\s",}]+/gi, '$1[REDACTED]'));
+      finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
+      const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
+      if (finalManifest.files.length === 0 && !ownsInfrastructure) {
+        const finalManifestPath = manifestPath(projectDir, installMode);
+        if (fs.existsSync(finalManifestPath)) fs.removeSync(finalManifestPath);
+        const backups = backupRoot(projectDir, installMode);
+        if (fs.existsSync(backups)) fs.removeSync(backups);
+        const stateDir = path.dirname(finalManifestPath);
+        if (fs.existsSync(stateDir) && fs.readdirSync(stateDir).length === 0) fs.removeSync(stateDir);
+      } else {
+        await saveManifest(projectDir, finalManifest, installMode);
+      }
+
+      printAudit(resetAudit);
 
       if (resetHadIssues) {
         console.log(chalk.yellow(`\n  ! Contexa reset completed with issues. Review the messages above before re-running.\n`));

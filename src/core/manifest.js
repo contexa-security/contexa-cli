@@ -27,6 +27,10 @@ function backupRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
   return path.join(stateRoot(projectDir, mode), 'bak');
 }
 
+function appliedRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
+  return path.join(backupRoot(projectDir, mode), '__applied__');
+}
+
 function transactionBackupRoot(projectDir, transactionId, mode = INSTALL_MODES.NORMAL) {
   return path.join(backupRoot(projectDir, mode), '__transactions__', transactionId);
 }
@@ -58,9 +62,15 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
   if (!await fs.pathExists(p)) {
     return { version: MANIFEST_VERSION, metadata: { mode: normalizedMode }, files: [] };
   }
-  const parsed = JSON.parse(await fs.readFile(p, 'utf8'));
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(p, 'utf8'));
+  } catch (error) {
+    throw manifestRecoveryError(projectDir, normalizedMode, `invalid JSON: ${error.message}`);
+  }
+  await validateManifest(projectDir, normalizedMode, parsed);
   return {
-    version: parsed.version || 1,
+    version: parsed.version,
     metadata: {
       mode: normalizedMode,
       ...(parsed.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {}),
@@ -70,16 +80,165 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
   };
 }
 
+function manifestRecoveryError(projectDir, mode, reason) {
+  return new Error([
+    `Contexa ownership manifest is unsafe: ${reason}`,
+    `Manifest was kept unchanged: ${manifestPath(projectDir, mode)}`,
+    `Safe backups, if present, remain under: ${backupRoot(projectDir, mode)}`,
+    'Do not delete project files manually. Correct or restore the manifest, then run the same reset command again.',
+  ].join('\n'));
+}
+
+function validatedRelativePath(projectDir, relativePath) {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) {
+    throw new Error('file entry relativePath is required');
+  }
+  const portable = relativePath.replace(/\\/g, '/');
+  if (portable.startsWith('/') || /^[a-zA-Z]:\//.test(portable)
+      || portable === '.' || portable === '..' || portable.startsWith('../')
+      || portable.includes('/../') || path.posix.normalize(portable) !== portable) {
+    throw new Error(`file entry escapes or is not canonical: ${relativePath}`);
+  }
+  return projectOwnedPath(projectDir, portable);
+}
+
+async function assertNoSymlinkComponents(rootPath, candidatePath) {
+  const root = path.resolve(rootPath);
+  const candidate = path.resolve(candidatePath);
+  if (!pathWithinRoot(root, candidate)) throw new Error(`path escapes owned root: ${candidate}`);
+  const relative = path.relative(root, candidate);
+  let current = root;
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    if (!await fs.pathExists(current)) break;
+    const stat = await fs.lstat(current);
+    if (stat.isSymbolicLink()) throw new Error(`symbolic link is not allowed in an owned path: ${current}`);
+  }
+}
+
+async function validateManifest(projectDir, mode, parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw manifestRecoveryError(projectDir, mode, 'root must be an object');
+  }
+  if (parsed.version !== MANIFEST_VERSION) {
+    throw manifestRecoveryError(projectDir, mode,
+      `unsupported version ${String(parsed.version)}; expected ${MANIFEST_VERSION}`);
+  }
+  if (!parsed.metadata || typeof parsed.metadata !== 'object' || Array.isArray(parsed.metadata)) {
+    throw manifestRecoveryError(projectDir, mode, 'metadata must be an object');
+  }
+  if (parsed.metadata.mode && parsed.metadata.mode !== mode) {
+    throw manifestRecoveryError(projectDir, mode,
+      `mode mismatch ${parsed.metadata.mode}; expected ${mode}`);
+  }
+  if (parsed.metadata.canonicalProjectPath
+      && path.resolve(parsed.metadata.canonicalProjectPath) !== path.resolve(projectDir)) {
+    throw manifestRecoveryError(projectDir, mode, 'canonical project path does not match the requested project');
+  }
+  if (!Array.isArray(parsed.files)) {
+    throw manifestRecoveryError(projectDir, mode, 'files must be an array');
+  }
+  const installationId = parsed.metadata.installationId;
+  if (installationId && !/^[a-zA-Z0-9_-]{1,64}$/.test(installationId)) {
+    throw manifestRecoveryError(projectDir, mode, 'installation ID contains unsupported characters');
+  }
+  const seen = new Set();
+  try {
+    for (const entry of parsed.files) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error('file entry must be an object');
+      const target = validatedRelativePath(projectDir, entry.relativePath);
+      if (seen.has(entry.relativePath)) throw new Error(`duplicate file entry: ${entry.relativePath}`);
+      seen.add(entry.relativePath);
+      if (entry.mode && entry.mode !== mode) throw new Error(`file entry mode mismatch: ${entry.relativePath}`);
+      if (installationId && entry.installationId && entry.installationId !== installationId) {
+        throw new Error(`file entry installation ID mismatch: ${entry.relativePath}`);
+      }
+      await assertNoSymlinkComponents(projectDir, target);
+      if (await fs.pathExists(target)) {
+        const stat = await fs.lstat(target);
+        if (!stat.isFile()) throw new Error(`file entry target is not a regular file: ${entry.relativePath}`);
+      }
+      const backupPath = path.join(backupRoot(projectDir, mode), entry.relativePath);
+      await assertNoSymlinkComponents(backupRoot(projectDir, mode), backupPath);
+      if (await fs.pathExists(backupPath)) {
+        const stat = await fs.lstat(backupPath);
+        if (!stat.isFile()) throw new Error(`backup entry is not a regular file: ${entry.relativePath}`);
+        if (entry.backupChecksum && await sha256File(backupPath) !== entry.backupChecksum) {
+          throw new Error(`backup checksum mismatch: ${entry.relativePath}`);
+        }
+      } else if (entry.cliApplied && !entry.generated && entry.originalChecksum) {
+        throw new Error(`required backup is missing: ${entry.relativePath}`);
+      }
+      if (entry.appliedRelativePath) {
+        const expectedAppliedRelativePath = path.posix.join('__applied__', entry.relativePath);
+        if (entry.appliedRelativePath.replace(/\\/g, '/') !== expectedAppliedRelativePath) {
+          throw new Error(`CLI-applied snapshot path is not canonical: ${entry.relativePath}`);
+        }
+        const appliedPath = path.join(backupRoot(projectDir, mode), entry.appliedRelativePath);
+        await assertNoSymlinkComponents(backupRoot(projectDir, mode), appliedPath);
+        if (!await fs.pathExists(appliedPath) || !(await fs.lstat(appliedPath)).isFile()) {
+          throw new Error(`CLI-applied snapshot is missing: ${entry.relativePath}`);
+        }
+        if (entry.appliedChecksum && await sha256File(appliedPath) !== entry.appliedChecksum) {
+          throw new Error(`CLI-applied snapshot checksum mismatch: ${entry.relativePath}`);
+        }
+      }
+    }
+    for (const transactionEntry of (parsed.transaction && Array.isArray(parsed.transaction.files)
+      ? parsed.transaction.files : [])) {
+      if (!transactionEntry || typeof transactionEntry !== 'object') {
+        throw new Error('transaction file entry must be an object');
+      }
+      const transactionTarget = validatedRelativePath(projectDir, transactionEntry.relativePath);
+      await assertNoSymlinkComponents(projectDir, transactionTarget);
+    }
+    for (const externalEntry of (parsed.transaction && Array.isArray(parsed.transaction.externalFiles)
+      ? parsed.transaction.externalFiles : [])) {
+      if (!externalEntry || typeof externalEntry !== 'object') throw new Error('external file entry must be an object');
+      const expectedInfraRoot = parsed.metadata.infraDir && path.resolve(parsed.metadata.infraDir);
+      const recordedRoot = externalEntry.rootPath && path.resolve(externalEntry.rootPath);
+      const recordedFile = externalEntry.filePath && path.resolve(externalEntry.filePath);
+      if (!expectedInfraRoot || recordedRoot !== expectedInfraRoot || !pathWithinRoot(recordedRoot, recordedFile)) {
+        throw new Error('external transaction file escapes the manifest-owned infrastructure root');
+      }
+      await assertNoSymlinkComponents(recordedRoot, recordedFile);
+      const backupRelativePath = externalEntry.backupRelativePath;
+      if (typeof backupRelativePath !== 'string' || backupRelativePath.startsWith('../')
+          || path.posix.normalize(backupRelativePath.replace(/\\/g, '/')) !== backupRelativePath.replace(/\\/g, '/')) {
+        throw new Error('external backup path is not canonical');
+      }
+    }
+  } catch (error) {
+    throw manifestRecoveryError(projectDir, mode, error.message);
+  }
+}
+
+function sanitizeManifestValue(value, key = '') {
+  if (/(?:password|secret|credential|api.?key|access.?token|refresh.?token|session)/i.test(key)) {
+    return '[REDACTED]';
+  }
+  if (Array.isArray(value)) return value.map(item => sanitizeManifestValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) =>
+      [childKey, sanitizeManifestValue(childValue, childKey)]));
+  }
+  if (typeof value === 'string') {
+    return value.replace(/((?:password|secret|credential|token|api.?key)\s*[:=]\s*)[^\s",}]+/gi,
+      '$1[REDACTED]');
+  }
+  return value;
+}
+
 async function saveManifest(projectDir, manifest, mode = INSTALL_MODES.NORMAL) {
   const normalizedMode = normalizeMode(mode);
   const p = manifestPath(projectDir, normalizedMode);
   await fs.ensureDir(path.dirname(p));
-  const content = JSON.stringify({
+  const content = JSON.stringify(sanitizeManifestValue({
     version: MANIFEST_VERSION,
     metadata: { mode: normalizedMode, ...(manifest.metadata || {}) },
     files: manifest.files || [],
     transaction: manifest.transaction || null,
-  }, null, 2) + '\n';
+  }), null, 2) + '\n';
   const temporaryPath = p + `.tmp-${process.pid}-${crypto.randomUUID()}`;
   try {
     await fs.writeFile(temporaryPath, content, 'utf8');
@@ -118,10 +277,19 @@ async function recordChange(projectDir, filePath, meta = {}, mode = INSTALL_MODE
   const normalizedMode = normalizeMode(mode);
   const manifest = await loadManifest(projectDir, normalizedMode);
   const relativePath = toRelative(projectDir, filePath);
+  const ownedFile = validatedRelativePath(projectDir, relativePath);
+  await assertNoSymlinkComponents(projectDir, ownedFile);
+  if (!await fs.pathExists(ownedFile) || !(await fs.lstat(ownedFile)).isFile()) {
+    throw new Error(`Cannot record a non-file manifest entry: ${relativePath}`);
+  }
   const previous = manifest.files.find(f => f.relativePath === relativePath);
   const backupPath = path.join(backupRoot(projectDir, normalizedMode), relativePath);
   const backupChecksum = await sha256File(backupPath);
   const currentChecksum = await sha256File(filePath);
+  const appliedRelativePath = path.join('__applied__', relativePath).split(path.sep).join('/');
+  const appliedPath = path.join(backupRoot(projectDir, normalizedMode), appliedRelativePath);
+  await fs.ensureDir(path.dirname(appliedPath));
+  await fs.copy(filePath, appliedPath, { overwrite: true });
   const entry = {
     relativePath,
     mode: normalizedMode,
@@ -136,6 +304,8 @@ async function recordChange(projectDir, filePath, meta = {}, mode = INSTALL_MODE
     observedChecksum: previous ? previous.observedChecksum : backupChecksum,
     lastCliChecksum: currentChecksum,
     currentChecksum,
+    appliedRelativePath,
+    appliedChecksum: currentChecksum,
     managedPaths: Array.isArray(meta.managedPaths)
       ? [...new Set(meta.managedPaths)].sort()
       : (previous && Array.isArray(previous.managedPaths) ? previous.managedPaths : []),
@@ -195,6 +365,16 @@ async function beginInstallTransaction(projectDir, metadata = {}, mode = INSTALL
       await fs.ensureDir(path.dirname(snapshotPath));
       await fs.copy(planned.filePath, snapshotPath, { overwrite: false });
     }
+    const priorAppliedRelativePath = existing && existing.appliedRelativePath;
+    const priorAppliedPath = priorAppliedRelativePath
+      ? path.join(backupRoot(projectDir, normalizedMode), priorAppliedRelativePath) : null;
+    const priorAppliedSnapshotPath = path.join(
+      transactionBackupRoot(projectDir, transactionId, normalizedMode), '__applied__', relativePath);
+    const priorAppliedSnapshot = !!(priorAppliedPath && await fs.pathExists(priorAppliedPath));
+    if (priorAppliedSnapshot) {
+      await fs.ensureDir(path.dirname(priorAppliedSnapshotPath));
+      await fs.copy(priorAppliedPath, priorAppliedSnapshotPath, { overwrite: false });
+    }
     transactionFiles.push({
       relativePath,
       existed: exists,
@@ -202,6 +382,8 @@ async function beginInstallTransaction(projectDir, metadata = {}, mode = INSTALL
       directory: !!(stat && stat.isDirectory()),
       startChecksum,
       priorTracked: !!existing,
+      priorAppliedRelativePath: priorAppliedRelativePath || null,
+      priorAppliedSnapshot,
     });
     if (existing) continue;
     const backupPath = path.join(backupRoot(projectDir, normalizedMode), relativePath);
@@ -434,6 +616,8 @@ async function rollbackInstallTransaction(projectDir, transactionId, mode = INST
           const relativePath = path.relative(backups, backupPath);
           if (relativePath === '__external__'
               || relativePath.startsWith('__external__' + path.sep)
+              || relativePath === '__applied__'
+              || relativePath.startsWith('__applied__' + path.sep)
               || relativePath === '__transactions__'
               || relativePath.startsWith('__transactions__' + path.sep)) continue;
           const originalPath = projectOwnedPath(projectDir, relativePath);
@@ -450,6 +634,21 @@ async function rollbackInstallTransaction(projectDir, transactionId, mode = INST
         for (const entry of transaction.files.filter(file => !file.priorTracked)) {
           const originalBackup = path.join(backupRoot(projectDir, normalizedMode), entry.relativePath);
           if (await fs.pathExists(originalBackup)) await fs.remove(originalBackup);
+          const appliedSnapshot = path.join(appliedRoot(projectDir, normalizedMode), entry.relativePath);
+          if (await fs.pathExists(appliedSnapshot)) await fs.remove(appliedSnapshot);
+        }
+        for (const entry of transaction.files.filter(file => file.priorTracked)) {
+          const appliedRelativePath = entry.priorAppliedRelativePath
+            || path.join('__applied__', entry.relativePath);
+          const appliedSnapshot = path.join(backupRoot(projectDir, normalizedMode), appliedRelativePath);
+          const transactionAppliedSnapshot = path.join(
+            transactionBackupRoot(projectDir, transactionId, normalizedMode), '__applied__', entry.relativePath);
+          if (entry.priorAppliedSnapshot && await fs.pathExists(transactionAppliedSnapshot)) {
+            await fs.ensureDir(path.dirname(appliedSnapshot));
+            await fs.copy(transactionAppliedSnapshot, appliedSnapshot, { overwrite: true });
+          } else if (await fs.pathExists(appliedSnapshot)) {
+            await fs.remove(appliedSnapshot);
+          }
         }
         manifest.metadata = transaction.previousState.metadata;
         manifest.files = transaction.previousState.files;
@@ -518,6 +717,7 @@ async function rollbackInstallTransaction(projectDir, transactionId, mode = INST
     for (const backupPath of await collectBackupFiles(backups)) {
       const relativePath = path.relative(backups, backupPath);
       if (relativePath === '__external__' || relativePath.startsWith('__external__' + path.sep)) continue;
+      if (relativePath === '__applied__' || relativePath.startsWith('__applied__' + path.sep)) continue;
       if (restoredRelativePaths.has(relativePath)) continue;
       const originalPath = projectOwnedPath(projectDir, relativePath);
       await fs.ensureDir(path.dirname(originalPath));
@@ -545,6 +745,7 @@ module.exports = {
   stateRoot,
   manifestPath,
   backupRoot,
+  appliedRoot,
   loadManifest,
   saveManifest,
   beginInstallTransaction,
@@ -555,4 +756,7 @@ module.exports = {
   recordChange,
   recordInstallMetadata,
   sha256FileSync,
+  projectOwnedPath,
+  validatedRelativePath,
+  assertNoSymlinkComponents,
 };

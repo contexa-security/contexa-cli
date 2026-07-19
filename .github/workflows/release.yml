@@ -71,6 +71,20 @@ jobs:
           name: phase2-acceptance-evidence
           path: phase2-evidence/
 
+      - name: Validate Phase 3 reset ownership and recovery
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase3-evidence
+          node --test test/reset-phase3.test.js > phase3-evidence/reset-phase3.tap
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: phase3-acceptance-evidence
+          path: phase3-evidence/
+
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs
 

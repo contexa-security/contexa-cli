@@ -399,21 +399,27 @@ test('A2: simulate reset does not regenerate initdb SQL copies', () => {
 test('A2b: reset flows restore project files and keep infra cleanup scoped', () => {
   const resetSrc = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'commands', 'reset.js'), 'utf8');
+  const resetServiceSrc = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'core', 'reset-service.js'), 'utf8');
 
   assert.equal(resetSrc.includes('forceCleanupByPattern'), false,
     'reset must not delete Docker resources by broad substring matching');
+  assert.equal(resetServiceSrc.includes('forceCleanupByPattern'), false,
+    'reset service must not delete Docker resources by broad substring matching');
   assert.equal(resetSrc.includes("dockerCompose(['down', '-v']"), false,
     'reset must not run docker compose down -v from an implicit project directory');
   assert.equal(resetSrc.includes('yaml.load'), false,
     'reset must not inspect application.yml to guess production vs simulation target');
-  assert.match(resetSrc, /composeDown\('ctxa-sim', simInfraDir, simulateComposeEnv\(\)\)/,
+  assert.match(resetSrc, /env: installMode === INSTALL_MODES\.SIMULATION \? simulateComposeEnv\(\) : composeEnv\(projectName\)/,
     'simulate reset must pass the ctxa-sim compose environment explicitly');
-  assert.match(resetSrc, /label=com\.docker\.compose\.project=\$\{projectName\}/,
-    'force cleanup must be scoped by the Docker Compose project label');
+  assert.match(resetServiceSrc, /validateDockerContract\(contract, expected\)/,
+    'cleanup must validate the exact manifest-owned Docker resource contract');
+  assert.match(resetServiceSrc, /adapter\.inspectLabels\(resource\.type, resource\.name\)/,
+    'cleanup must verify ownership labels for every exact resource');
   assert.match(resetSrc, /if \(opts\.simulate\) \{\s*targets\.code = true;\s*\}/,
     'reset --simulate must restore project files as part of the simulation reset flow');
-  assert.match(resetSrc, /targets\.infra = true;\s*targets\.code = true;/,
-    'plain reset must remove project infrastructure and restore project files by default');
+  assert.match(resetSrc, /targets\.infra = hasOwnedManifest && resetManifest\.metadata\.infra/,
+    'plain reset must target infrastructure only when the normal ownership manifest records it');
   assert.match(resetSrc, /if \(targets\.code\)/,
     'project file restore must still be guarded by the resolved code target');
   assert.match(resetSrc, /function printResetPlan\(/,
