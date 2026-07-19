@@ -160,9 +160,6 @@ module.exports = function (program) {
         console.log(chalk.gray('    ' + t('init.notSpring.hint') + '\n'));
         throw initError('SPRING_PROJECT_REQUIRED', 'init.notSpring');
       }
-      if (opts.simulate && !await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL))) {
-        throw initError('SIMULATION_NORMAL_INSTALL_REQUIRED', 'init.error.simulationNormalRequired');
-      }
       if (opts.simulate && !project.hasContexta) {
         throw initError('SIMULATION_STARTER_REQUIRED', 'init.error.simulationStarterRequired');
       }

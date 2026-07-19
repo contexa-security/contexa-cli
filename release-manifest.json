@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "channel": "snapshot",
-  "releaseTag": "v0.1.2-phase5.2",
-  "cliVersion": "0.1.2-phase5.2",
+  "releaseTag": "v0.1.2-phase6.1",
+  "cliVersion": "0.1.2-phase6.1",
   "starter": {
     "groupId": "ai.ctxa",
     "artifactId": "spring-boot-starter-contexa",

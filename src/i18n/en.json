@@ -51,7 +51,6 @@
   "init.simulation.hostPreserved": "Base application settings remain byte-identical; only contexa-sim uses isolated endpoints.",
   "init.simulation.reset": "Reset anytime: contexa reset --simulate",
   "init.simulation.manage": "Manage only the simulation stack: contexa simulate up | down | reset",
-  "init.error.simulationNormalRequired": "Simulation requires a completed normal installation. Run contexa init first.",
   "init.error.simulationStarterRequired": "Simulation requires the normal Contexa starter dependency; project files were not changed.",
   "init.error.preflight": "Infrastructure preflight failed before project files were changed.",
   "init.error.geoIpContractMissing": "The release manifest has no GeoIP artifact contract.",

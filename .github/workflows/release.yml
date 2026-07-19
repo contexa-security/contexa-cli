@@ -58,12 +58,39 @@ jobs:
         if: contains(github.ref_name, '-phase5.')
         run: node --test --test-name-pattern="S3:" test/sideeffect-zero.test.js
 
-      - name: Run full regression tests for non-Phase-5 releases
-        if: ${{ !contains(github.ref_name, '-phase5.') }}
+      - name: Download the Phase 6 verified GeoLite2 fixture
+        if: contains(github.ref_name, '-phase6.')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-evidence
+          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
+          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
+          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
+            "$geo_url" --output phase6-evidence/GeoLite2-City.mmdb
+          node -e "const c=require('crypto'),f=require('fs');const actual=c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex');if(actual!==process.argv[2])throw new Error('GeoLite2 checksum mismatch')" \
+            phase6-evidence/GeoLite2-City.mmdb "$geo_sha"
+
+      - name: Run Phase 6 state-transition acceptance
+        if: contains(github.ref_name, '-phase6.')
+        shell: bash
+        env:
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
+          CONTEXA_PHASE6_EVIDENCE_DIR: ${{ github.workspace }}/phase6-evidence/state-transitions
+        run: node --test test/phase6-state-transitions.test.js
+
+      - uses: actions/upload-artifact@v4
+        if: contains(github.ref_name, '-phase6.')
+        with:
+          name: phase6-state-transition-evidence-${{ matrix.label }}
+          path: phase6-evidence/
+
+      - name: Run full regression tests for stable or unclassified releases
+        if: ${{ !contains(github.ref_name, '-phase5.') && !contains(github.ref_name, '-phase6.') }}
         run: npm test
 
       - name: Validate Phase 2 interactive and build models
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase2.'))
         shell: bash
         env:
           CONTEXA_TRANSCRIPT_DIR: phase2-evidence/interactive
@@ -75,13 +102,13 @@ jobs:
           node test/build-models.cjs
 
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase2.'))
         with:
           name: phase2-acceptance-evidence
           path: phase2-evidence/
 
       - name: Validate Phase 3 reset ownership and recovery
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase3.'))
         shell: bash
         run: |
           set -euo pipefail
@@ -89,13 +116,13 @@ jobs:
           node --test test/reset-phase3.test.js > phase3-evidence/reset-phase3.tap
 
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase3.'))
         with:
           name: phase3-acceptance-evidence
           path: phase3-evidence/
 
       - name: Validate Phase 4 simulation isolation
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase4.'))
         shell: bash
         run: |
           set -euo pipefail
@@ -110,7 +137,7 @@ jobs:
             test/phase0-contract.test.js > phase4-evidence/simulation-coexistence.tap
 
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase4.'))
         with:
           name: phase4-acceptance-evidence
           path: phase4-evidence/
