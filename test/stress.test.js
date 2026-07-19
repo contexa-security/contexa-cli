@@ -52,7 +52,8 @@ test('A1: empty Gradle Groovy project, no yml - init creates a parseable yml', a
     const root = loadYml(ymlPath);
     assert.ok(root.contexa);
     assert.equal(root.contexa.security.zerotrust.mode, 'SHADOW');
-    assert.equal(root.contexa.datasource.isolation['contexa-owned-application'], true);
+    assert.equal(root.contexa.datasource, undefined,
+      'normal init must leave datasource defaults to platform Properties');
   } finally { await fs.remove(dir); }
 });
 
@@ -175,8 +176,8 @@ test('B5: user-provided contexa.datasource.url is preserved (custom contexa DB l
     await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.datasource.url, 'jdbc:postgresql://internal-db:15432/contexa_agent');
-    // Isolation flag is still force-set so platform always knows it owns this DB.
-    assert.equal(root.contexa.datasource.isolation['contexa-owned-application'], true);
+    assert.equal(root.contexa.datasource.isolation, undefined,
+      'normal init must not claim ownership of a user-provided datasource');
   } finally { await fs.remove(dir); }
 });
 
@@ -194,8 +195,8 @@ test('C1: host spring.datasource (different DB) is left untouched', async () => 
     const root = loadYml(ymlPath);
     assert.equal(root.spring.datasource.url, 'jdbc:postgresql://customer-db:5432/customer_app');
     assert.equal(root.spring.datasource.username, 'app_user');
-    // contexa.datasource is added as a separate, isolated source.
-    assert.ok(root.contexa.datasource.url.includes('CONTEXA_DB_URL'));
+    assert.equal(root.contexa.datasource, undefined,
+      'normal init must not inject datasource credentials or ownership');
   } finally { await fs.remove(dir); }
 });
 
@@ -260,7 +261,7 @@ test('D1: quickstart-shape yml (contexa + spring) merges into single contexa: tr
     assert.equal(root.contexa.infrastructure.mode, 'standalone');
     assert.equal(root.contexa.vectorstore.pgvector.dimensions, 1024);
     assert.ok(root.contexa.security.zerotrust.mode);
-    assert.ok(root.contexa.datasource.url.includes('CONTEXA_DB_URL'));
+    assert.equal(root.contexa.datasource, undefined);
     assert.equal(root.spring.datasource.url, 'jdbc:postgresql://localhost:5432/customer');
   } finally { await fs.remove(dir); }
 });
@@ -315,11 +316,13 @@ test('E2: shadow -> enforce flips mode without losing other CLI keys', async () 
   const dir = await makeProject({});
   try {
     const ymlPath = path.join(dir, 'app.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    await injectYml(ymlPath, { mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'] });
+    const first = await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
+    await injectYml(ymlPath, {
+      mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'], managedPaths: first.managedPaths,
+    });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
-    assert.ok(root.contexa.datasource.url.includes('CONTEXA_DB_URL'));
+    assert.equal(root.contexa.datasource, undefined);
   } finally { await fs.remove(dir); }
 });
 
@@ -327,11 +330,13 @@ test('E3: user-added contexa.bridge in between two inits is preserved', async ()
   const dir = await makeProject({});
   try {
     const ymlPath = path.join(dir, 'app.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
+    const first = await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     let root = loadYml(ymlPath);
     root.contexa.bridge = { enabled: true, sync: { minRefreshIntervalSeconds: 120 } };
     await fs.writeFile(ymlPath, yaml.dump(root));
-    await injectYml(ymlPath, { mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'] });
+    await injectYml(ymlPath, {
+      mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'], managedPaths: first.managedPaths,
+    });
     root = loadYml(ymlPath);
     assert.equal(root.contexa.bridge.enabled, true);
     assert.equal(root.contexa.bridge.sync.minRefreshIntervalSeconds, 120);
@@ -754,52 +759,52 @@ test('J1: post-init yml never contains a duplicate top-level contexa: key', asyn
   }
 });
 
-test('J2: contexa.security.zerotrust.mode is always force-set after init', async () => {
+test('J2: user-owned zero-trust mode is preserved and an absent mode gets the safe default', async () => {
   const variants = [
-    `contexa:\n  security:\n    zerotrust:\n      mode: ENFORCE\n`,
-    `contexa:\n  security:\n    zerotrust:\n      mode: shadow\n`,
-    `contexa: {}\n`,
+    [`contexa:\n  security:\n    zerotrust:\n      mode: ENFORCE\n`, 'ENFORCE'],
+    [`contexa:\n  security:\n    zerotrust:\n      mode: shadow\n`, 'shadow'],
+    [`contexa: {}\n`, 'SHADOW'],
   ];
-  for (const v of variants) {
+  for (const [v, expected] of variants) {
     const dir = await makeProject({ 'app.yml': v });
     try {
       const ymlPath = path.join(dir, 'app.yml');
       await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
       const root = loadYml(ymlPath);
-      assert.equal(root.contexa.security.zerotrust.mode, 'SHADOW');
+      assert.equal(root.contexa.security.zerotrust.mode, expected);
     } finally { await fs.remove(dir); }
   }
 });
 
-test('J3: contexa.datasource.isolation.contexa-owned-application is always true', async () => {
+test('J3: normal init preserves datasource ownership and never creates it implicitly', async () => {
   const variants = [
-    `contexa:\n  datasource:\n    isolation:\n      contexa-owned-application: false\n`,
-    `contexa:\n  datasource: {}\n`,
-    `contexa: {}\n`,
+    [`contexa:\n  datasource:\n    isolation:\n      contexa-owned-application: false\n`, false],
+    [`contexa:\n  datasource: {}\n`, undefined],
+    [`contexa: {}\n`, undefined],
   ];
-  for (const v of variants) {
+  for (const [v, expected] of variants) {
     const dir = await makeProject({ 'app.yml': v });
     try {
       const ymlPath = path.join(dir, 'app.yml');
       await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
       const root = loadYml(ymlPath);
-      assert.equal(root.contexa.datasource.isolation['contexa-owned-application'], true);
+      assert.equal(root.contexa.datasource?.isolation?.['contexa-owned-application'], expected);
     } finally { await fs.remove(dir); }
   }
 });
 
-test('J4: contexa.hcad.geoip.enabled is always true after init', async () => {
+test('J4: user-owned GeoIP setting is preserved and an absent setting gets the CLI default', async () => {
   const variants = [
-    `contexa:\n  hcad:\n    geoip:\n      enabled: false\n      dbPath: /custom/path\n`,
-    `contexa: {}\n`,
+    [`contexa:\n  hcad:\n    geoip:\n      enabled: false\n      dbPath: /custom/path\n`, false],
+    [`contexa: {}\n`, true],
   ];
-  for (const v of variants) {
+  for (const [v, expected] of variants) {
     const dir = await makeProject({ 'app.yml': v });
     try {
       const ymlPath = path.join(dir, 'app.yml');
       await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
       const root = loadYml(ymlPath);
-      assert.equal(root.contexa.hcad.geoip.enabled, true);
+      assert.equal(root.contexa.hcad.geoip.enabled, expected);
     } finally { await fs.remove(dir); }
   }
 });

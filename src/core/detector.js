@@ -29,22 +29,92 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
   }
 
   if (candidate) {
+    const inheritedGradle = candidate.buildTool === 'gradle'
+      ? await inheritedGradleMetadata(candidate.dir)
+      : null;
     Object.assign(result, {
       buildTool: candidate.buildTool,
       buildFilePath: candidate.buildFilePath,
       hasSpringBoot: candidate.hasSpringBoot,
       isSpring: candidate.hasSpringBoot,
-      hasSpringSecurityCore: candidate.hasSpringSecurityCore,
-      hasContexta: candidate.hasContexta,
+      hasSpringSecurityCore: candidate.hasSpringSecurityCore || !!inheritedGradle?.hasSpringSecurityCore,
+      hasContexta: candidate.hasContexta || !!inheritedGradle?.hasContexta,
       projectName: candidate.projectName,
       projectDir: candidate.dir,
     });
-    if (candidate.buildTool === 'gradle' && candidate.dir !== rootDir) result.gradleRootDir = rootDir;
+    if (inheritedGradle) result.gradleRootDir = inheritedGradle.rootDir;
+    else if (candidate.buildTool === 'gradle' && candidate.dir !== rootDir) result.gradleRootDir = rootDir;
   }
 
   await inventoryConfiguration(result, result.projectDir);
   await inventoryApplicationSources(result, result.projectDir);
   return finishDetection(result, rootDir, opts);
+}
+
+async function inheritedGradleMetadata(moduleDir) {
+  let parentDir = path.dirname(moduleDir);
+  while (parentDir !== moduleDir) {
+    const settingsPath = await firstExisting([
+      path.join(parentDir, 'settings.gradle'),
+      path.join(parentDir, 'settings.gradle.kts'),
+    ]);
+    if (settingsPath) {
+      const settings = stripCodeComments(await fs.readFile(settingsPath, 'utf8'));
+      const includedDirs = gradleIncludedModuleDirs(parentDir, settings);
+      const normalizedModuleDir = path.resolve(moduleDir);
+      if (includedDirs.some(dir => path.resolve(dir) === normalizedModuleDir)) {
+        const buildPath = await firstExisting([
+          path.join(parentDir, 'build.gradle'),
+          path.join(parentDir, 'build.gradle.kts'),
+        ]);
+        if (!buildPath) return { rootDir: parentDir, hasContexta: false, hasSpringSecurityCore: false };
+        const build = await fs.readFile(buildPath, 'utf8');
+        const inheritedBlocks = gradleNamedBlocks(build, ['allprojects', 'subprojects']).join('\n');
+        return {
+          rootDir: parentDir,
+          hasContexta: new RegExp(`['"]${escapeRegex(CONTEXA_GROUP_ID)}:${escapeRegex(CONTEXA_ARTIFACT_ID)}(?::[^'"]+)?['"]`).test(inheritedBlocks),
+          hasSpringSecurityCore: /['"]org\.springframework\.boot:spring-boot-starter-security(?::[^'"]+)?['"]/.test(inheritedBlocks)
+            || /['"]org\.springframework\.security:spring-security-(?:core|web|config)(?::[^'"]+)?['"]/.test(inheritedBlocks),
+        };
+      }
+    }
+    moduleDir = parentDir;
+    parentDir = path.dirname(parentDir);
+  }
+  return null;
+}
+
+function gradleIncludedModuleDirs(rootDir, settings) {
+  const moduleDirs = [];
+  for (const line of settings.split(/\r?\n/).filter(value => /\binclude\b/.test(value))) {
+    for (const match of line.matchAll(/['"](:?[^'"]+)['"]/g)) {
+      moduleDirs.push(path.resolve(rootDir, match[1].replace(/^:/, '').replace(/:/g, path.sep)));
+    }
+  }
+  return moduleDirs;
+}
+
+function gradleNamedBlocks(source, names) {
+  const masked = stripCommentsAndStrings(source);
+  const blocks = [];
+  const pattern = new RegExp(`\\b(?:${names.join('|')})\\s*\\{`, 'g');
+  let match;
+  while ((match = pattern.exec(masked)) !== null) {
+    const openingBrace = masked.indexOf('{', match.index);
+    let depth = 1;
+    for (let index = openingBrace + 1; index < masked.length; index++) {
+      if (masked[index] === '{') depth++;
+      else if (masked[index] === '}') {
+        depth--;
+        if (depth === 0) {
+          blocks.push(stripCodeComments(source.slice(openingBrace + 1, index)));
+          pattern.lastIndex = index + 1;
+          break;
+        }
+      }
+    }
+  }
+  return blocks;
 }
 
 async function finishDetection(result, rootDir, opts) {
@@ -98,11 +168,7 @@ async function discoverModuleCandidates(rootDir) {
   const settingsPath = await firstExisting([path.join(rootDir, 'settings.gradle'), path.join(rootDir, 'settings.gradle.kts')]);
   if (settingsPath) {
     const settings = stripCodeComments(await fs.readFile(settingsPath, 'utf8'));
-    for (const line of settings.split(/\r?\n/).filter(value => /\binclude\b/.test(value))) {
-      for (const match of line.matchAll(/['"](:?[^'"]+)['"]/g)) {
-        moduleDirs.add(path.resolve(rootDir, match[1].replace(/^:/, '').replace(/:/g, path.sep)));
-      }
-    }
+    for (const moduleDir of gradleIncludedModuleDirs(rootDir, settings)) moduleDirs.add(moduleDir);
   }
   const candidates = [];
   for (const moduleDir of moduleDirs) {
