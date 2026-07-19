@@ -239,6 +239,17 @@ test('English and Korean bundles are key-identical and command help exposes no r
   const en = require('../src/i18n/en.json');
   const ko = require('../src/i18n/ko.json');
   assert.deepEqual(Object.keys(en).sort(), Object.keys(ko).sort());
+  const stablePlanTokens = {
+    'planned.setupQuick': 'SETUP: QUICK',
+    'planned.integrationMerge': 'INTEGRATION: MERGE',
+    'planned.hostConfigNone': 'HOST CONFIG: NONE',
+    'planned.dockerNone': 'DOCKER: NONE',
+    'planned.externalNone': 'EXTERNAL DOWNLOAD: NONE',
+  };
+  for (const [key, token] of Object.entries(stablePlanTokens)) {
+    assert.match(en[key], new RegExp(token));
+    assert.match(ko[key], new RegExp(token));
+  }
   for (const value of [...Object.values(en), ...Object.values(ko)]) {
     assert.equal(value.includes('\uFFFD'), false);
   }
