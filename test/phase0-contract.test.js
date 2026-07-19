@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const yaml = require('js-yaml');
 const os = require('os');
@@ -57,6 +58,43 @@ test('Phase 0 release and primary-command contract has one canonical source', ()
   const common = fs.readFileSync(path.join(root, 'src/core/injector/common.js'), 'utf8');
   assert.match(common, /releaseManifest\.starter\.version/);
   assert.equal(common.includes("CONTEXA_VERSION = '"), false);
+});
+
+test('Phase 1 release assets, compatibility and signed-manifest workflow are consistent', () => {
+  assert.deepEqual(releaseManifest.assets.map(({ os, arch, file, checksumFile, codeSignature }) => ({
+    os, arch, file, checksumFile, codeSignature,
+  })), [
+    { os: 'linux', arch: 'x64', file: 'contexa-linux-x64', checksumFile: 'contexa-linux-x64.sha256', codeSignature: 'unsigned-snapshot' },
+    { os: 'macos', arch: 'arm64', file: 'contexa-macos-arm64', checksumFile: 'contexa-macos-arm64.sha256', codeSignature: 'adhoc-snapshot' },
+    { os: 'windows', arch: 'x64', file: 'contexa-win-x64.exe', checksumFile: 'contexa-win-x64.exe.sha256', codeSignature: 'unsigned-snapshot' },
+  ]);
+  assert.deepEqual(releaseManifest.compatibility, {
+    linux: { libc: 'glibc', minimumVersion: '2.28' },
+    macos: { minimumVersion: '11' },
+    windows: { minimumVersion: '10' },
+  });
+  assert.deepEqual(releaseManifest.signature, {
+    required: true,
+    status: 'active',
+    algorithm: 'RSA-3072-SHA256',
+    file: 'release-manifest.json.sig',
+    publicKeyFile: 'release-signing-public.pem',
+  });
+  const publicKeyFile = path.join(root, releaseManifest.signature.publicKeyFile);
+  const publicKey = crypto.createPublicKey(fs.readFileSync(publicKeyFile));
+  assert.equal(publicKey.asymmetricKeyType, 'rsa');
+  assert.equal(publicKey.asymmetricKeyDetails.modulusLength, 3072);
+  assert.ok(packageJson.files.includes(releaseManifest.signature.publicKeyFile));
+
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  for (const asset of releaseManifest.assets) {
+    assert.ok(workflow.includes(`output: ${asset.file}`), `workflow matrix is missing ${asset.file}`);
+    assert.ok(workflow.includes(asset.checksumFile), `workflow release files are missing ${asset.checksumFile}`);
+  }
+  assert.match(workflow, /asset\.sha256 = crypto\.createHash\('sha256'\)/);
+  assert.match(workflow, /RELEASE_MANIFEST_SIGNING_KEY: \$\{\{ secrets\.RELEASE_MANIFEST_SIGNING_KEY \}\}/);
+  assert.match(workflow, /openssl dgst -sha256 -verify release-signing-public\.pem/);
+  assert.match(workflow, /prerelease: \$\{\{ contains\(github\.ref_name, '-'\) \}\}/);
 });
 
 test('CLI version and no-argument first run match the release contract', () => {

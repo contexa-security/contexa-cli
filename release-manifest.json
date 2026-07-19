@@ -1,19 +1,30 @@
 {
   "schemaVersion": 1,
   "channel": "snapshot",
-  "releaseTag": "v0.1.1",
-  "cliVersion": "0.1.1",
+  "releaseTag": "v0.1.2-phase1.1",
+  "cliVersion": "0.1.2-phase1.1",
   "starter": {
     "groupId": "ai.ctxa",
     "artifactId": "spring-boot-starter-contexa",
     "version": "0.1.0-SNAPSHOT"
   },
   "assets": [
-    {"os": "linux", "arch": "x64", "file": "contexa-linux-x64", "checksumFile": "contexa-linux-x64.sha256"},
-    {"os": "macos", "arch": "arm64", "file": "contexa-macos-arm64", "checksumFile": "contexa-macos-arm64.sha256"},
-    {"os": "windows", "arch": "x64", "file": "contexa-win-x64.exe", "checksumFile": "contexa-win-x64.exe.sha256"}
+    {"os": "linux", "arch": "x64", "file": "contexa-linux-x64", "checksumFile": "contexa-linux-x64.sha256", "codeSignature": "unsigned-snapshot"},
+    {"os": "macos", "arch": "arm64", "file": "contexa-macos-arm64", "checksumFile": "contexa-macos-arm64.sha256", "codeSignature": "adhoc-snapshot"},
+    {"os": "windows", "arch": "x64", "file": "contexa-win-x64.exe", "checksumFile": "contexa-win-x64.exe.sha256", "codeSignature": "unsigned-snapshot"}
   ],
-  "signature": {"required": false, "status": "snapshot-channel-pending"},
+  "compatibility": {
+    "linux": {"libc": "glibc", "minimumVersion": "2.28"},
+    "macos": {"minimumVersion": "11"},
+    "windows": {"minimumVersion": "10"}
+  },
+  "signature": {
+    "required": true,
+    "status": "active",
+    "algorithm": "RSA-3072-SHA256",
+    "file": "release-manifest.json.sig",
+    "publicKeyFile": "release-signing-public.pem"
+  },
   "primaryCommands": [
     "contexa init",
     "contexa reset",

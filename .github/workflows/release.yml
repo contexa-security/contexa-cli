@@ -37,7 +37,7 @@ jobs:
       - name: Validate release contract
         shell: bash
         run: |
-          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter')"
+          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required')"
 
       - name: Run unit tests
         run: npm test
@@ -65,6 +65,40 @@ jobs:
           copy "$env:programfiles\nodejs\node.exe" dist\${{ matrix.output }}
           npx postject dist\${{ matrix.output }} NODE_SEA_BLOB dist\sea-prep.blob `
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+
+      - name: Verify binary architecture and smoke (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="dist/${{ matrix.output }}"
+          description="$(file "$binary")"
+          echo "$description"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            echo "$description" | grep -Eiq 'x86[-_ ]64|x86-64'
+          else
+            echo "$description" | grep -Eiq 'arm64|aarch64'
+          fi
+          expected="$(node -p "require('./release-manifest.json').cliVersion")"
+          test "$("$binary" --version)" = "$expected"
+          "$binary" --help >/dev/null
+
+      - name: Verify binary architecture and smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "dist/${{ matrix.output }}"
+          $bytes = [System.IO.File]::ReadAllBytes($binary)
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x8664) { throw "Expected PE x64 machine 0x8664, got 0x$($machine.ToString('x4'))" }
+          $expected = (Get-Content release-manifest.json -Raw | ConvertFrom-Json).cliVersion
+          $reported = (& $binary --version | Select-Object -First 1).Trim()
+          if ($reported -ne $expected) { throw "CLI version mismatch: expected=$expected actual=$reported" }
+          & $binary --help *> $null
+          if ($LASTEXITCODE -ne 0) { throw "Windows binary --help failed" }
+          $signatureStatus = (Get-AuthenticodeSignature $binary).Status.ToString()
+          if ($signatureStatus -ne 'NotSigned') { throw "Snapshot contract expected NotSigned, got $signatureStatus" }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -97,17 +131,54 @@ jobs:
             echo "$(cat "$f.sha256")  $(basename "$f")"
           done
 
+      - name: Bind asset digests into release manifest
+        shell: bash
+        run: |
+          node <<'NODE'
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const path = require('path');
+          const manifest = require('./release-manifest.json');
+          for (const asset of manifest.assets) {
+            const binaryPath = path.join('dist', asset.file, asset.file);
+            if (!fs.existsSync(binaryPath)) throw new Error('missing release asset: ' + binaryPath);
+            asset.sha256 = crypto.createHash('sha256').update(fs.readFileSync(binaryPath)).digest('hex');
+          }
+          fs.writeFileSync('release-manifest.json', JSON.stringify(manifest, null, 2) + '\n');
+          NODE
+
+      - name: Sign and verify release manifest
+        shell: bash
+        env:
+          RELEASE_MANIFEST_SIGNING_KEY: ${{ secrets.RELEASE_MANIFEST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_MANIFEST_SIGNING_KEY"
+          umask 077
+          key_file="$(mktemp)"
+          signature_file="$(mktemp)"
+          trap 'rm -f "$key_file" "$signature_file" derived-public.pem' EXIT
+          printf '%s' "$RELEASE_MANIFEST_SIGNING_KEY" > "$key_file"
+          openssl pkey -in "$key_file" -pubout -out derived-public.pem
+          cmp derived-public.pem release-signing-public.pem
+          openssl dgst -sha256 -sign "$key_file" -out "$signature_file" release-manifest.json
+          openssl base64 -A -in "$signature_file" -out release-manifest.json.sig
+          openssl dgst -sha256 -verify release-signing-public.pem -signature "$signature_file" release-manifest.json
+
       - uses: softprops/action-gh-release@v2
         with:
           name: Contexa CLI ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             ## Install
             ```bash
             curl -fsSL https://install.ctxa.ai | sh
             ```
-            The installer verifies a SHA-256 digest published next to each binary.
+            The installer verifies the RSA-signed release manifest and the SHA-256 digest bound to each binary.
           files: |
             release-manifest.json
+            release-manifest.json.sig
+            release-signing-public.pem
             dist/contexa-linux-x64/contexa-linux-x64
             dist/contexa-linux-x64/contexa-linux-x64.sha256
             dist/contexa-macos-arm64/contexa-macos-arm64
