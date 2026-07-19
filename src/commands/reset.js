@@ -125,12 +125,12 @@ function printResetPlan(targets, details) {
     console.log(chalk.gray(`      ${t('reset.plan.composeDir', details.infraDir)}`));
   }
   if (targets.code) {
-    console.log(chalk.gray(targets.simulate
+    console.log(chalk.gray(details.simulationMode
       ? `    - ${t('reset.plan.simulationCode')}`
       : `    - ${t('reset.plan.projectCode')}`));
     console.log(chalk.gray(`      ${t('reset.plan.threeWay')}`));
   }
-  if (targets.simulate && !targets.infra) {
+  if (details.simulationMode && !targets.infra) {
     console.log(chalk.gray(`    - ${t('reset.plan.productionPreserved')}`));
   }
   console.log('');
@@ -179,6 +179,8 @@ module.exports = function (program) {
       let resetHadIssues = false;
       let infraCompleted = false;
       const resetAudit = emptyAudit();
+      const ownsManifestInfrastructure = Boolean(
+        resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip');
 
       if (!hasAnyTarget(targets)) {
         if (opts.yes) {
@@ -213,6 +215,13 @@ module.exports = function (program) {
         }
       }
 
+      const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
+      if (installMode === INSTALL_MODES.SIMULATION
+          && (!ownsManifestInfrastructure || !dockerLifecycleManaged)) {
+        targets.simulate = false;
+        infraCompleted = true;
+      }
+
       if (!hasOwnedManifest && (targets.infra || targets.simulate)) {
         console.log(chalk.yellow(`  i ${t('reset.noManifest.infrastructure')}`));
         return;
@@ -236,6 +245,7 @@ module.exports = function (program) {
         projectName,
         simInfraDir: planSimInfraDir,
         infraDir: planInfraDir,
+        simulationMode: installMode === INSTALL_MODES.SIMULATION,
       });
 
       if (targets.simulate || targets.infra) {

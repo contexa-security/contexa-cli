@@ -357,6 +357,7 @@ module.exports = function (program) {
         infra: answers.infra,
         infraDir: plannedInfraDir,
         simInfraDir: opts.simulate ? resolveInfraDir('ctxa-sim', { infraDir: infraDirOverride }) : null,
+        dockerLifecycleManaged: answers.infra !== 'skip' && Boolean(answers.startDocker),
         aiSecurityEnabled: !!answers.enableAiSecurity,
       }, installMode, plannedFiles);
       const installManifest = await loadManifest(opts.dir, installMode);

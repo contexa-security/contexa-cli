@@ -156,6 +156,9 @@ test('clean dependency-only -> init --simulate -> reset --simulate', async t => 
       'init', ...simulationOptions, '--dir', fixture.project, '--infra-dir', fixture.infra,
     ]);
     assert.equal(step.state.state, INSTALLATION_STATES.SIMULATION);
+    const simulationManifest = await fs.readJson(
+      path.join(fixture.project, 'contexa', 'simulation', 'manifest.json'));
+    assert.equal(simulationManifest.metadata.dockerLifecycleManaged, false);
     assert.deepEqual({ build: await digest(fixture.build), yml: await digest(fixture.yml) }, fixture.baseline);
     step = await executeStep(fixture, records, 'simulation reset',
       ['reset', '--simulate', '--yes', '--dir', fixture.project]);
