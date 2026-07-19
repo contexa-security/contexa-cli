@@ -71,6 +71,12 @@ function validateDockerContract(contract, expected) {
 async function performOwnedDockerCleanup(context, adapter) {
   if (!adapter.isCliInstalled()) throw new Error('Docker CLI is unavailable; owned resources were not changed.');
   if (!adapter.isDaemonRunning()) throw new Error('Docker daemon is unavailable; owned resources were not changed.');
+  if (await fs.pathExists(context.infraDir)) {
+    const infraStat = await fs.lstat(context.infraDir);
+    if (infraStat.isSymbolicLink() || !infraStat.isDirectory()) {
+      throw new Error(`Owned infrastructure path is not a regular directory: ${context.infraDir}`);
+    }
+  }
   const resources = validateDockerContract(context.contract, context);
   const present = [];
   for (const resource of resources) {
@@ -86,6 +92,10 @@ async function performOwnedDockerCleanup(context, adapter) {
   }
   const composePath = path.join(context.infraDir, 'docker-compose.yml');
   if (await fs.pathExists(composePath)) {
+    const composeStat = await fs.lstat(composePath);
+    if (composeStat.isSymbolicLink() || !composeStat.isFile()) {
+      throw new Error(`Owned compose path is not a regular file: ${composePath}`);
+    }
     if (!context.composeChecksum || sha256FileSync(composePath) !== context.composeChecksum) {
       throw new Error(`Owned compose checksum mismatch; preserved: ${composePath}`);
     }

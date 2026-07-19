@@ -42,14 +42,8 @@ function assertExactInfraDir(expectedInfraDir, requestedInfraDir) {
   if (requestedInfraDir && path.resolve(requestedInfraDir) !== expected) {
     throw new Error(`--infra-dir does not match the manifest-owned directory: ${expected}`);
   }
-  let current = expected;
-  while (true) {
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
-      throw new Error(`Infrastructure path contains a symbolic link: ${current}`);
-    }
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    current = parent;
+  if (fs.existsSync(expected) && fs.lstatSync(expected).isSymbolicLink()) {
+    throw new Error(`Infrastructure directory must not be a symbolic link: ${expected}`);
   }
   return expected;
 }
