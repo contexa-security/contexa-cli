@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
-const { pullOllamaModelWithProgress } = require('../src/core/ollama');
+const { detectOllamaSource, pullOllamaModelWithProgress } = require('../src/core/ollama');
 
 async function withServer(handler, action) {
   const server = http.createServer(handler);
@@ -60,4 +60,20 @@ test('Ollama pull aborts a hanging request at its configured deadline', async ()
     /exceeded 80ms/
   );
   assert.ok(Date.now() - startedAt < 1000);
+});
+
+test('Ollama source detection awaits native reachability instead of treating a Promise as truthy', async () => {
+  const unavailable = await detectOllamaSource(null, {
+    inspect: () => ({ status: 1, stdout: '' }),
+    resolveProjectName: () => 'phase5',
+    isNativeOllamaRunning: async () => false,
+  });
+  assert.deepEqual(unavailable, { type: null });
+
+  const native = await detectOllamaSource(null, {
+    inspect: () => ({ status: 1, stdout: '' }),
+    resolveProjectName: () => 'phase5',
+    isNativeOllamaRunning: async () => true,
+  });
+  assert.deepEqual(native, { type: 'native', port: 11434 });
 });

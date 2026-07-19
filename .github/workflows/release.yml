@@ -50,7 +50,16 @@ jobs:
         run: |
           node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required')"
 
-      - name: Run unit tests
+      - name: Run Phase 5 focused regression tests
+        if: contains(github.ref_name, '-phase5.')
+        run: node --test test/phase5-contract.test.js test/preflight.test.js test/ollama.test.js
+
+      - name: Run Phase 5 project identity regression
+        if: contains(github.ref_name, '-phase5.')
+        run: node --test --test-name-pattern="S3:" test/sideeffect-zero.test.js
+
+      - name: Run full regression tests for non-Phase-5 releases
+        if: ${{ !contains(github.ref_name, '-phase5.') }}
         run: npm test
 
       - name: Validate Phase 2 interactive and build models

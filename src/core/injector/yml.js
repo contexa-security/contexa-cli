@@ -14,6 +14,11 @@ const path = require('path');
 const yaml = require('js-yaml');
 const { escapeRegex, backupFile } = require('./common');
 const { SIMULATION_PROFILE } = require('../simulation');
+const { DEFAULT_INFRASTRUCTURE_PORTS } = require('../infrastructure');
+const {
+  DEFAULT_OLLAMA_CHAT_MODEL,
+  DEFAULT_OLLAMA_EMBEDDING_MODEL,
+} = require('../provider');
 
 // Legacy marker block written by pre-1.1 versions. Kept here only so that
 // re-running init on an older project strips and rewrites the block as a
@@ -104,8 +109,8 @@ function buildCliContexaTree(opts = {}) {
       ollama: {
         baseUrl: isSimulate
           ? '${CONTEXA_CHAT_OLLAMA_BASE_URL}'
-          : '${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:11434}',
-        model: '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}',
+          : `\${CONTEXA_CHAT_OLLAMA_BASE_URL:http://127.0.0.1:${DEFAULT_INFRASTRUCTURE_PORTS.ollama}}`,
+        model: `\${CONTEXA_CHAT_OLLAMA_MODEL:${DEFAULT_OLLAMA_CHAT_MODEL}}`,
         keepAlive: '${CONTEXA_OLLAMA_CHAT_KEEP_ALIVE:30m}',
       }
     };
@@ -114,7 +119,7 @@ function buildCliContexaTree(opts = {}) {
     }
     tree.llm.embedding.ollama = {
       dedicatedRuntimeEnabled: false,
-      model: '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}',
+      model: `\${CONTEXA_EMBEDDING_OLLAMA_MODEL:${DEFAULT_OLLAMA_EMBEDDING_MODEL}}`,
       dimensions: '${CONTEXA_EMBEDDING_OLLAMA_DIMENSIONS:1024}',
     };
   }
@@ -268,13 +273,13 @@ async function injectYml(ymlPath, opts = {}) {
     rootObj.spring.ai.ollama.chat.options = rootObj.spring.ai.ollama.chat.options
       && typeof rootObj.spring.ai.ollama.chat.options === 'object'
       ? rootObj.spring.ai.ollama.chat.options : {};
-    rootObj.spring.ai.ollama.chat.options.model = '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}';
+    rootObj.spring.ai.ollama.chat.options.model = `\${CONTEXA_CHAT_OLLAMA_MODEL:${DEFAULT_OLLAMA_CHAT_MODEL}}`;
     rootObj.spring.ai.ollama.embedding = rootObj.spring.ai.ollama.embedding
       && typeof rootObj.spring.ai.ollama.embedding === 'object' ? rootObj.spring.ai.ollama.embedding : {};
     rootObj.spring.ai.ollama.embedding.options = rootObj.spring.ai.ollama.embedding.options
       && typeof rootObj.spring.ai.ollama.embedding.options === 'object'
       ? rootObj.spring.ai.ollama.embedding.options : {};
-    rootObj.spring.ai.ollama.embedding.options.model = '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}';
+    rootObj.spring.ai.ollama.embedding.options.model = `\${CONTEXA_EMBEDDING_OLLAMA_MODEL:${DEFAULT_OLLAMA_EMBEDDING_MODEL}}`;
     rootObj.spring.data = rootObj.spring.data && typeof rootObj.spring.data === 'object'
       ? rootObj.spring.data : {};
     rootObj.spring.data.redis = rootObj.spring.data.redis

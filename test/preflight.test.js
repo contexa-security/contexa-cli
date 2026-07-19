@@ -16,7 +16,14 @@ const { inspectInfra } = require('../src/core/preflight');
 const { waitForSimulationInfrastructure } = require('../src/core/simulation');
 
 test('inspectInfra: respects --no-docker (startDocker=false) by skipping all docker checks', async () => {
-  const issues = await inspectInfra({ infra: 'standalone', startDocker: false });
+  const issues = await inspectInfra({
+    infra: 'standalone',
+    startDocker: false,
+    dependencies: {
+      isPortBound: async () => false,
+      dockerTry: () => { throw new Error('docker must not be called'); },
+    },
+  });
   // Even if docker is missing on the host, we should not get a docker-related
   // error here because the user opted out.
   const dockerRe = /Docker daemon|Docker is installed|not installed/i;
@@ -36,31 +43,48 @@ test('inspectInfra: returns an array of {severity, message, hint?} records', asy
   }
 });
 
-test('inspectInfra: surfaces port collision when 127.0.0.1:5432 is already bound', async () => {
-  // Simulate an existing PostgreSQL by binding to 5432 ourselves.
-  const blocker = net.createServer();
-  await new Promise((resolve, reject) => {
-    blocker.once('error', reject);
-    blocker.listen(5432, '127.0.0.1', resolve);
-  }).catch(() => null); // If port is already bound on the host, skip silently.
+test('inspectInfra: rejects an occupied port that is not linked to a verified owned container', async () => {
+  const issues = await inspectInfra({
+    infra: 'standalone',
+    projectName: 'phase5',
+    dependencies: dockerState({ portBound: true }),
+  });
+  const collision = issues.find(issue => issue.code === 'unverified-port-in-use');
+  assert.equal(collision.severity, 'error');
+  assert.deepEqual(issues.skippedServices, []);
+  assert.deepEqual(issues.servicesToUp, ['postgres']);
+});
 
-  if (!blocker.listening) return; // can't simulate; nothing to assert
-  try {
-    const issues = await inspectInfra({ infra: 'standalone', startDocker: false });
-    // Port checks only run when startDocker !== false, so re-run with default:
-    const issues2 = await inspectInfra({ infra: 'standalone' });
-    const portIssue = issues2.find(i => /Port 5432/.test(i.message));
-    if (portIssue) {
-      assert.equal(portIssue.severity, 'warning');
-      assert.ok(Array.isArray(portIssue.hint) && portIssue.hint.length > 0);
-    }
-    // We don't strictly require the issue to appear (docker may already be
-    // listening on 5432 too, in which case the test environment is fine), but
-    // when present it must be well-formed. Either branch is acceptable.
-    assert.ok(issues, 'inspector ran without throwing');
-  } finally {
-    await new Promise(r => blocker.close(r));
-  }
+test('inspectInfra: rejects a same-name container without matching ownership labels', async () => {
+  const issues = await inspectInfra({
+    infra: 'standalone',
+    projectName: 'phase5',
+    dependencies: dockerState({
+      containers: ['phase5-postgres'],
+      identities: { 'phase5-postgres': 'other-owner|normal|phase5' },
+    }),
+  });
+  assert.ok(issues.some(issue => issue.code === 'container-ownership-conflict'
+    && issue.severity === 'error'));
+  assert.deepEqual(issues.skippedServices, []);
+  assert.deepEqual(issues.servicesToUp, ['postgres']);
+});
+
+test('inspectInfra: reuses only a container with matching owner, mode, and compose project', async () => {
+  const issues = await inspectInfra({
+    infra: 'standalone',
+    projectName: 'phase5',
+    dependencies: dockerState({
+      portBound: true,
+      containers: ['phase5-postgres'],
+      identities: { 'phase5-postgres': 'contexa-cli|normal|phase5' },
+    }),
+  });
+  assert.ok(issues.some(issue => issue.code === 'owned-port-in-use'));
+  assert.ok(issues.some(issue => issue.code === 'all-containers-exist'));
+  assert.equal(issues.some(issue => issue.severity === 'error'), false);
+  assert.deepEqual(issues.skippedServices, ['postgres']);
+  assert.deepEqual(issues.servicesToUp, []);
 });
 
 test('inspectInfra: distributed mode adds redis/zookeeper/kafka to the port check set', async () => {
@@ -112,3 +136,20 @@ test('simulation health gate tolerates transient failure and returns the recover
   assert.equal(attempts, 3);
   assert.equal(result.services.length, 5);
 });
+
+function dockerState({ portBound = false, containers = [], identities = {} } = {}) {
+  return {
+    isDockerCliInstalled: () => true,
+    isDockerDaemonRunning: () => true,
+    isPortBound: async () => portBound,
+    dockerTry: (args) => {
+      if (args[0] === 'ps') {
+        return { status: 0, stdout: Buffer.from(containers.join('\n')) };
+      }
+      if (args[0] === 'inspect') {
+        return { status: 0, stdout: Buffer.from(identities[args.at(-1)] || '') };
+      }
+      throw new Error(`unexpected docker command: ${args.join(' ')}`);
+    },
+  };
+}

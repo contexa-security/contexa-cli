@@ -1,8 +1,15 @@
 'use strict';
 
 const net = require('net');
-const { containerName } = require('./project');
+const {
+  DEFAULT_INFRASTRUCTURE_PORTS,
+  SIMULATION_PORTS,
+  configuredPort,
+} = require('./infrastructure');
+const { containerName, resolveProjectName } = require('./project');
 const { dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('./docker');
+const { TIMEOUTS } = require('./timeouts');
+const { t } = require('./i18n');
 
 // Pre-flight checks for the docker-driven infrastructure init step.
 // Returns an array of { severity, message, hint, code? } records.
@@ -22,22 +29,26 @@ async function inspectInfra(opts = {}) {
   const distributed = opts.infra === 'distributed';
   const includeOllama = !!opts.includeOllama;
   const strictIsolation = !!opts.strictIsolation;
+  const expectedMode = strictIsolation ? 'simulation' : 'normal';
+  const expectedProject = opts.projectName || resolveProjectName();
+  const dependencies = opts.dependencies || {};
+  const cliInstalled = dependencies.isDockerCliInstalled || isDockerCliInstalled;
+  const daemonRunning = dependencies.isDockerDaemonRunning || isDockerDaemonRunning;
+  const runDocker = dependencies.dockerTry || dockerTry;
+  const portBound = dependencies.isPortBound || isPortBound;
 
   // Step 1: is the docker CLI even installed? Distinguish "not installed" from
   // "installed but daemon stopped" - the user-visible fix is very different.
   if (opts.startDocker !== false) {
-    if (!isDockerCliInstalled()) {
+    if (!cliInstalled()) {
       issues.push({
         severity: 'error',
-        message: 'Docker is not installed on this machine.',
+        message: t('preflight.dockerMissing'),
         hint: [
-          'Install Docker Desktop:',
-          '  Windows / macOS : https://www.docker.com/products/docker-desktop',
-          '  Linux           : https://docs.docker.com/engine/install/',
-          'After installation, open a new terminal and re-run "contexa init".',
-          'Docker is only required for simulation or distributed infrastructure.',
-          'If you cannot install Docker, run the normal guided setup with "contexa init"',
-          'and use your own PostgreSQL or managed infrastructure instead.',
+          t('preflight.dockerMissing.desktop'),
+          t('preflight.dockerMissing.linux'),
+          t('preflight.dockerMissing.retry'),
+          t('preflight.dockerMissing.external'),
         ],
       });
       return issues;
@@ -45,15 +56,14 @@ async function inspectInfra(opts = {}) {
 
     // Step 2: CLI is present - is the daemon actually running?
     // `docker info` hits the daemon and surfaces "Cannot connect to the Docker daemon" early.
-    if (!isDockerDaemonRunning()) {
+    if (!daemonRunning()) {
       issues.push({
         severity: 'error',
-        message: 'Docker is installed but the daemon is not running.',
+        message: t('preflight.dockerStopped'),
         hint: [
-          'Windows / macOS : open Docker Desktop and wait for the whale icon to settle.',
-          'Linux           : sudo systemctl start docker',
-          'If you selected infrastructure setup, re-run with "contexa init --no-docker"',
-          'to generate compose files without starting containers.',
+          t('preflight.dockerStopped.desktop'),
+          t('preflight.dockerStopped.linux'),
+          t('preflight.dockerStopped.noDocker'),
         ],
       });
       // No point checking ports/containers when the daemon is down.
@@ -62,15 +72,17 @@ async function inspectInfra(opts = {}) {
   }
 
   const skippedServices = [];
+  const portCollisions = [];
 
   // Local TCP port collisions. We bind to 127.0.0.1 to mirror the compose
   // bind host. A port already bound (EADDRINUSE) signals an existing service
   // that may belong to another contexa-cli run, a host postgres, etc.
-  const postgresPort = parseInt(process.env.CONTEXA_POSTGRES_PORT || '5432', 10);
-  const ollamaPort = parseInt(process.env.CONTEXA_OLLAMA_PORT || '11434', 10);
-  const redisPort = parseInt(process.env.CONTEXA_REDIS_PORT || '6379', 10);
-  const zookeeperPort = parseInt(process.env.CONTEXA_ZOOKEEPER_PORT || '2181', 10);
-  const kafkaPort = parseInt(process.env.CONTEXA_KAFKA_PORT || '9092', 10);
+  const defaults = strictIsolation ? SIMULATION_PORTS : DEFAULT_INFRASTRUCTURE_PORTS;
+  const postgresPort = configuredPort('CONTEXA_POSTGRES_PORT', defaults.postgres);
+  const ollamaPort = configuredPort('CONTEXA_OLLAMA_PORT', defaults.ollama);
+  const redisPort = configuredPort('CONTEXA_REDIS_PORT', defaults.redis);
+  const zookeeperPort = configuredPort('CONTEXA_ZOOKEEPER_PORT', defaults.zookeeper);
+  const kafkaPort = configuredPort('CONTEXA_KAFKA_PORT', defaults.kafka);
 
   const ports = [['PostgreSQL', postgresPort, 'postgres']];
   if (includeOllama) ports.push(['Ollama', ollamaPort, 'ollama']);
@@ -82,86 +94,109 @@ async function inspectInfra(opts = {}) {
     );
   }
   for (const [name, port, serviceKey] of ports) {
-    if (await isPortBound(port)) {
-      if (strictIsolation) {
-        issues.push({
-          severity: 'error',
-          message: `Simulation port ${port} (${name}) is already in use on 127.0.0.1.`,
-          hint: ['Simulation never reuses an unverified host service. Stop the owner or choose a verified isolated environment.'],
-        });
-      } else {
-        skippedServices.push(serviceKey);
-        issues.push({
-          severity: 'warning',
-          message: `Port ${port} (${name}) is already in use on 127.0.0.1.`,
-          hint: [
-            `Local service ${name} is already running on host. Contexa will skip starting this docker container and reuse the host service.`,
-          ],
-        });
-      }
-    }
+    if (await portBound(port)) portCollisions.push({ name, port, serviceKey });
   }
 
   // Container reuse decision.
   const services = [
-    { key: 'postgres', container: containerName('postgres') }
+    { key: 'postgres', container: containerName('postgres', expectedProject) }
   ];
-  if (includeOllama) services.push({ key: 'ollama', container: containerName('ollama') });
+  if (includeOllama) services.push({ key: 'ollama', container: containerName('ollama', expectedProject) });
   if (distributed) {
     services.push(
-      { key: 'redis', container: containerName('redis') },
-      { key: 'zookeeper', container: containerName('zookeeper') },
-      { key: 'kafka', container: containerName('kafka') }
+      { key: 'redis', container: containerName('redis', expectedProject) },
+      { key: 'zookeeper', container: containerName('zookeeper', expectedProject) },
+      { key: 'kafka', container: containerName('kafka', expectedProject) }
     );
   }
 
   const names = services.map(s => s.container);
   let existing = [];
-  // dockerTry: array-arg invocation, no shell. {{.Names}} is a literal Go
-  // template string and never reaches a shell parser this way.
-  const psResult = dockerTry(['ps', '-a', '--format', '{{.Names}}'],
-    { stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
-  if (!psResult.error && psResult.status === 0 && psResult.stdout) {
-    existing = psResult.stdout.toString().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  }
-
-  // If a container already exists, skip it to avoid conflicts and data loss
-  for (const svc of services) {
-    if (!strictIsolation && existing.includes(svc.container)) {
-      if (!skippedServices.includes(svc.key)) {
-        skippedServices.push(svc.key);
-      }
+  if (opts.startDocker !== false) {
+    // dockerTry: array-arg invocation, no shell. {{.Names}} is a literal Go
+    // template string and never reaches a shell parser this way.
+    const psResult = runDocker(['ps', '-a', '--format', '{{.Names}}'],
+      { stdio: ['ignore', 'pipe', 'ignore'], timeout: TIMEOUTS.dockerInspectMs });
+    if (!psResult.error && psResult.status === 0 && psResult.stdout) {
+      existing = psResult.stdout.toString().split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     }
   }
 
   const present = names.filter(n => existing.includes(n));
   const missing = names.filter(n => !existing.includes(n));
+  const ownedPresent = [];
+  const ownershipConflicts = [];
+  for (const service of services.filter(item => present.includes(item.container))) {
+    const inspected = runDocker([
+      'inspect', '--format',
+      '{{index .Config.Labels "io.ctxa.owner"}}|{{index .Config.Labels "io.ctxa.mode"}}|{{index .Config.Labels "com.docker.compose.project"}}',
+      service.container,
+    ], { stdio: ['ignore', 'pipe', 'ignore'], timeout: TIMEOUTS.dockerInspectMs });
+    const identity = !inspected.error && inspected.status === 0 && inspected.stdout
+      ? inspected.stdout.toString().trim().split('|') : [];
+    if (identity[0] === 'contexa-cli' && identity[1] === expectedMode
+        && identity[2] === expectedProject) {
+      ownedPresent.push(service);
+      if (!strictIsolation && !skippedServices.includes(service.key)) skippedServices.push(service.key);
+    } else {
+      ownershipConflicts.push(service.container);
+    }
+  }
+
+  if (ownershipConflicts.length > 0) {
+    issues.push({
+      severity: 'error',
+      code: 'container-ownership-conflict',
+      message: t('preflight.containerOwnershipConflict', ownershipConflicts.join(', ')),
+      hint: [t('preflight.containerOwnershipHint')],
+    });
+  }
+
+  for (const collision of portCollisions) {
+    const verifiedOwner = ownedPresent.some(service => service.key === collision.serviceKey);
+    if (verifiedOwner && !strictIsolation) {
+      issues.push({
+        severity: 'info',
+        code: 'owned-port-in-use',
+        message: t('preflight.ownedPort', collision.port, collision.name),
+        hint: [t('preflight.ownedPortHint')],
+      });
+    } else {
+      issues.push({
+        severity: strictIsolation || opts.startDocker !== false ? 'error' : 'warning',
+        code: 'unverified-port-in-use',
+        message: strictIsolation
+          ? t('preflight.simulationPort', collision.port, collision.name)
+          : t('preflight.unverifiedPort', collision.port, collision.name),
+        hint: [t('preflight.unverifiedPortHint')],
+      });
+    }
+  }
+
   if (strictIsolation && present.length > 0) {
     issues.push({
       severity: 'error',
       code: 'simulation-container-collision',
-      message: `Simulation container name collision: ${present.join(', ')}.`,
-      hint: ['Reset the matching manifest-owned simulation installation before creating a new one.'],
+      message: t('preflight.simulationContainerCollision', present.join(', ')),
+      hint: [t('preflight.simulationContainerCollisionHint')],
     });
-  } else if (present.length === names.length) {
+  } else if (ownedPresent.length === names.length) {
     issues.push({
       severity: 'info',
       code: 'all-containers-exist',
-      message: `Existing infrastructure detected (${present.join(', ')}); reusing it.`,
+      message: t('preflight.allContainersExist', present.join(', ')),
       hint: [
-        `"docker compose up -d" will be skipped this run.`,
-        `If the existing config has drifted from what contexa expects, run`,
-        `  docker rm -f ${present.join(' ')}`,
-        `and re-run "contexa init" to recreate them with fresh defaults.`,
+        t('preflight.allContainersExist.skip'),
+        t('preflight.allContainersExist.drift', present.join(' ')),
       ],
     });
-  } else if (present.length > 0) {
+  } else if (ownedPresent.length > 0 && ownershipConflicts.length === 0) {
     issues.push({
       severity: 'info',
       code: 'partial-containers-exist',
-      message: `Existing container(s) detected: ${present.join(', ')}. Remaining missing container(s): ${missing.join(', ')}.`,
+      message: t('preflight.partialContainersExist', present.join(', '), missing.join(', ')),
       hint: [
-        `Contexa will skip recreating existing containers and only start the missing ones.`,
+        t('preflight.partialContainersExist.hint'),
       ],
     });
   }
@@ -188,4 +223,4 @@ function isPortBound(port) {
   });
 }
 
-module.exports = { inspectInfra };
+module.exports = { inspectInfra, isPortBound };

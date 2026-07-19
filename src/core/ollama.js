@@ -1,19 +1,19 @@
 'use strict';
 
 const http = require('http');
-
-const DEFAULT_OLLAMA_PULL_TIMEOUT_MS = 10 * 60 * 1000;
-const MAX_OLLAMA_PULL_TIMEOUT_MS = 60 * 60 * 1000;
-const OLLAMA_IDLE_TIMEOUT_MS = 30 * 1000;
+const { dockerTry } = require('./docker');
+const { resolveProjectName } = require('./project');
+const { DEFAULT_INFRASTRUCTURE_PORTS, SIMULATION_PORTS } = require('./infrastructure');
+const { TIMEOUTS } = require('./timeouts');
 
 function configuredPullTimeoutMs() {
   const raw = process.env.CONTEXA_OLLAMA_PULL_TIMEOUT_MS;
-  if (raw === undefined || raw === '') return DEFAULT_OLLAMA_PULL_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return TIMEOUTS.ollamaPullMs;
 
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0 || value > MAX_OLLAMA_PULL_TIMEOUT_MS) {
+  if (!Number.isInteger(value) || value <= 0 || value > TIMEOUTS.ollamaPullMaximumMs) {
     throw new Error(
-      `CONTEXA_OLLAMA_PULL_TIMEOUT_MS must be an integer between 1 and ${MAX_OLLAMA_PULL_TIMEOUT_MS}`
+      `CONTEXA_OLLAMA_PULL_TIMEOUT_MS must be an integer between 1 and ${TIMEOUTS.ollamaPullMaximumMs}`
     );
   }
   return value;
@@ -103,7 +103,7 @@ function pullOllamaModelWithProgress(port, modelName, spinnerInstance, stepTextT
       });
     });
 
-    request.setTimeout(Math.min(timeoutMs, OLLAMA_IDLE_TIMEOUT_MS), () => {
+    request.setTimeout(Math.min(timeoutMs, TIMEOUTS.socketIdleMs), () => {
       finish(new Error(`Ollama model pull connection was idle: ${modelName}`));
     });
     request.on('error', finish);
@@ -111,7 +111,96 @@ function pullOllamaModelWithProgress(port, modelName, spinnerInstance, stepTextT
   });
 }
 
+function sleep(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
+}
+
+function detectDockerPort(container) {
+  const result = dockerTry(
+    ['inspect', '--format', '{{(index (index .NetworkSettings.Ports "11434/tcp") 0).HostPort}}', container],
+    { stdio: 'pipe', timeout: TIMEOUTS.dockerInspectMs }
+  );
+  if (!result.error && result.status === 0) {
+    const port = Number.parseInt((result.stdout || '').toString().trim(), 10);
+    if (port > 0) return port;
+  }
+  return container.startsWith('ctxa-sim') ? SIMULATION_PORTS.ollama : DEFAULT_INFRASTRUCTURE_PORTS.ollama;
+}
+
+function isNativeOllamaRunning(port, timeoutMs = TIMEOUTS.httpHealthProbeMs) {
+  return new Promise(resolve => {
+    const request = http.get({ hostname: '127.0.0.1', port, path: '/api/tags', timeout: timeoutMs }, response => {
+      resolve(response.statusCode === 200);
+      response.resume();
+    });
+    request.on('error', () => resolve(false));
+    request.on('timeout', () => {
+      request.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function detectOllamaSource(overrideContainer, dependencies = {}) {
+  const inspect = dependencies.inspect || dockerTry;
+  const resolveName = dependencies.resolveProjectName || resolveProjectName;
+  const resolvePort = dependencies.detectDockerPort || detectDockerPort;
+  const nativeRunning = dependencies.isNativeOllamaRunning || isNativeOllamaRunning;
+  if (overrideContainer) {
+    const result = inspect(['inspect', '--format', '{{.State.Running}}', overrideContainer], {
+      stdio: 'pipe', timeout: TIMEOUTS.dockerInspectMs,
+    });
+    if (!result.error && result.status === 0
+        && (result.stdout || '').toString().trim() === 'true') {
+      return { type: 'docker', container: overrideContainer, port: resolvePort(overrideContainer) };
+    }
+    return { type: null };
+  }
+
+  const project = resolveName();
+  const candidates = [`${project}-ollama`];
+  if (project !== 'contexa') candidates.push('contexa-ollama');
+  if (project !== 'ctxa-sim') candidates.push('ctxa-sim-ollama');
+  for (const container of candidates) {
+    const result = inspect(['inspect', '--format', '{{.State.Running}}', container], {
+      stdio: 'pipe', timeout: TIMEOUTS.dockerInspectMs,
+    });
+    if (!result.error && result.status === 0
+        && (result.stdout || '').toString().trim() === 'true') {
+      return { type: 'docker', container, port: resolvePort(container) };
+    }
+  }
+
+  return await nativeRunning(DEFAULT_INFRASTRUCTURE_PORTS.ollama)
+    ? { type: 'native', port: DEFAULT_INFRASTRUCTURE_PORTS.ollama }
+    : { type: null };
+}
+
+async function waitForDockerOllama(container, deadlineMs) {
+  while (Date.now() < deadlineMs) {
+    const probe = dockerTry(['exec', container, 'ollama', 'list'], {
+      stdio: 'ignore', timeout: TIMEOUTS.ollamaCommandProbeMs,
+    });
+    if (!probe.error && probe.status === 0) return true;
+    await sleep(TIMEOUTS.simulationPollMs);
+  }
+  return false;
+}
+
+async function waitForNativeOllama(port, deadlineMs) {
+  while (Date.now() < deadlineMs) {
+    if (await isNativeOllamaRunning(port)) return true;
+    await sleep(TIMEOUTS.simulationPollMs);
+  }
+  return false;
+}
+
 module.exports = {
   pullOllamaModelWithProgress,
-  configuredPullTimeoutMs
+  configuredPullTimeoutMs,
+  detectDockerPort,
+  isNativeOllamaRunning,
+  detectOllamaSource,
+  waitForDockerOllama,
+  waitForNativeOllama,
 };

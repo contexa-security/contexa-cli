@@ -26,16 +26,18 @@ const path = require('path');
 const os = require('os');
 
 function resolveProjectName(fallbackName = 'contexa') {
-  const explicitFallback = fallbackName && fallbackName !== 'contexa' ? fallbackName : null;
   const envName = process.env.CONTEXA_PROJECT && process.env.CONTEXA_PROJECT.trim();
-  return sanitizeProjectName(explicitFallback || envName || fallbackName || 'contexa');
+  return sanitizeProjectName(envName || fallbackName || 'contexa');
 }
 
-function containerName(svc) {
+function containerName(svc, projectName) {
   if (!svc || typeof svc !== 'string') {
     throw new Error('containerName: service short-name is required');
   }
-  return `${resolveProjectName()}-${svc}`;
+  const project = projectName
+    ? sanitizeProjectName(projectName)
+    : resolveProjectName();
+  return `${project}-${svc}`;
 }
 
 // OS-specific contexa home for storing per-project infrastructure artifacts

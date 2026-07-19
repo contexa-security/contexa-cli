@@ -19,6 +19,11 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { sanitizeProjectName } = require('../project');
+const {
+  DEFAULT_INFRASTRUCTURE_PORTS,
+  INFRASTRUCTURE_IMAGE_DEFAULTS,
+  DEFAULT_DEVELOPMENT_DB_PASSWORD,
+} = require('../infrastructure');
 
 async function generateDockerCompose(infraDir, opts = {}) {
   const { infra = 'standalone', includeOllama = false, projectName = 'contexa' } = opts;
@@ -46,15 +51,15 @@ async function generateDockerCompose(infraDir, opts = {}) {
 # Common overrides:
 #   CONTEXA_PROJECT                compose project name + container prefix (default "contexa")
 #   COMPOSE_BIND_HOST              bind host on the docker host  (default 127.0.0.1)
-#   CONTEXA_POSTGRES_PORT          Postgres host port            (default 5432)
-#   CONTEXA_OLLAMA_PORT            Ollama host port              (default 11434)  [include-ollama]
-#   CONTEXA_REDIS_PORT             Redis host port               (default 6379)  [distributed]
-#   CONTEXA_ZOOKEEPER_PORT         Zookeeper host port           (default 2181)  [distributed]
-#   CONTEXA_KAFKA_PORT             Kafka host port               (default 9092)  [distributed]
-#   CONTEXA_PGVECTOR_IMAGE_TAG     pgvector image tag            (default pg16)
+#   CONTEXA_POSTGRES_PORT          Postgres host port            (default ${DEFAULT_INFRASTRUCTURE_PORTS.postgres})
+#   CONTEXA_OLLAMA_PORT            Ollama host port              (default ${DEFAULT_INFRASTRUCTURE_PORTS.ollama})  [include-ollama]
+#   CONTEXA_REDIS_PORT             Redis host port               (default ${DEFAULT_INFRASTRUCTURE_PORTS.redis})  [distributed]
+#   CONTEXA_ZOOKEEPER_PORT         Zookeeper host port           (default ${DEFAULT_INFRASTRUCTURE_PORTS.zookeeper})  [distributed]
+#   CONTEXA_KAFKA_PORT             Kafka host port               (default ${DEFAULT_INFRASTRUCTURE_PORTS.kafka})  [distributed]
+#   CONTEXA_PGVECTOR_IMAGE_TAG     pgvector image tag            (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.pgvector})
 #   CONTEXA_OLLAMA_IMAGE_TAG       ollama image tag              (default latest - PIN IN PROD)
-#   CONTEXA_REDIS_IMAGE_TAG        redis image tag               (default 7.2-alpine)
-#   CONTEXA_KAFKA_PLATFORM_VERSION confluentinc cp-* version     (default 7.4.0)
+#   CONTEXA_REDIS_IMAGE_TAG        redis image tag               (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.redis})
+#   CONTEXA_KAFKA_PLATFORM_VERSION confluentinc cp-* version     (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.kafkaPlatform})
 name: \${CONTEXA_PROJECT:-${defaultProjectName}}
 
 x-contexa-ownership: &contexa-ownership
@@ -66,15 +71,15 @@ services:
   # PostgreSQL with PGVector
   postgres:
     labels: *contexa-ownership
-    image: pgvector/pgvector:\${CONTEXA_PGVECTOR_IMAGE_TAG:-pg16}
+    image: pgvector/pgvector:\${CONTEXA_PGVECTOR_IMAGE_TAG:-${INFRASTRUCTURE_IMAGE_DEFAULTS.pgvector}}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-postgres
     environment:
       POSTGRES_DB: \${CONTEXA_DB_NAME:-contexa}
       POSTGRES_USER: \${CONTEXA_DB_USERNAME:-contexa}
-      POSTGRES_PASSWORD: \${CONTEXA_DB_PASSWORD:-contexa1234!@#}
+      POSTGRES_PASSWORD: \${CONTEXA_DB_PASSWORD:-${DEFAULT_DEVELOPMENT_DB_PASSWORD}}
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     ports:
-      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_POSTGRES_PORT:-5432}:5432"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_POSTGRES_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.postgres}}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -92,10 +97,10 @@ services:
   # CONTEXA_OLLAMA_IMAGE_TAG to a specific version for reproducibility.
   ollama:
     labels: *contexa-ownership
-    image: ollama/ollama:\${CONTEXA_OLLAMA_IMAGE_TAG:-latest}
+    image: ollama/ollama:\${CONTEXA_OLLAMA_IMAGE_TAG:-${INFRASTRUCTURE_IMAGE_DEFAULTS.ollama}}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-ollama
     ports:
-      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_OLLAMA_PORT:-11434}:11434"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_OLLAMA_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.ollama}}:11434"
     volumes:
       - ollama-data:/root/.ollama
     environment:
@@ -115,10 +120,10 @@ services:
   # Redis - Session store, cache, distributed locks (PoC/demo only)
   redis:
     labels: *contexa-ownership
-    image: redis:\${CONTEXA_REDIS_IMAGE_TAG:-7.2-alpine}
+    image: redis:\${CONTEXA_REDIS_IMAGE_TAG:-${INFRASTRUCTURE_IMAGE_DEFAULTS.redis}}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-redis
     ports:
-      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_REDIS_PORT:-6379}:6379"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_REDIS_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.redis}}:6379"
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
       - redis-data:/data
@@ -132,13 +137,13 @@ services:
   # Zookeeper - Kafka coordinator
   zookeeper:
     labels: *contexa-ownership
-    image: confluentinc/cp-zookeeper:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
+    image: confluentinc/cp-zookeeper:\${CONTEXA_KAFKA_PLATFORM_VERSION:-${INFRASTRUCTURE_IMAGE_DEFAULTS.kafkaPlatform}}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
-      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_ZOOKEEPER_PORT:-2181}:2181"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_ZOOKEEPER_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.zookeeper}}:2181"
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-log:/var/lib/zookeeper/log
@@ -153,7 +158,7 @@ services:
   # Kafka - Event streaming
   kafka:
     labels: *contexa-ownership
-    image: confluentinc/cp-kafka:\${CONTEXA_KAFKA_PLATFORM_VERSION:-7.4.0}
+    image: confluentinc/cp-kafka:\${CONTEXA_KAFKA_PLATFORM_VERSION:-${INFRASTRUCTURE_IMAGE_DEFAULTS.kafkaPlatform}}
     container_name: \${CONTEXA_PROJECT:-${defaultProjectName}}-kafka
     depends_on:
       zookeeper:
@@ -161,14 +166,14 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:\${CONTEXA_KAFKA_PORT:-9092}
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:\${CONTEXA_KAFKA_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.kafka}}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     ports:
-      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_KAFKA_PORT:-9092}:9092"
+      - "\${COMPOSE_BIND_HOST:-127.0.0.1}:\${CONTEXA_KAFKA_PORT:-${DEFAULT_INFRASTRUCTURE_PORTS.kafka}}:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:

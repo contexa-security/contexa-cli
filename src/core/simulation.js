@@ -4,17 +4,11 @@ const crypto = require('crypto');
 const fs = require('fs-extra');
 const path = require('path');
 const { dockerTry } = require('./docker');
+const { SIMULATION_PORTS } = require('./infrastructure');
+const { TIMEOUTS } = require('./timeouts');
 
 const SIMULATION_PROJECT = 'ctxa-sim';
 const SIMULATION_PROFILE = 'contexa-sim';
-const SIMULATION_PORTS = Object.freeze({
-  postgres: 25432,
-  ollama: 31434,
-  redis: 26379,
-  zookeeper: 22181,
-  kafka: 29092,
-});
-
 function derivedDatabasePassword(installationId) {
   if (typeof installationId !== 'string' || !installationId) {
     throw new Error('Simulation installation ID is required to derive the isolated database credential.');
@@ -112,7 +106,9 @@ function expectedSimulationServices(includeOllama = true) {
 }
 
 function checkedDocker(args, description) {
-  const result = dockerTry(args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+  const result = dockerTry(args, {
+    stdio: ['ignore', 'pipe', 'pipe'], timeout: TIMEOUTS.dockerCommandProbeMs,
+  });
   if (result.error || result.status !== 0) {
     const detail = result.stderr ? result.stderr.toString().trim() : '';
     throw result.error || new Error(`${description} failed${detail ? `: ${detail}` : ''}`);
@@ -169,8 +165,8 @@ function verifySimulationInfrastructure(installationId, includeOllama = true) {
 }
 
 async function waitForSimulationInfrastructure(installationId, includeOllama = true, options = {}) {
-  const timeoutMs = options.timeoutMs === undefined ? 120000 : Number(options.timeoutMs);
-  const intervalMs = options.intervalMs === undefined ? 2000 : Number(options.intervalMs);
+  const timeoutMs = options.timeoutMs === undefined ? TIMEOUTS.simulationHealthMs : Number(options.timeoutMs);
+  const intervalMs = options.intervalMs === undefined ? TIMEOUTS.simulationPollMs : Number(options.intervalMs);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0
       || !Number.isFinite(intervalMs) || intervalMs < 0) {
     throw new Error('Simulation health timeout and interval must be valid positive bounds.');

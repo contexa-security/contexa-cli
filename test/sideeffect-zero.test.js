@@ -23,6 +23,7 @@ const {
   findTopLevelDependenciesInsertIndex, insertIntoTopLevelDependencies,
 } = require('../src/core/injector');
 const { containerName, resolveProjectName } = require('../src/core/project');
+const { normalizePath } = require('../src/core/init-plan');
 const { detectSpringProject } = require('../src/core/detector');
 const { SIMULATION_PROJECT, simulationEnvironment } = require('../src/core/simulation');
 
@@ -98,6 +99,10 @@ test('S3: containerName respects CONTEXA_PROJECT env (production vs simulate)', 
     process.env.CONTEXA_PROJECT = 'ctxa-sim';
     assert.equal(containerName('ollama'), 'ctxa-sim-ollama');
     assert.equal(resolveProjectName(), 'ctxa-sim');
+    assert.equal(resolveProjectName('detected-project'), 'ctxa-sim',
+      'CONTEXA_PROJECT must override an auto-detected fallback name');
+    assert.equal(containerName('postgres', 'manifest-project'), 'manifest-project-postgres',
+      'ownership checks must be able to target the manifest project explicitly');
 
     process.env.CONTEXA_PROJECT = 'acme-prod';
     assert.equal(containerName('postgres'), 'acme-prod-postgres');
@@ -452,13 +457,11 @@ test('A2b: reset flows restore project files and keep infra cleanup scoped', () 
 // =====================================================================
 
 test('A3+A4: normalizePath expands ~ and resolves relative paths against baseDir', () => {
-  // Pull the helper out of init.js source via require - it's not exported,
-  // so we read the source and assert the behavior contract is encoded.
-  const initSrc = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'commands', 'init.js'), 'utf8');
-  assert.match(initSrc, /function normalizePath\(/, 'normalizePath helper must be defined');
-  assert.match(initSrc, /os\.homedir\(\)/, 'normalizePath must reference os.homedir() to expand ~');
-  assert.match(initSrc, /path\.resolve\(baseDir,/, 'normalizePath must resolve relative paths against baseDir');
+  const baseDir = path.join(os.tmpdir(), 'contexa-path-base');
+  assert.equal(normalizePath('relative/path', baseDir), path.resolve(baseDir, 'relative/path'));
+  assert.equal(normalizePath('~', baseDir), path.resolve(os.homedir()));
+  assert.equal(normalizePath('~/ctxa', baseDir), path.resolve(os.homedir(), 'ctxa'));
+  assert.equal(normalizePath('', baseDir), null);
 });
 
 // =====================================================================

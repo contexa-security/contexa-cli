@@ -19,7 +19,8 @@
 //      so callers that need to branch on status can do so cleanly.
 
 const { spawnSync } = require('child_process');
-const DEFAULT_DOCKER_TIMEOUT_MS = 120000;
+const { TIMEOUTS } = require('./timeouts');
+const DEFAULT_DOCKER_TIMEOUT_MS = TIMEOUTS.dockerDefaultMs;
 
 function boundedOptions(opts, defaultTimeoutMs = DEFAULT_DOCKER_TIMEOUT_MS) {
   return opts.timeout === undefined ? { ...opts, timeout: defaultTimeoutMs } : opts;
@@ -57,14 +58,14 @@ function dockerCompose(args, opts = {}) {
 
 // True if the docker CLI is on PATH. Used by detector.js / preflight.js to
 // distinguish "not installed" from "installed but daemon stopped".
-function isDockerCliInstalled(timeoutMs = 3000) {
+function isDockerCliInstalled(timeoutMs = TIMEOUTS.dockerCliProbeMs) {
   const r = dockerTry(['--version'], { stdio: 'ignore', timeout: timeoutMs });
   return !r.error && r.status === 0;
 }
 
 // True if the docker daemon is reachable. Assumes isDockerCliInstalled()
 // already returned true.
-function isDockerDaemonRunning(timeoutMs = 5000) {
+function isDockerDaemonRunning(timeoutMs = TIMEOUTS.dockerInspectMs) {
   const r = dockerTry(['info'], { stdio: 'ignore', timeout: timeoutMs });
   return !r.error && r.status === 0;
 }

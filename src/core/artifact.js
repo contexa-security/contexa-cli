@@ -7,6 +7,7 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const { pipeline } = require('stream/promises');
+const { TIMEOUTS } = require('./timeouts');
 
 const MAXMIND_MARKER = Buffer.concat([Buffer.from([0xab, 0xcd, 0xef]), Buffer.from('MaxMind.com')]);
 
@@ -22,7 +23,8 @@ async function ensureVerifiedArtifact(contract, options) {
     if (options.sourcePath) {
       await fs.copy(path.resolve(options.sourcePath), temporary, { overwrite: false });
     } else {
-      await downloadToFile(contract.url, temporary, contract.size, options.timeoutMs || 120000);
+      await downloadToFile(contract.url, temporary, contract.size,
+        options.timeoutMs || TIMEOUTS.artifactDownloadMs);
     }
     await verifyArtifact(temporary, contract);
     if (await fs.pathExists(destination)) {
@@ -116,7 +118,8 @@ function downloadToFile(url, destination, expectedSize, timeoutMs, redirects = 0
         finish(error);
       }
     });
-    request.setTimeout(Math.min(timeoutMs, 30000), () => request.destroy(new Error('Artifact socket timeout exceeded.')));
+    request.setTimeout(Math.min(timeoutMs, TIMEOUTS.socketIdleMs),
+      () => request.destroy(new Error('Artifact socket timeout exceeded.')));
     request.on('error', error => {
       if (!responseStarted) finish(error);
     });

@@ -7,7 +7,7 @@ const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
 
-const DEFAULT_DB_PASSWORD = 'contexa1234!@#';
+const { DEFAULT_DEVELOPMENT_DB_PASSWORD } = require('../core/infrastructure');
 // Dead keys: present in older CLI output but not bound by any
 // @ConfigurationProperties class. Surface them so users migrate away.
 const DEAD_KEYS = [
@@ -130,7 +130,7 @@ module.exports = function (program) {
           const flat = {};
           flatten(root.contexa, 'contexa', flat);
           for (const [k, v] of Object.entries(flat)) {
-            if (typeof v === 'string' && v.includes(DEFAULT_DB_PASSWORD) &&
+            if (typeof v === 'string' && v.includes(DEFAULT_DEVELOPMENT_DB_PASSWORD) &&
                 k.startsWith('contexa.datasource.password')) {
               issues.push(t('scan.defaultDbPassword'));
               break;

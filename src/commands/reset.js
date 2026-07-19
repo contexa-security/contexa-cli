@@ -5,8 +5,7 @@ const ora = require('ora');
 const path = require('path');
 const fs = require('fs-extra');
 const inquirer = require('inquirer');
-const { spawnSync } = require('child_process');
-const { dockerCompose, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
+const { dockerCompose, dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
 const { t } = require('../core/i18n');
 const {
   INSTALL_MODES, backupRoot, loadManifest, manifestPath, saveManifest,
@@ -15,14 +14,7 @@ const {
   auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
 } = require('../core/reset-service');
 const { simulationEnvironment } = require('../core/simulation');
-
-function dockerTry(args, opts = {}) {
-  try {
-    return spawnSync('docker', args, { ...opts, shell: false });
-  } catch (error) {
-    return { error, status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from(error.message || '') };
-  }
-}
+const { TIMEOUTS } = require('../core/timeouts');
 
 function inspectDockerLabels(type, name) {
   const args = type === 'container'
@@ -33,18 +25,28 @@ function inspectDockerLabels(type, name) {
   try {
     return JSON.parse(result.stdout.toString().trim() || '{}') || {};
   } catch {
-    throw new Error(`Docker ${type} labels are unreadable: ${name}`);
+    const error = new Error(`RESET_LABELS_UNREADABLE ${t('reset.error.labelsUnreadable', type, name)}`);
+    error.code = 'RESET_LABELS_UNREADABLE';
+    throw error;
   }
 }
 
 function assertExactInfraDir(expectedInfraDir, requestedInfraDir) {
-  if (!expectedInfraDir) throw new Error('The ownership manifest does not contain an infrastructure directory.');
+  if (!expectedInfraDir) {
+    const error = new Error(`RESET_INFRA_DIR_MISSING ${t('reset.error.infraDirMissing')}`);
+    error.code = 'RESET_INFRA_DIR_MISSING';
+    throw error;
+  }
   const expected = path.resolve(expectedInfraDir);
   if (requestedInfraDir && path.resolve(requestedInfraDir) !== expected) {
-    throw new Error(`--infra-dir does not match the manifest-owned directory: ${expected}`);
+    const error = new Error(`RESET_INFRA_DIR_MISMATCH ${t('reset.error.infraDirMismatch', expected)}`);
+    error.code = 'RESET_INFRA_DIR_MISMATCH';
+    throw error;
   }
   if (fs.existsSync(expected) && fs.lstatSync(expected).isSymbolicLink()) {
-    throw new Error(`Infrastructure directory must not be a symbolic link: ${expected}`);
+    const error = new Error(`RESET_INFRA_DIR_SYMLINK ${t('reset.error.infraDirSymlink', expected)}`);
+    error.code = 'RESET_INFRA_DIR_SYMLINK';
+    throw error;
   }
   return expected;
 }
@@ -63,12 +65,14 @@ function simulateComposeEnv(installationId) {
 
 async function composeDown(projectName, infraDir, env) {
   const result = dockerCompose(['-p', projectName, 'down', '-v', '--timeout', '0'], {
-    cwd: infraDir, stdio: 'pipe', env, timeout: 30000,
+    cwd: infraDir, stdio: 'pipe', env, timeout: TIMEOUTS.dockerComposeRollbackMs,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
     const stderr = result.stderr ? result.stderr.toString() : 'Unknown error';
-    throw new Error(`${projectName} down failed: ${stderr.trim()}`);
+    const error = new Error(`RESET_DOCKER_DOWN_FAILED ${t('reset.error.downFailed', projectName, stderr.trim())}`);
+    error.code = 'RESET_DOCKER_DOWN_FAILED';
+    throw error;
   }
   return { skipped: false };
 }
@@ -78,7 +82,7 @@ function mergeAudit(target, source) {
 }
 
 function printAudit(audit) {
-  console.log(chalk.cyan('  Reset audit'));
+  console.log(chalk.cyan(`  ${t('reset.audit.title')}`));
   for (const status of ['removed', 'restored', 'preserved', 'conflict', 'failed']) {
     for (const item of audit[status]) {
       const suffix = item.detail ? ` - ${item.detail}` : '';
@@ -111,23 +115,23 @@ function hasAnyTarget(targets) {
   return targets.simulate || targets.infra || targets.code;
 }
 function printResetPlan(targets, details) {
-  console.log(chalk.cyan('  Reset plan'));
+  console.log(chalk.cyan(`  ${t('reset.plan.title')}`));
   if (targets.simulate) {
-    console.log(chalk.gray('    - Simulation Docker stack: ctxa-sim containers and volumes only'));
-    console.log(chalk.gray(`      compose dir: ${details.simInfraDir}`));
+    console.log(chalk.gray(`    - ${t('reset.plan.simulation')}`));
+    console.log(chalk.gray(`      ${t('reset.plan.composeDir', details.simInfraDir)}`));
   }
   if (targets.infra) {
-    console.log(chalk.gray(`    - Project Docker stack: ${details.projectName} containers and volumes`));
-    console.log(chalk.gray(`      compose dir: ${details.infraDir}`));
+    console.log(chalk.gray(`    - ${t('reset.plan.infrastructure', details.projectName)}`));
+    console.log(chalk.gray(`      ${t('reset.plan.composeDir', details.infraDir)}`));
   }
   if (targets.code) {
     console.log(chalk.gray(targets.simulate
-      ? '    - Simulation-managed overlay, profile configuration, and data only'
-      : '    - Project files: restore only CLI-tracked changes from contexa/manifest.json backups'));
-    console.log(chalk.gray('      later user changes are preserved by 3-way restore; overlapping edits are reported as conflicts'));
+      ? `    - ${t('reset.plan.simulationCode')}`
+      : `    - ${t('reset.plan.projectCode')}`));
+    console.log(chalk.gray(`      ${t('reset.plan.threeWay')}`));
   }
   if (targets.simulate && !targets.infra) {
-    console.log(chalk.gray('    - Production/project Docker stack is not targeted by --simulate'));
+    console.log(chalk.gray(`    - ${t('reset.plan.productionPreserved')}`));
   }
   console.log('');
 }
@@ -135,34 +139,34 @@ function printResetPlan(targets, details) {
 module.exports = function (program) {
   program
     .command('reset')
-    .description(t('reset.description') || 'Reset Contexa infrastructure; use --simulate for the isolated ctxa-sim stack')
-    .option('--dir <path>', 'Project directory', process.cwd())
-    .option('--infra-dir <path>', 'Override the contexa-owned infrastructure directory')
-    .option('-s, --simulate', 'Reset simulation (ctxa-sim) Docker stack/cache and restore project files')
-    .option('-i, --infra', 'Reset only project-specific Docker stack')
-    .option('-c, --code', 'Restore only project source code and settings from backups')
-    .option('-a, --all', 'Force reset all components (code, project infra, and simulation stack)')
-    .option('-y, --yes', 'Skip prompts, use defaults')
+    .description(t('reset.description'))
+    .option('--dir <path>', t('reset.option.dir'), process.cwd())
+    .option('--infra-dir <path>', t('reset.option.infraDir'))
+    .option('-s, --simulate', t('reset.option.simulate'))
+    .option('-i, --infra', t('reset.option.infra'))
+    .option('-c, --code', t('reset.option.code'))
+    .option('-a, --all', t('reset.option.all'))
+    .option('-y, --yes', t('reset.option.yes'))
     .action(async (opts) => {
       let proceed = !!opts.yes;
       if (!proceed) {
         const answer = await inquirer.prompt([{
           type: 'confirm',
           name: 'proceed',
-          message: 'Run reset for the selected Contexa target? Use --simulate for the ctxa-sim flow.',
+          message: t('reset.prompt.confirm'),
           default: false
         }]);
         proceed = answer.proceed;
       }
 
       if (!proceed) {
-        console.log(chalk.yellow('\n  ! Reset cancelled.'));
+        console.log(chalk.yellow(`\n  ! ${t('reset.cancelled')}`));
         console.log('');
         return;
       }
 
       console.log(chalk.cyan('\n  ============================================='));
-      console.log(chalk.cyan(`  ${t('reset.starting') || 'Starting Contexa Reset...'}`));
+      console.log(chalk.cyan(`  ${t('reset.starting')}`));
       console.log(chalk.cyan('  =============================================\n'));
 
       const projectDir = path.resolve(opts.dir);
@@ -181,22 +185,22 @@ module.exports = function (program) {
           targets.code = true;
           targets.infra = hasOwnedManifest && resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip';
           console.log(chalk.cyan(targets.infra
-            ? '  i Reset target: manifest-owned project infrastructure and project file restore.'
-            : '  i Reset target: manifest-owned project file restore only.'));
+            ? `  i ${t('reset.target.autoInfraCode')}`
+            : `  i ${t('reset.target.autoCode')}`));
         } else {
           const answer = await inquirer.prompt([{
             type: 'checkbox',
             name: 'targets',
-            message: t('reset.prompt.targets') || 'Choose targets to reset:',
+            message: t('reset.prompt.targets'),
             choices: [
-              { name: t('reset.target.infra') || 'Remove project-specific Docker infrastructure', value: 'infra', checked: true },
-              { name: t('reset.target.simulate') || 'Remove simulation (ctxa-sim) Docker infrastructure', value: 'simulate', checked: false },
-              { name: t('reset.target.code') || 'Restore project source code & settings from backups', value: 'code', checked: true }
+              { name: t('reset.target.infra'), value: 'infra', checked: true },
+              { name: t('reset.target.simulate'), value: 'simulate', checked: false },
+              { name: t('reset.target.code'), value: 'code', checked: true }
             ]
           }]);
 
           if (!answer.targets || answer.targets.length === 0) {
-            console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget') || 'No targets selected. Aborting reset.'}`));
+            console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget')}`));
             console.log('');
             return;
           }
@@ -210,15 +214,17 @@ module.exports = function (program) {
       }
 
       if (!hasOwnedManifest && (targets.infra || targets.simulate)) {
-        console.log(chalk.yellow('  i No matching Contexa ownership manifest exists. No infrastructure or volume was changed.'));
+        console.log(chalk.yellow(`  i ${t('reset.noManifest.infrastructure')}`));
         return;
       }
       if (!hasOwnedManifest && targets.code) {
-        console.log(chalk.yellow('  i No matching Contexa ownership manifest exists. No project file was changed.'));
+        console.log(chalk.yellow(`  i ${t('reset.noManifest.code')}`));
         return;
       }
       if ((targets.infra || targets.simulate) && !projectName) {
-        throw new Error('The ownership manifest does not contain a project name; infrastructure reset was refused.');
+        const error = new Error(`RESET_PROJECT_NAME_MISSING ${t('reset.error.projectNameMissing')}`);
+        error.code = 'RESET_PROJECT_NAME_MISSING';
+        throw error;
       }
 
       const manifestInfraDir = resetManifest.metadata && resetManifest.metadata.infraDir;
@@ -233,7 +239,7 @@ module.exports = function (program) {
       });
 
       if (targets.simulate || targets.infra) {
-        const spinner = ora(t('reset.stoppingContainers') || 'Stopping and removing Docker containers...').start();
+        const spinner = ora(t('reset.stoppingContainers')).start();
         const ownedInfraDir = planSimInfraDir || planInfraDir;
         try {
           const dockerAudit = await performOwnedDockerCleanup({
@@ -254,11 +260,11 @@ module.exports = function (program) {
           });
           mergeAudit(resetAudit, dockerAudit);
           infraCompleted = true;
-          spinner.succeed(t('reset.stoppingContainers') || 'Docker containers stopped and removed.');
+          spinner.succeed(t('reset.dockerRemoved'));
         } catch (error) {
           resetHadIssues = true;
           resetAudit.failed.push({ resource: 'docker', detail: error.message });
-          spinner.fail(`Docker cleanup failed: ${error.message}`);
+          spinner.fail(t('reset.error.dockerCleanup', error.message));
         }
       }
 
@@ -270,24 +276,24 @@ module.exports = function (program) {
           detail: 'Docker cleanup did not complete; no project-managed state was changed.',
         });
         printAudit(resetAudit);
-        console.log(chalk.yellow('\n  ! Contexa reset stopped safely. Resolve Docker access and run the same command again.\n'));
+        console.log(chalk.yellow(`\n  ! ${t('reset.safeStop')}\n`));
         process.exitCode = 1;
         return;
       }
 
       if (targets.code) {
-        const spinner = ora(t('reset.restoringFiles') || 'Restoring backup files...').start();
+        const spinner = ora(t('reset.restoringFiles')).start();
         try {
           const restoreResult = await restoreProjectFiles(projectDir, installMode);
           mergeAudit(resetAudit, restoreResult.audit);
           if (auditIssueCount(restoreResult.audit) > 0) {
             resetHadIssues = true;
-            spinner.warn(`Project file restore has ${auditIssueCount(restoreResult.audit)} conflict or failed item(s).`);
+            spinner.warn(t('reset.restoreIssues', auditIssueCount(restoreResult.audit)));
           } else {
-            spinner.succeed(t('reset.restoringFiles') || 'Backup files restored.');
+            spinner.succeed(t('reset.filesRestored'));
           }
         } catch (error) {
-          spinner.fail(`Project file restore failed: ${error.message}`);
+          spinner.fail(t('reset.error.restore', error.message));
           throw error;
         }
       }
@@ -316,10 +322,10 @@ module.exports = function (program) {
       printAudit(resetAudit);
 
       if (resetHadIssues) {
-        console.log(chalk.yellow(`\n  ! Contexa reset completed with issues. Review the messages above before re-running.\n`));
+        console.log(chalk.yellow(`\n  ! ${t('reset.completedWithIssues')}\n`));
         process.exitCode = 1;
       } else {
-        console.log(chalk.green(`\n  v ${t('reset.success') || 'Contexa reset successfully completed.'}\n`));
+        console.log(chalk.green(`\n  v ${t('reset.success')}\n`));
       }
     });
 };

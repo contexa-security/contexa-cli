@@ -2,118 +2,28 @@
 
 const chalk = require('chalk');
 const ora   = require('ora');
-const inquirer = require('inquirer');
 const path  = require('path');
-const os    = require('os');
 const fs    = require('fs-extra');
 const { Option } = require('commander');
-const { dockerSync, dockerTry, dockerCompose, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
-const { execSync } = require('child_process');
+const { dockerCompose } = require('../core/docker');
 const releaseManifest = require('../../release-manifest.json');
-const { pullOllamaModelWithProgress } = require('../core/ollama');
-
-// Normalize a user-entered path so that:
-//   1) "~" or "~/..." is expanded to the OS home directory (shells do this
-//      for command-line args, but inquirer prompt input does not).
-//   2) Relative paths resolve against `baseDir` (typically opts.dir, the
-//      customer's project root). path.resolve() alone resolves against
-//      process.cwd(), which is wrong when the user passed --dir <other>.
-function normalizePath(input, baseDir) {
-  if (!input) return null;
-  let p = String(input).trim();
-  if (!p) return null;
-  if (p === '~') p = os.homedir();
-  else if (p.startsWith('~/') || p.startsWith('~\\')) {
-    p = path.join(os.homedir(), p.slice(2));
-  }
-  return path.isAbsolute(p) ? path.resolve(p) : path.resolve(baseDir, p);
-}
-function normalizeProviders(providerOpt, includeOllama) {
-  if (providerOpt) {
-    const values = String(providerOpt).split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
-    if (values.includes('none')) return [];
-    const allowed = new Set(['openai', 'anthropic', 'ollama']);
-    const invalid = values.filter(v => !allowed.has(v));
-    if (invalid.length > 0) {
-      throw new Error(`Unsupported provider: ${invalid.join(', ')}. Use openai, anthropic, ollama, or none.`);
-    }
-    return [...new Set(values)];
-  }
-  return includeOllama ? ['ollama'] : [];
-}
-
-function aiProviderSelected(answers) {
-  return Array.isArray(answers.llmProviders) && answers.llmProviders.length > 0;
-}
-
-function trackedFileState(manifest, projectDir, filePath) {
-  const relativePath = path.relative(projectDir, filePath).split(path.sep).join('/');
-  const entry = (manifest.files || []).find(file => file.relativePath === relativePath) || null;
-  const transactionFile = manifest.transaction && Array.isArray(manifest.transaction.files)
-    ? manifest.transaction.files.find(file => file.relativePath === relativePath)
-    : null;
-  const lastCliChecksum = entry && (entry.lastCliChecksum || entry.currentChecksum);
-  return {
-    entry,
-    userModified: !!(entry && entry.ownership === 'CLI_OWNED' && lastCliChecksum
-      && transactionFile && transactionFile.startChecksum !== lastCliChecksum),
-  };
-}
-
-function printPlannedChanges(answers, project, paths) {
-  const msg = (key, fallback) => {
-    const value = t(key);
-    return value && value !== key ? value : fallback;
-  };
-
-  console.log(chalk.cyan(`\n  ${msg('planned.title', 'Planned changes')}`));
-  const items = ['SETUP: QUICK'];
-  if (answers.integrationMode === 'standalone') {
-    items.push('INTEGRATION: STANDALONE');
-    items.push(`CREATE: ${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
-  } else {
-    items.push('INTEGRATION: MERGE (starter dependency only unless explicitly activated)');
-    if (answers.simulate) {
-      items.push('NORMAL BUILD: NONE (existing starter is reused)');
-      items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: Simulation profile overlay: ${paths.ymlPath}`);
-      items.push(`${paths.simulationConfigExists ? 'KEEP' : 'CREATE'}: Profile-only @EnableAISecurity configuration: ${paths.simulationConfigPath}`);
-    } else {
-      items.push(`${paths.buildExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
-    }
-    if (paths.writeHostConfig) {
-      if (!answers.simulate) {
-        items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply explicit Contexa settings')}: ${paths.ymlPath}`);
-      }
-    } else {
-      items.push('HOST CONFIG: NONE (module defaults)');
-    }
-  }
-  if (answers.enableAiSecurity) {
-    items.push(`${msg('planned.enableAi', 'Enable AI security settings')} (${answers.llmProviders.join(', ')})`);
-    if (answers.simulate) {
-      items.push('SIMULATION ACTIVATION: contexa-sim profile only');
-    } else if (answers.autoAnnotate) {
-      items.push(msg('planned.autoAnnotate', 'Auto-add @EnableAISecurity'));
-    } else if (!project.hasEnableAiSecurity) {
-      items.push(msg('planned.manualAnnotate', 'Add @EnableAISecurity manually after init'));
-    }
-  } else {
-    items.push(msg('planned.aiDisabled', 'AI security remains disabled for now'));
-  }
-  if (answers.infra !== 'skip') {
-    items.push(`${paths.composeExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.createInfra', 'Create selected infrastructure files')}: ${paths.composePath}`);
-    items.push(`DOCKER: ${answers.startDocker ? 'START selected infrastructure services' : 'SKIP service start (--no-docker)'}`);
-  } else {
-    items.push('DOCKER: NONE');
-  }
-  if (paths.geoIpPath) {
-    items.push(`${paths.geoIpExists ? 'KEEP' : (paths.geoIpLocalSource ? 'COPY' : 'DOWNLOAD')}: GeoLite2-City.mmdb: ${paths.geoIpPath}`);
-  } else {
-    items.push('EXTERNAL DOWNLOAD: NONE');
-  }
-  items.push('DELETE: NONE');
-  for (const item of items) console.log(chalk.gray(`    - ${item}`));
-}
+const { pullOllamaModelWithProgress, waitForDockerOllama } = require('../core/ollama');
+const {
+  DEFAULT_OLLAMA_CHAT_MODEL,
+  DEFAULT_OLLAMA_EMBEDDING_MODEL,
+  isValidOllamaModel,
+} = require('../core/provider');
+const { DEFAULT_INFRASTRUCTURE_PORTS, configuredPort } = require('../core/infrastructure');
+const { TIMEOUTS } = require('../core/timeouts');
+const {
+  aiProviderSelected,
+  normalizePath,
+  printPlannedChanges,
+  trackedFileState,
+} = require('../core/init-plan');
+const { collectInitAnswers } = require('../core/init-input');
+const { printInitCompletion } = require('../core/init-report');
+const { runPreinstallationChecks } = require('../core/init-diagnostics');
 const { detectSpringProject } = require('../core/detector');
 const { ensureVerifiedArtifact } = require('../core/artifact');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
@@ -144,18 +54,23 @@ const {
   simulationEnvironment,
   simulationGeoIpPath,
   simulationOverlayPath,
-  simulationRunCommand,
   waitForSimulationInfrastructure,
   writeSimulationConfiguration,
 } = require('../core/simulation');
 
+function initError(code, key, ...args) {
+  const error = new Error(`${code} ${t(key, ...args)}`);
+  error.code = code;
+  return error;
+}
+
 module.exports = function (program) {
   program
     .command('init')
-    .description('Initialize Contexa AI Security in your Spring project')
-    .option('--yes', 'Skip prompts, use defaults')
-    .option('--force', 'Reinitialize even if already configured')
-    .option('--dir <path>', 'Project directory', process.cwd())
+    .description(t('init.description'))
+    .option('--yes', t('init.option.yes'))
+    .option('--force', t('init.option.force'))
+    .option('--dir <path>', t('init.option.dir'), process.cwd())
     // Infrastructure provisioning is OPT-IN. Without --distributed, contexa init
     // only updates application.yml and adds the starter dependency - it does NOT
     // generate docker-compose.yml, does NOT generate initdb scripts, and does NOT
@@ -174,26 +89,26 @@ module.exports = function (program) {
     // dependencies, LLM settings, and optional @EnableAISecurity insertion.
     // --include-ollama only opts in to the local Ollama runtime when AI security
     // is explicitly enabled or simulation is requested.
-    .option('--distributed', 'Install distributed infrastructure (Postgres + Redis + Kafka) for PoC/enterprise demo')
-    .option('--include-ollama', 'Include the local Ollama LLM runtime (off by default; required for offline / no-API-key operation)')
-    .option('--no-docker', 'With --distributed: generate compose files but do not start containers')
-    .option('--simulate', 'Install isolated simulation stack (ctxa-sim-* containers on +20000 ports) so you can practice the manual install flow without colliding with production. Implies --distributed.')
-    .option('--quick', 'Use the guided quick path without showing advanced choices')
-    .option('--enable-ai-security', 'Enable AI security integration during init')
-    .option('--provider <name>', 'AI provider to configure for explicit AI security activation: openai, anthropic, ollama, none. Comma-separated values are allowed.')
-    .option('--auto-annotate', 'When AI security is enabled, add @EnableAISecurity to the main Spring Boot application class')
-    .addOption(new Option('--security-mode <mode>', 'Explicit AI security ownership mode').choices(['sandbox', 'full']))
+    .option('--distributed', t('init.option.distributed'))
+    .option('--include-ollama', t('init.option.includeOllama'))
+    .option('--no-docker', t('init.option.noDocker'))
+    .option('--simulate', t('init.option.simulate'))
+    .option('--quick', t('init.option.quick'))
+    .option('--enable-ai-security', t('init.option.enableAiSecurity'))
+    .option('--provider <name>', t('init.option.provider'))
+    .option('--auto-annotate', t('init.option.autoAnnotate'))
+    .addOption(new Option('--security-mode <mode>', t('init.option.securityMode')).choices(['sandbox', 'full']))
     // The two integration modes. By default the prompt asks the user; these
     // flags exist for prompt-bypass automation.
-    .option('--merge', 'Merge mode: write contexa.* into the customer build/yml (default)')
-    .option('--standalone', 'Standalone mode: place contexa-only build/yml under a separate directory; never touch customer originals')
-    .option('--standalone-dir <path>', 'Standalone mode output directory (default: <projectDir>/contexa)')
+    .option('--merge', t('init.option.merge'))
+    .option('--standalone', t('init.option.standalone'))
+    .option('--standalone-dir <path>', t('init.option.standaloneDir'))
     // Infrastructure files (docker-compose.yml) are ALWAYS written
     // outside the customer project directory. Default: contexa-owned home
     // (Linux/macOS: $XDG_CONFIG_HOME/contexa/<projectName> or $HOME/.contexa/<name>;
     // Windows: %LOCALAPPDATA%\Contexa\<projectName>). Override with --infra-dir.
-    .option('--infra-dir <path>', 'Override the contexa-owned directory used for docker-compose.yml')
-    .option('--check', 'Run environment diagnostic check and exit')
+    .option('--infra-dir <path>', t('init.option.infraDir'))
+    .option('--check', t('init.option.check'))
     .action(async (opts) => {
       const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
       let installTransactionId = null;
@@ -216,14 +131,14 @@ module.exports = function (program) {
         // works end-to-end with no cloud credentials.
         opts.includeOllama = true;
         Object.assign(process.env, simulationEnvironment(process.env, 'preflight'));
-        console.log(chalk.cyan('\n  Simulation mode: isolated stack "ctxa-sim"'));
-        console.log(chalk.gray(`    Postgres : 127.0.0.1:${SIMULATION_PORTS.postgres}  (production stays on 5432)`));
-        console.log(chalk.gray(`    Ollama   : 127.0.0.1:${SIMULATION_PORTS.ollama}  (production stays on 11434)`));
-        console.log(chalk.gray(`    Redis    : 127.0.0.1:${SIMULATION_PORTS.redis}`));
-        console.log(chalk.gray(`    Kafka    : 127.0.0.1:${SIMULATION_PORTS.kafka}`));
-        console.log(chalk.gray('    Base application settings remain byte-identical; only contexa-sim uses isolated Redis/Kafka endpoints.'));
-        console.log(chalk.gray('    Reset anytime: contexa reset --simulate'));
-        console.log(chalk.gray('    Start/stop only the simulation stack: contexa simulate up | down | reset'));
+        console.log(chalk.cyan(`\n  ${t('init.simulation.title')}`));
+        console.log(chalk.gray(`    ${t('init.simulation.postgres', SIMULATION_PORTS.postgres, DEFAULT_INFRASTRUCTURE_PORTS.postgres)}`));
+        console.log(chalk.gray(`    ${t('init.simulation.ollama', SIMULATION_PORTS.ollama, DEFAULT_INFRASTRUCTURE_PORTS.ollama)}`));
+        console.log(chalk.gray(`    ${t('init.simulation.redis', SIMULATION_PORTS.redis)}`));
+        console.log(chalk.gray(`    ${t('init.simulation.kafka', SIMULATION_PORTS.kafka)}`));
+        console.log(chalk.gray(`    ${t('init.simulation.hostPreserved')}`));
+        console.log(chalk.gray(`    ${t('init.simulation.reset')}`));
+        console.log(chalk.gray(`    ${t('init.simulation.manage')}`));
       }
       if (opts.distributed) {
         console.log(chalk.yellow('\n  ! ' + t('init.distributed.warning')));
@@ -231,61 +146,7 @@ module.exports = function (program) {
       }
       console.log('');
 
-      // 0. Pre-installation environment check (--check or forced diagnostic check)
-      if (opts.check || !opts.yes) {
-        console.log(chalk.cyan(`\n  [Diagnostic] Running Pre-installation Checks...`));
-        let checkPass = true;
-
-        // Check Java
-        try {
-          const javaVerOutput = execSync('java -version 2>&1').toString();
-          const match = javaVerOutput.match(/version "(.*?)"/);
-          const version = match ? match[1] : 'unknown';
-          const isJava17 = version.startsWith('17') || parseInt(version.split('.')[0], 10) >= 17;
-          if (!isJava17) {
-            checkPass = false;
-            console.log(chalk.red(`  x Java version: ${version} (Java 17+ required)`));
-            console.log(chalk.gray(`    -> FIX: Install OpenJDK 17+. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
-          }
-        } catch {
-          checkPass = false;
-          console.log(chalk.red(`  x Java is not installed or not in PATH.`));
-          console.log(chalk.gray(`    -> FIX: Install JDK 17 and configure JAVA_HOME. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
-        }
-
-        // Docker is required only when the user explicitly asks for local infrastructure.
-        const needsDockerPrecheck = !!(opts.distributed || opts.simulate);
-        if (needsDockerPrecheck) {
-          const hasDockerCli = isDockerCliInstalled();
-          const hasDockerDaemon = hasDockerCli && isDockerDaemonRunning();
-          if (!hasDockerCli) {
-            checkPass = false;
-            console.log(chalk.red(`  x Docker CLI is not installed.`));
-            console.log(chalk.gray(`    -> FIX: Install Docker Desktop: https://www.docker.com/products/docker-desktop \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
-          } else if (!hasDockerDaemon) {
-            checkPass = false;
-            console.log(chalk.red(`  x Docker daemon is not running.`));
-            console.log(chalk.gray(`    -> FIX: Open Docker Desktop or run 'sudo systemctl start docker'. \u001b]8;;https://docs.ctxa.ai/docs/install/troubleshooting.html#error-catalog\u0007${chalk.cyan('[Troubleshooting Guide]')}\u001b]8;;\u0007`));
-          }
-        } else {
-          console.log(chalk.gray(`  - Docker check skipped. Basic init does not install local infrastructure.`));
-        }
-
-        if (!checkPass) {
-          console.log(chalk.yellow(`\n  ! Pre-installation checks encountered issues.`));
-          console.log(chalk.yellow(`    Please run 'contexa doctor' for a full diagnostic report.`));
-          if (opts.check) {
-            throw new Error('Pre-installation checks failed.');
-          }
-        } else {
-          console.log(chalk.green(`  v Pre-installation checks passed.`));
-          if (opts.check) {
-            console.log(chalk.green(`\n  v Environment check successful. You can safely run 'contexa init'.\n`));
-            return;
-          }
-        }
-        console.log('');
-      }
+      if (runPreinstallationChecks(opts)) return;
 
       // 1. Detect project
       const spinner = ora(t('init.detecting')).start();
@@ -297,22 +158,22 @@ module.exports = function (program) {
       if (!project.isSpring) {
         console.log(chalk.red('  x ' + t('init.notSpring')));
         console.log(chalk.gray('    ' + t('init.notSpring.hint') + '\n'));
-        throw new Error('The target directory is not a Spring Boot project.');
+        throw initError('SPRING_PROJECT_REQUIRED', 'init.notSpring');
       }
       if (opts.simulate && !await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL))) {
-        throw new Error('Simulation requires a completed normal Contexa installation. Run "contexa init" first.');
+        throw initError('SIMULATION_NORMAL_INSTALL_REQUIRED', 'init.error.simulationNormalRequired');
       }
       if (opts.simulate && !project.hasContexta) {
-        throw new Error('Simulation requires the normal Contexa starter dependency; project files were not changed.');
+        throw initError('SIMULATION_STARTER_REQUIRED', 'init.error.simulationStarterRequired');
       }
 
       console.log(chalk.green('  v ' + t('init.detected')));
-      console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || 'unknown'}`));
+      console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || t('common.unknown')}`));
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
       console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate)
         ? (project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing')))
-        : 'not requested'}`));
+        : t('common.notRequested')}`));
 
       const cliProjectName = opts.simulate
         ? SIMULATION_PROJECT
@@ -328,12 +189,12 @@ module.exports = function (program) {
       const wantsContainers = opts.distributed && opts.docker !== false;
       if (!project.hasDocker && wantsContainers) {
         console.log('');
-        console.log(chalk.yellow('  ! Docker is required to start the distributed infrastructure.'));
-        console.log(chalk.gray('    This run will still write compose files so you can start them later.'));
-        console.log(chalk.gray('    To install Docker:'));
+        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
+        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
+        console.log(chalk.gray(`    ${t('init.docker.install')}`));
         console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
         console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
-        console.log(chalk.gray('    To skip infrastructure entirely, abort and re-run without --distributed.'));
+        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
         console.log('');
         // Auto-flip to "files only" mode so we never try to call docker compose.
         opts.docker = false;
@@ -371,195 +232,9 @@ module.exports = function (program) {
       // The detected locale remains the default. --lang is the only language
       // override, so an Enter-only install does not spend a question on locale.
 
-      const explicitIntegrationMode = opts.standalone ? 'standalone'
-        : opts.merge ? 'merge'
-        : null;
+      const answers = await collectInitAnswers(opts, project, cliProjectName);
 
-      const providerFromFlags = normalizeProviders(opts.provider, opts.includeOllama);
-      const explicitAiSecurity = !!(opts.enableAiSecurity || opts.autoAnnotate || opts.provider || opts.includeOllama || opts.simulate);
-      const defaults = {
-        setupMode: 'quick',
-        integrationMode: explicitIntegrationMode || 'merge',
-        securityMode: opts.securityMode || 'sandbox',
-        mode: 'shadow',
-        enableAiSecurity: explicitAiSecurity && providerFromFlags.length > 0,
-        autoAnnotate: !!opts.autoAnnotate,
-        llmProviders: explicitAiSecurity ? providerFromFlags : [],
-        infra: opts.distributed ? 'distributed' : 'skip',
-        injectDep: true,
-        startDocker: opts.docker !== false,
-      };
 
-      // Each prompt's message is prefixed with "\n" so that there is one blank
-      // line above every question. inquirer's rawlist also leaves a blank line
-      // after the answer naturally, giving a consistent breathing-room layout
-      // (asked for explicitly by the operator).
-      if (opts.simulate) {
-        console.log(chalk.cyan('\n  i --simulate selected. Contexa will prepare simulation infrastructure automatically.'));
-        console.log(chalk.gray('    Distributed simulation infrastructure includes PostgreSQL, Redis, Kafka, and Ollama.\n'));
-      }
-
-      const answers = opts.yes ? defaults : await inquirer.prompt([
-        {
-          type: 'confirm', name: 'enableAiSecurity',
-          message: '\n' + t('prompt.enableAiSecurity'),
-          default: false,
-          when: a => !opts.simulate && !opts.enableAiSecurity && !opts.provider && !opts.autoAnnotate,
-        },
-        {
-          type: 'rawlist', name: 'providerQuick',
-          message: '\n' + t('prompt.provider'),
-          default: 'openai',
-          choices: [
-            { name: t('prompt.provider.openai'), value: 'openai' },
-            { name: t('prompt.provider.anthropic'), value: 'anthropic' },
-            { name: t('prompt.provider.ollama'), value: 'ollama' },
-            { name: t('prompt.provider.none'), value: 'none' },
-          ],
-          when: a => (a.setupMode !== 'advanced') && (opts.enableAiSecurity || opts.autoAnnotate || a.enableAiSecurity === true) && !opts.provider,
-        },
-        {
-          type: 'confirm', name: 'autoAnnotate',
-          message: '\n' + t('prompt.autoAnnotate'),
-          default: false,
-          when: a => (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true) && !opts.autoAnnotate,
-        },
-        {
-          type: 'rawlist', name: 'integrationMode',
-          message: '\n' + t('prompt.integrationMode'),
-          // Merge is the default because most projects want a one-line install
-          // and treat the contexa.* keys as part of their config. Standalone
-          // is for projects that must keep the customer files byte-identical
-          // (e.g. heavily reviewed monorepos, vendored builds).
-          default: 'merge',
-          choices: [
-            { name: t('prompt.integrationMode.merge'),      value: 'merge' },
-            { name: t('prompt.integrationMode.standalone'), value: 'standalone' },
-          ],
-          when: (a) => a.setupMode === 'advanced' && explicitIntegrationMode === null,
-        },
-        {
-          type: 'input', name: 'standaloneDir',
-          message: '\n' + t('prompt.standaloneDir'),
-          default: path.join(opts.dir, 'contexa'),
-          when: a => {
-            if (a.setupMode !== 'advanced') return false;
-            const mode = explicitIntegrationMode || a.integrationMode;
-            return mode === 'standalone' && !opts.standaloneDir;
-          },
-        },
-        {
-          type: 'rawlist', name: 'securityMode',
-          message: '\n' + t('prompt.securityMode'),
-          default: 'sandbox',
-          choices: [
-            { name: t('prompt.securityMode.full'), value: 'full' },
-            { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
-          ],
-          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true),
-        },
-        {
-          type: 'rawlist', name: 'mode',
-          message: '\n' + t('prompt.mode'),
-          default: 'shadow',
-          choices: [
-            { name: t('prompt.mode.shadow'), value: 'shadow' },
-            { name: t('prompt.mode.enforce'), value: 'enforce' },
-          ],
-          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true),
-        },
-        {
-          // checkbox stays as-is because rawlist does not support multiple
-          // selection. Hint text in the bundle already explains space/enter.
-          type: 'checkbox', name: 'llmProviders',
-          message: '\n' + t('prompt.llm'),
-          choices: [
-            { name: t('prompt.llm.openai'),    value: 'openai',    checked: true },
-            { name: t('prompt.llm.anthropic'), value: 'anthropic', checked: true },
-            { name: t('prompt.llm.ollama'),    value: 'ollama',    checked: !!opts.includeOllama },
-          ],
-          validate: a => a.length > 0 ? true : t('prompt.llm.atLeastOne'),
-          when: a => a.setupMode === 'advanced' && (opts.enableAiSecurity || opts.provider || opts.autoAnnotate || a.enableAiSecurity === true),
-        },
-        {
-          type: 'rawlist', name: 'infra',
-          message: '\n' + t('prompt.infra'),
-          // Default = skip: never touch infrastructure unless the user opts in.
-          // Distributed is the only auto-provisioning option (Postgres + Redis +
-          // Zookeeper + Kafka). Customers running their own stack should accept
-          // the default.
-          default: opts.distributed ? 'distributed' : 'skip',
-          choices: [
-            { name: t('prompt.infra.skip'),       value: 'skip' },
-            { name: t('prompt.infra.distributed') || 'Yes - install distributed (Postgres + Redis + Kafka)', value: 'distributed' },
-          ],
-          when: (a) => a.setupMode === 'advanced' && !opts.distributed,
-        },
-        {
-          type: 'input', name: 'infraDir',
-          message: '\n' + t('prompt.infraDir'),
-          default: () => resolveInfraDir(cliProjectName, {}),
-          when: a => {
-            if (a.setupMode !== 'advanced') return false;
-            const infra = opts.distributed ? 'distributed' : a.infra;
-            return infra !== 'skip' && !opts.infraDir;
-          },
-        },
-        {
-          type: 'confirm', name: 'startDocker',
-          message: '\n' + t('prompt.startDocker'),
-          default: true,
-          when: a => {
-            if (a.setupMode !== 'advanced') return false;
-            const infra = opts.distributed ? 'distributed' : a.infra;
-            return infra !== 'skip' && project.hasDocker && opts.docker !== false;
-          },
-        },
-      ]);
-
-            // Resolve final setup configuration based on chosen track.
-      const promptProvider = answers.providerQuick || null;
-      const requestedAiSecurity = !!(
-        opts.simulate ||
-        opts.enableAiSecurity ||
-        opts.autoAnnotate ||
-        opts.provider ||
-        opts.includeOllama ||
-        answers.enableAiSecurity === true
-      );
-
-      answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
-      if (opts.simulate && answers.integrationMode !== 'merge') {
-        throw new Error('Simulation must use merge integration so the normal application remains the execution target.');
-      }
-      answers.securityMode = opts.securityMode || answers.securityMode || 'sandbox';
-      answers.mode = answers.mode || 'shadow';
-      answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
-      answers.startDocker = opts.docker !== false && answers.startDocker !== false;
-
-      if (promptProvider) {
-        answers.llmProviders = normalizeProviders(promptProvider, false);
-      } else if (opts.provider || opts.includeOllama || opts.enableAiSecurity || opts.autoAnnotate || opts.simulate) {
-        answers.llmProviders = providerFromFlags;
-      } else if (Array.isArray(answers.llmProviders)) {
-        answers.llmProviders = answers.llmProviders;
-      } else {
-        answers.llmProviders = [];
-      }
-
-      answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
-      if (answers.autoAnnotate && !aiProviderSelected(answers)) {
-        console.error(chalk.red('  x --auto-annotate requires an explicit AI provider. Re-run with --provider openai, anthropic, or ollama.'));
-        throw new Error('--auto-annotate requires an explicit AI provider.');
-      }
-      answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
-
-      answers.simulate = !!opts.simulate;
-      answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
-      answers.hostSecurityFilterChain = !!project.hasHostSecurityFilterChain;
-      answers.injectDep = !opts.simulate;
-      if (opts.distributed) answers.infra = 'distributed';
-      if (opts.docker === false) answers.startDocker = false;
 
       // Resolve standalone dir
       const standaloneDir = answers.integrationMode === 'standalone'
@@ -665,6 +340,7 @@ module.exports = function (program) {
           startDocker: answers.startDocker,
           includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
           strictIsolation: !!opts.simulate,
+          projectName: cliProjectName,
         });
         for (const issue of plannedInfraIssues) {
           const paint = issue.severity === 'error' ? chalk.red : issue.severity === 'warning' ? chalk.yellow : chalk.gray;
@@ -673,7 +349,7 @@ module.exports = function (program) {
         }
         const preflightErrors = plannedInfraIssues.filter(issue => issue.severity === 'error');
         if (preflightErrors.length > 0) {
-          throw new Error('Infrastructure preflight failed before project files were changed.');
+          throw initError('INFRASTRUCTURE_PREFLIGHT_FAILED', 'init.error.preflight');
         }
       }
 
@@ -704,14 +380,16 @@ module.exports = function (program) {
       if (answers.enableAiSecurity || answers.simulate) {
         // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
         const startGeo = process.hrtime.bigint();
-        const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
+        const sGeo = ora(t('step.provisioningGeoIp')).start();
         try {
           const geoIpContract = releaseManifest.resources && releaseManifest.resources.geoIp;
-          if (!geoIpContract) throw new Error('GeoIP artifact contract is missing from the release manifest.');
+          if (!geoIpContract) {
+            throw initError('GEOIP_CONTRACT_MISSING', 'init.error.geoIpContractMissing');
+          }
           const provisioned = await ensureVerifiedArtifact(geoIpContract, {
             destination: plannedGeoIpPath,
             sourcePath: process.env.CONTEXA_GEOLITE2_SOURCE_PATH || null,
-            timeoutMs: 120000,
+            timeoutMs: TIMEOUTS.artifactDownloadMs,
           });
           if (provisioned.changed) {
             await recordChange(opts.dir, plannedGeoIpPath, { kind: 'geoip-data', generated: true, reason: 'Verified GeoIP context for explicit AI security setup' }, installMode);
@@ -763,7 +441,7 @@ module.exports = function (program) {
         } catch (err) {
           sStandalone.fail(t('step.standaloneWritten'));
           console.log('');
-          console.log(chalk.red('  x Standalone artifacts could not be written.'));
+          console.log(chalk.red(`  x ${t('init.error.standaloneWrite')}`));
           console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
           console.log('');
           throw err;
@@ -803,7 +481,7 @@ module.exports = function (program) {
           } catch (err) {
             s1.fail(t('step.ymlUpdated'));
             console.log('');
-            console.log(chalk.red('  x application.yml could not be updated.'));
+            console.log(chalk.red(`  x ${t('init.error.ymlUpdate')}`));
             console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
             console.log('');
             throw err;
@@ -826,9 +504,9 @@ module.exports = function (program) {
         // hazard in Spring Boot. Surface a single-line resolution hint here so
         // the user does not have to dig through docs.
         if (project.appPropertiesPath && project.appYmlPath) {
-          console.log(chalk.yellow('  ! Both application.properties and application.yml exist.'));
-          console.log(chalk.gray('    Spring Boot will load one and silently shadow the other.'));
-          console.log(chalk.gray('    Recommended: keep one source of truth (yml). Move properties content into yml.'));
+          console.log(chalk.yellow(`  ! ${t('init.config.both')}`));
+          console.log(chalk.gray(`    ${t('init.config.shadowRisk')}`));
+          console.log(chalk.gray(`    ${t('init.config.singleSource')}`));
         }
 
         // 4. Inject dependency (rolls back yml on failure)
@@ -838,7 +516,7 @@ module.exports = function (program) {
             // 3.5. Inject @EnableAISecurity only when the user explicitly allowed source annotation.
             if (answers.enableAiSecurity && answers.autoAnnotate) {
               try {
-                const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
+                const sAnnot = ora(t('step.injectingAnnotation')).start();
                 const sourceState = project.mainApplicationCandidates.length === 1
                   ? trackedFileState(installManifest, opts.dir, project.mainApplicationCandidates[0])
                   : { entry: null, userModified: false };
@@ -860,13 +538,13 @@ module.exports = function (program) {
                   sAnnot.info('@EnableAISecurity already present or main class not found');
                 }
               } catch (err) {
-                console.log(chalk.red(`  x Could not automatically inject @EnableAISecurity: ${err.message}`));
+                console.log(chalk.red(`  x ${t('init.error.annotation', err.message)}`));
                 throw err;
               }
             }
 
             if (buildState.userModified) {
-              console.log(chalk.yellow('  ! Skipped user-modified build file; dependency provenance was not absorbed.'));
+              console.log(chalk.yellow(`  ! ${t('init.build.userModified')}`));
               aiDependenciesProcessed = true;
             } else {
               const startDep = process.hrtime.bigint();
@@ -883,7 +561,7 @@ module.exports = function (program) {
             // Spring AI provider starters and vector-store are added only for explicit AI security setup.
             if (answers.enableAiSecurity && aiProviderSelected(answers)) {
               const startAiDep = process.hrtime.bigint();
-              const sAi = ora('Adding Spring AI and Vector Store dependencies...').start();
+              const sAi = ora(t('step.addingAiDependencies')).start();
               const addedAi = await injectSpringAiDeps(buildPath, answers.llmProviders, { mode: installMode });
               if (addedAi) {
                 await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit AI provider dependencies' }, installMode);
@@ -906,7 +584,7 @@ module.exports = function (program) {
             }
           } catch (err) {
             console.log('');
-            console.log(chalk.red('  x Build dependency injection failed.'));
+            console.log(chalk.red(`  x ${t('init.error.buildInjection')}`));
             console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
             console.log('');
             throw err;
@@ -925,19 +603,19 @@ module.exports = function (program) {
       if (answers.infra !== 'skip') {
         const includesOllama = !!(answers.llmProviders && answers.llmProviders.includes('ollama'));
         if (answers.infra === 'distributed') {
-          console.log(chalk.cyan('\n  Distributed infrastructure: PostgreSQL + Redis + Zookeeper + Kafka'
-            + (includesOllama ? ' + Ollama' : '')));
+          console.log(chalk.cyan(`\n  ${t('init.infrastructure.distributed',
+            includesOllama ? ' + Ollama' : '')}`));
         } else {
-          console.log(chalk.cyan('\n  Standalone infrastructure: PostgreSQL'
-            + (includesOllama ? ' + Ollama' : '')));
+          console.log(chalk.cyan(`\n  ${t('init.infrastructure.standalone',
+            includesOllama ? ' + Ollama' : '')}`));
         }
 
         infraDir = resolveInfraDir(cliProjectName, { infraDir: infraDirOverride });
         transactionInfraDir = infraDir;
         transactionInfraExisted = await fs.pathExists(infraDir);
         transactionComposeExisted = await fs.pathExists(path.join(infraDir, 'docker-compose.yml'));
-        console.log(chalk.gray(`  Infrastructure files location: ${infraDir}`));
-        console.log(chalk.gray('  Database schema and seed data will be installed by contexa-iam when the application starts.'));
+        console.log(chalk.gray(`  ${t('init.infrastructure.location', infraDir)}`));
+        console.log(chalk.gray(`  ${t('init.infrastructure.schemaOwner')}`));
 
         const startCompose = process.hrtime.bigint();
         const s3 = ora(t('step.generatingCompose')).start();
@@ -980,12 +658,12 @@ module.exports = function (program) {
         // cwd is the contexa-owned infraDir so the docker-compose.yml that we
         // just generated is the one compose picks up - never the customer's.
         if (skippedServices.length > 0) {
-          console.log(chalk.green(`  v Existing/conflicting services skipped: ${skippedServices.join(', ')}`));
+          console.log(chalk.green(`  v ${t('init.infrastructure.skipped', skippedServices.join(', '))}`));
         }
 
         if (answers.startDocker && project.hasDocker) {
           if (servicesToUp.length === 0) {
-            console.log(chalk.green('  v All services are already running or skipped; "docker compose up -d" bypassed.'));
+            console.log(chalk.green(`  v ${t('init.infrastructure.alreadyRunning')}`));
           } else {
             const s4 = ora(`${t('step.startingDocker')} (${servicesToUp.join(', ')})`).start();
             try {
@@ -997,10 +675,12 @@ module.exports = function (program) {
                 cwd: infraDir,
                 env: opts.simulate ? simulationEnvironment(process.env, installationId) : process.env,
                 stdio: 'inherit',
-                timeout: opts.simulate ? 150000 : undefined,
+                timeout: opts.simulate ? TIMEOUTS.dockerComposeMutationMs : undefined,
               });
               if (upResult.error) throw upResult.error;
-              if (upResult.status !== 0) throw new Error(`docker compose up exited with status ${upResult.status}`);
+              if (upResult.status !== 0) {
+                throw initError('DOCKER_COMPOSE_UP_FAILED', 'init.error.composeUp', upResult.status);
+              }
               transactionDockerStarted = true;
               s4.succeed(t('step.dockerStarted'));
 
@@ -1009,24 +689,22 @@ module.exports = function (program) {
             // simulate: ctxa-sim-ollama, custom CONTEXA_PROJECT: <name>-ollama).
               if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
               const ollamaContainer = containerName('ollama');
-              const chatModel = process.env.OLLAMA_CHAT_MODEL || 'qwen2.5:7b';
-              const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || 'mxbai-embed-large';
-              if (!isValidOllamaModel(chatModel)) throw new Error(`Invalid OLLAMA_CHAT_MODEL value: ${chatModel}`);
-              if (!isValidOllamaModel(embedModel)) throw new Error(`Invalid OLLAMA_EMBEDDING_MODEL value: ${embedModel}`);
+              const chatModel = process.env.OLLAMA_CHAT_MODEL || DEFAULT_OLLAMA_CHAT_MODEL;
+              const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || DEFAULT_OLLAMA_EMBEDDING_MODEL;
+              if (!isValidOllamaModel(chatModel)) {
+                throw initError('INVALID_OLLAMA_MODEL', 'init.error.chatModel', chatModel);
+              }
+              if (!isValidOllamaModel(embedModel)) {
+                throw initError('INVALID_OLLAMA_MODEL', 'init.error.embeddingModel', embedModel);
+              }
               // Pull selected Ollama models when local Ollama is enabled.
-              const ollamaPort = process.env.CONTEXA_OLLAMA_PORT ? parseInt(process.env.CONTEXA_OLLAMA_PORT, 10) : 11434;
+              const ollamaPort = configuredPort(
+                'CONTEXA_OLLAMA_PORT', DEFAULT_INFRASTRUCTURE_PORTS.ollama
+              );
                 const s5 = ora(t('step.pullingChat', chatModel)).start();
                 try {
-                  let ready = false;
-                  const deadlineMs = Date.now() + 90000; // 90s absolute cap
-                  while (!ready && Date.now() < deadlineMs) {
-                    const probe = dockerTry(
-                      ['exec', ollamaContainer, 'ollama', 'list'],
-                      { stdio: 'ignore', timeout: 3000 }
-                    );
-                    if (!probe.error && probe.status === 0) { ready = true; break; }
-                    await sleep(2000);
-                  }
+                  const ready = await waitForDockerOllama(
+                    ollamaContainer, Date.now() + TIMEOUTS.ollamaReadyMs);
 
                   if (ready) {
                     await pullOllamaModelWithProgress(ollamaPort, chatModel, s5, t('step.pullingChat', chatModel).replace('...', ''));
@@ -1036,7 +714,7 @@ module.exports = function (program) {
                     await pullOllamaModelWithProgress(ollamaPort, embedModel, s6, t('step.pullingEmbedding', embedModel).replace('...', ''));
                     s6.succeed(t('step.embeddingPulled'));
                   } else {
-                    throw new Error(`Ollama was not ready before the configured deadline: ${ollamaContainer}`);
+                    throw initError('OLLAMA_READY_TIMEOUT', 'init.error.ollamaReady', ollamaContainer);
                   }
                 } catch (e) {
                   s5.fail(t('step.modelPullFailed', chatModel));
@@ -1058,88 +736,17 @@ module.exports = function (program) {
       await commitInstallTransaction(opts.dir, installTransactionId, installMode);
       installTransactionId = null;
 
-      // 8. Done - show visual Guide Board for FTX optimization
-      // 8. Done - show visual guide
-      console.log(chalk.cyan('\n  ============================================================'));
-      console.log(chalk.cyan(`     Contexa ${t('init.done')}`));
-      console.log(chalk.cyan('  ============================================================\n'));
-
-      console.log(chalk.green('  [Automated Tasks]:'));
-      if (answers.integrationMode === 'standalone') {
-        console.log(chalk.gray(`    v Standalone folder created: ${standaloneDir}`));
-      } else {
-        console.log(chalk.gray(shouldWriteHostConfig
-          ? '    v Explicit Contexa configuration merged into application.yml'
-          : '    v Host application configuration left byte-identical'));
-        console.log(chalk.gray('    v spring-boot-starter-contexa dependency added to build file'));
-      }
-
-      if (answers.infra !== 'skip') {
-        console.log(chalk.gray('    v Infrastructure files created and Docker stack processed'));
-      }
-
-      if (standaloneResult) {
-        console.log(chalk.yellow('\n  [Standalone Wiring Instructions]:'));
-        console.log(chalk.gray(`    ${t('standalone.imports.yml')}`));
-        console.log(chalk.cyan('       spring:'));
-        console.log(chalk.cyan('         config:'));
-        console.log(chalk.cyan('           import: "optional:file:./contexa/application.yml"'));
-
-        if (standaloneResult.importHints.isMaven) {
-          console.log(chalk.gray(`\n    ${t('standalone.imports.maven')}`));
-          console.log(chalk.cyan(`       ${standaloneResult.buildFragmentPath}`));
-          console.log(chalk.gray(`      ${t('standalone.imports.mavenNote')}`));
-        } else {
-          console.log(chalk.gray(`\n    ${t('standalone.imports.gradleGroovy')}`));
-          console.log(chalk.cyan("       apply from: 'contexa/contexa.gradle'"));
-        }
-      }
-
-      console.log(chalk.yellow('\n  [Next checks]:'));
-      if (opts.simulate) {
-        console.log(chalk.white('    Run the simulation application with this single command:'));
-        console.log(chalk.cyan(`       ${simulationRunCommand(opts.dir)}`));
-        console.log(chalk.gray('    The launcher activates only the contexa-sim profile and supplies the isolated endpoints.'));
-      } else {
-        let manualStep = 1;
-      if (answers.enableAiSecurity && !aiAnnotationApplied) {
-        console.log(chalk.white(`    ${manualStep++}. Add @EnableAISecurity to your main Application class:`));
-        console.log(chalk.cyan('       ----------------------------------------------------'));
-        console.log(chalk.cyan(`       @EnableAISecurity(mode = SecurityMode.${answers.securityMode.toUpperCase()})`));
-        console.log(chalk.cyan('       @SpringBootApplication'));
-        console.log(chalk.cyan('       public class YourApplication { }'));
-        console.log(chalk.cyan('       ----------------------------------------------------'));
-      }
-
-      if (answers.enableAiSecurity) {
-        console.log(chalk.white(`    ${manualStep++}. Verify selected AI provider settings:`));
-        console.log(chalk.gray(`       - Providers: ${answers.llmProviders.join(', ')}`));
-        console.log(chalk.gray('       - Keep API keys and model values in environment variables or application config.'));
-        if (aiDependenciesProcessed) {
-          console.log(chalk.gray('       - Explicit AI provider dependencies were processed.'));
-        }
-      } else {
-        console.log(chalk.white(`    ${manualStep++}. AI security is not enabled yet:`));
-        console.log(chalk.gray('       Re-run contexa init and choose AI security when you are ready.'));
-      }
-
-      console.log(chalk.white(`    ${manualStep++}. Run the server and diagnose your environment:`));
-      console.log(chalk.gray(`       - Start server : ${project.buildTool === 'maven' ? './mvnw spring-boot:run' : './gradlew bootRun'}`));
-      const doctorProvider = aiProviderSelected(answers) ? ` --provider ${answers.llmProviders.join(',')}` : '';
-      console.log(chalk.gray(`       - Diagnose     : contexa doctor${doctorProvider}`));
-      }
-
-      if (!opts.simulate && answers.enableAiSecurity && answers.mode === 'shadow') {
-        console.log(chalk.yellow('\n  * SHADOW mode is active: analysis/logging only, no blocking.'));
-        console.log(chalk.gray('    Switch to enforce mode only after operational validation.'));
-      }
-
-      console.log(chalk.red.bold('\n  [Security Checklist before external deployment]:'));
-      console.log(chalk.red(`    - ${t('warn.security.envVars')}`));
-      console.log(chalk.red(`    - ${t('warn.security.gitignore')}`));
-      console.log(chalk.red(`    - ${t('warn.security.demoUsers')}`));
-
-      console.log(chalk.cyan('\n  ============================================================\n'));
+      printInitCompletion({
+        answers,
+        project,
+        standaloneDir,
+        shouldWriteHostConfig,
+        standaloneResult,
+        simulate: !!opts.simulate,
+        projectDir: opts.dir,
+        aiAnnotationApplied,
+        aiDependenciesProcessed,
+      });
 
       } catch (error) {
         const infrastructureRollbackErrors = [];
@@ -1154,7 +761,7 @@ module.exports = function (program) {
                 ? simulationEnvironment(process.env,
                   (await loadManifest(opts.dir, installMode)).metadata.installationId)
                 : process.env,
-              timeout: 30000,
+              timeout: TIMEOUTS.dockerComposeRollbackMs,
             });
             if (downResult.error || downResult.status !== 0) {
               throw downResult.error || new Error(`docker compose down exited with status ${downResult.status}`);
@@ -1185,7 +792,7 @@ module.exports = function (program) {
           if (!rollback.rolledBack) {
             infrastructureRollbackErrors.push(...rollback.failures);
           } else {
-            console.log(chalk.yellow('  ! Init failed. All transaction-tracked project changes were restored.'));
+            console.log(chalk.yellow(`  ! ${t('init.rollback.restored')}`));
           }
         }
         if (infrastructureRollbackErrors.length > 0) {
@@ -1195,16 +802,3 @@ module.exports = function (program) {
       }
     });
 };
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-              // Pull selected Ollama models when local Ollama is enabled.
-// are alphanumerics with limited punctuation (`-`, `_`, `.`, `/`). Values come
-// from OLLAMA_CHAT_MODEL / OLLAMA_EMBEDDING_MODEL env vars and end up as a
-// docker exec argv entry. We pass via spawnSync (no shell) but still reject
-// obviously malformed input so the failure mode is a clean CLI error.
-function isValidOllamaModel(s) {
-  return typeof s === 'string' && s.length > 0 && s.length <= 200 && /^[A-Za-z0-9._:/\-]+$/.test(s);
-}

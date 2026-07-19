@@ -6,7 +6,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { dockerCompose: dockerComposeExec } = require('../core/docker');
 const { detectSpringProject } = require('../core/detector');
+const { t } = require('../core/i18n');
 const { INSTALL_MODES, manifestPath, loadManifest, sha256FileSync } = require('../core/manifest');
+const { TIMEOUTS } = require('../core/timeouts');
 const {
   SIMULATION_PROJECT,
   SIMULATION_PROFILE,
@@ -16,16 +18,22 @@ const {
   waitForSimulationInfrastructure,
 } = require('../core/simulation');
 
-function dockerCompose(args, context, stdio = 'inherit') {
-  const result = dockerComposeExec(args, {
+function simulationError(code, key, ...args) {
+  const error = new Error(`${code} ${t(key, ...args)}`);
+  error.code = code;
+  return error;
+}
+
+function dockerCompose(args, context, stdio = 'inherit', execute = dockerComposeExec) {
+  const result = execute(args, {
     cwd: context.infraDir,
     env: context.env,
     stdio,
-    timeout: 150000,
+    timeout: TIMEOUTS.dockerComposeMutationMs,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
-    throw new Error(`docker compose ${args.join(' ')} exited with status ${result.status}`);
+    throw simulationError('SIMULATION_DOCKER_FAILED', 'simulate.error.docker', args.join(' '), result.status);
   }
   return result;
 }
@@ -33,43 +41,43 @@ function dockerCompose(args, context, stdio = 'inherit') {
 async function buildContext(opts = {}) {
   const projectDir = path.resolve(opts.dir || process.cwd());
   if (!await fs.pathExists(manifestPath(projectDir, INSTALL_MODES.SIMULATION))) {
-    throw new Error(`Simulation is not initialized for this project. Run: contexa init --simulate --dir "${projectDir}"`);
+    throw simulationError('SIMULATION_NOT_INITIALIZED', 'simulate.error.notInitialized', projectDir);
   }
   const manifest = await loadManifest(projectDir, INSTALL_MODES.SIMULATION);
   const metadata = manifest.metadata || {};
   const simulation = metadata.simulation || {};
   if (!metadata.installationId || metadata.projectName !== SIMULATION_PROJECT
       || simulation.projectName !== SIMULATION_PROJECT || simulation.profile !== SIMULATION_PROFILE) {
-    throw new Error('Simulation manifest identity is incomplete or inconsistent. No Docker resource was changed.');
+    throw simulationError('SIMULATION_IDENTITY_CONFLICT', 'simulate.error.identity');
   }
   if (JSON.stringify(simulation.ports || {}) !== JSON.stringify(SIMULATION_PORTS)) {
-    throw new Error('Simulation manifest port contract does not match this CLI release. No Docker resource was changed.');
+    throw simulationError('SIMULATION_PORT_CONFLICT', 'simulate.error.ports');
   }
   const infraDir = metadata.infraDir && path.resolve(metadata.infraDir);
   if (!infraDir || (opts.infraDir && path.resolve(opts.infraDir) !== infraDir)) {
-    throw new Error('The requested infrastructure directory does not match the simulation ownership manifest.');
+    throw simulationError('SIMULATION_INFRA_CONFLICT', 'simulate.error.infra');
   }
   const composePath = path.join(infraDir, 'docker-compose.yml');
   if (!await fs.pathExists(composePath)) {
-    throw new Error(`Manifest-owned simulation compose file is missing: ${composePath}`);
+    throw simulationError('SIMULATION_COMPOSE_MISSING', 'simulate.error.composeMissing', composePath);
   }
   if (!metadata.composeChecksum || sha256FileSync(composePath) !== metadata.composeChecksum) {
-    throw new Error('Simulation compose file has changed since initialization. It was not executed.');
+    throw simulationError('SIMULATION_COMPOSE_CHANGED', 'simulate.error.composeChanged');
   }
   const containers = metadata.dockerResources && Array.isArray(metadata.dockerResources.containers)
     ? metadata.dockerResources.containers : [];
   const expectedContainers = ['postgres', 'redis', 'zookeeper', 'kafka', 'ollama']
     .map(service => `${SIMULATION_PROJECT}-${service}`).sort();
   if (JSON.stringify([...containers].sort()) !== JSON.stringify(expectedContainers)) {
-    throw new Error('Simulation Docker resource contract is incomplete or contains an unexpected container.');
+    throw simulationError('SIMULATION_RESOURCE_CONFLICT', 'simulate.error.resources');
   }
   const ownedPath = relativePath => {
     if (typeof relativePath !== 'string' || !relativePath) {
-      throw new Error('Simulation manifest is missing a managed project path.');
+      throw simulationError('SIMULATION_PATH_MISSING', 'simulate.error.pathMissing');
     }
     const candidate = path.resolve(projectDir, relativePath);
     if (candidate !== projectDir && !candidate.startsWith(projectDir + path.sep)) {
-      throw new Error(`Simulation manifest path escapes the project: ${relativePath}`);
+      throw simulationError('SIMULATION_PATH_ESCAPE', 'simulate.error.pathEscape', relativePath);
     }
     return candidate;
   };
@@ -123,38 +131,40 @@ function executeBuild(project, env) {
       args = ['spring-boot:run'];
     }
   } else {
-    throw new Error('The simulation project must use Gradle or Maven.');
+    throw simulationError('SIMULATION_BUILD_UNSUPPORTED', 'simulate.error.build');
   }
   const result = spawnSync(command, args, { cwd, env, stdio: 'inherit', shell: false });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Application process exited with status ${result.status}`);
+  if (result.status !== 0) {
+    throw simulationError('SIMULATION_APPLICATION_FAILED', 'simulate.error.application', result.status);
+  }
 }
 
 function addContextOptions(command) {
   return command
-    .option('--dir <path>', 'Spring project directory', process.cwd())
-    .option('--infra-dir <path>', 'Require this exact manifest-owned infrastructure directory');
+    .option('--dir <path>', t('simulate.option.dir'), process.cwd())
+    .option('--infra-dir <path>', t('simulate.option.infraDir'));
 }
 
 module.exports = function registerSimulationCommands(program) {
   const sim = program.command('simulate')
-    .description('Manage the isolated stack created by "contexa init --simulate"');
+    .description(t('simulate.description'));
 
-  addContextOptions(sim.command('up').description('Start and verify the simulation stack'))
+  addContextOptions(sim.command('up').description(t('simulate.up.description')))
     .action(async opts => {
       const context = await buildContext(opts);
       dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
       await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
-      console.log(chalk.green('  v Simulation infrastructure is healthy and ownership-verified.'));
+      console.log(chalk.green(`  v ${t('simulate.up.success')}`));
     });
 
-  addContextOptions(sim.command('down').description('Stop the simulation stack and keep its volumes'))
+  addContextOptions(sim.command('down').description(t('simulate.down.description')))
     .action(async opts => {
       const context = await buildContext(opts);
       dockerCompose(['-p', SIMULATION_PROJECT, 'down', '--timeout', '0'], context);
     });
 
-  addContextOptions(sim.command('reset').description('Recreate only the simulation stack and its volumes'))
+  addContextOptions(sim.command('reset').description(t('simulate.reset.description')))
     .action(async opts => {
       const context = await buildContext(opts);
       dockerCompose(['-p', SIMULATION_PROJECT, 'down', '-v', '--timeout', '0'], context);
@@ -162,10 +172,10 @@ module.exports = function registerSimulationCommands(program) {
       await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
     });
 
-  addContextOptions(sim.command('ps').description('Show simulation container status'))
+  addContextOptions(sim.command('ps').description(t('simulate.ps.description')))
     .action(async opts => dockerCompose(['-p', SIMULATION_PROJECT, 'ps'], await buildContext(opts)));
 
-  addContextOptions(sim.command('logs [service]').description('Stream simulation logs'))
+  addContextOptions(sim.command('logs [service]').description(t('simulate.logs.description')))
     .action(async (service, opts) => {
       const context = await buildContext(opts);
       const args = ['-p', SIMULATION_PROJECT, 'logs', '-f'];
@@ -173,18 +183,18 @@ module.exports = function registerSimulationCommands(program) {
       dockerCompose(args, context);
     });
 
-  addContextOptions(sim.command('run').description('Run the host application with only the simulation profile'))
+  addContextOptions(sim.command('run').description(t('simulate.run.description')))
     .action(async opts => {
       const context = await buildContext(opts);
       if (!await fs.pathExists(context.overlayPath)) {
-        throw new Error(`Simulation overlay is missing: ${context.overlayPath}`);
+        throw simulationError('SIMULATION_OVERLAY_MISSING', 'simulate.error.overlay', context.overlayPath);
       }
       if (!await fs.pathExists(context.configurationPath)) {
-        throw new Error(`Simulation profile configuration is missing: ${context.configurationPath}`);
+        throw simulationError('SIMULATION_CONFIGURATION_MISSING', 'simulate.error.configuration', context.configurationPath);
       }
       const project = await detectSpringProject(context.projectDir);
       if (!project.isSpring || !project.hasContexta) {
-        throw new Error('The manifest project is not a Contexa Spring Boot application.');
+        throw simulationError('SIMULATION_PROJECT_INVALID', 'simulate.error.project');
       }
       verifySimulationInfrastructure(context.installationId, context.includeOllama);
       executeBuild(project, simulationEnvironment(context.env, context.installationId, true));
@@ -192,3 +202,4 @@ module.exports = function registerSimulationCommands(program) {
 };
 
 module.exports.buildContext = buildContext;
+module.exports.executeCompose = dockerCompose;

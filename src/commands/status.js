@@ -5,7 +5,7 @@ const fs    = require('fs-extra');
 const yaml  = require('js-yaml');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
-const { INSTALL_MODES, loadManifest, manifestPath } = require('../core/manifest');
+const { INSTALLATION_STATES, inspectInstallationState } = require('../core/installation-state');
 
 function getPath(obj, pathArr) {
   let cur = obj;
@@ -19,8 +19,8 @@ function getPath(obj, pathArr) {
 module.exports = function (program) {
   program
     .command('status')
-    .description('Show Contexa status')
-    .option('--dir <path>', 'Project directory', process.cwd())
+    .description(t('status.description'))
+    .option('--dir <path>', t('status.option.dir'), process.cwd())
     .action(async (opts) => {
       console.log(chalk.cyan('\n  ' + t('status.title') + '\n'));
 
@@ -31,16 +31,16 @@ module.exports = function (program) {
       console.log(`  ${t('status.contexa')}  : ${project.hasContexta ? chalk.green(t('status.installed')) : chalk.red(t('status.notInstalled'))}`);
       console.log(`  ${t('status.security')} : ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`);
 
-      for (const mode of [INSTALL_MODES.NORMAL, INSTALL_MODES.SIMULATION]) {
-        const exists = await fs.pathExists(manifestPath(opts.dir, mode));
-        const label = mode === INSTALL_MODES.NORMAL ? 'Normal installation' : 'Simulation installation';
-        if (!exists) {
-          console.log(`  ${label}: not installed`);
-          continue;
-        }
-        const manifest = await loadManifest(opts.dir, mode);
-        const transactionState = manifest.transaction ? manifest.transaction.status : 'UNKNOWN';
-        console.log(`  ${label}: ${transactionState} (installationId=${manifest.metadata.installationId || 'missing'})`);
+      const installation = await inspectInstallationState(opts.dir);
+      console.log(`  ${t('status.ownership')} : ${installation.state}`);
+      for (const item of [installation.normal, installation.simulation]) {
+        const label = item.mode === 'normal' ? t('status.normal') : t('status.simulation');
+        const identity = item.installationId ? ` (installationId=${item.installationId})` : '';
+        console.log(`  ${label}: ${item.transactionStatus || item.status}${identity}`);
+        if (item.reason) console.log(chalk.gray(`    ${item.reason}`));
+      }
+      if ([INSTALLATION_STATES.CONFLICT, INSTALLATION_STATES.PARTIAL_FAILURE].includes(installation.state)) {
+        process.exitCode = 1;
       }
 
       if (project.appYmlPath && await fs.pathExists(project.appYmlPath)) {

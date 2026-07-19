@@ -13,6 +13,7 @@ const root = path.join(__dirname, '..');
 const cliPath = path.join(root, 'src', 'index.js');
 const releaseManifest = require('../release-manifest.json');
 const packageJson = require('../package.json');
+const { buildInitDefaults } = require('../src/core/init-input');
 const { backupFile } = require('../src/core/injector/common');
 const { buildContext: buildSimulationContext } = require('../src/commands/simulate');
 const {
@@ -61,14 +62,35 @@ test('Phase 0 release and primary-command contract has one canonical source', ()
 });
 
 test('interactive init defaults are value-based and resolve to the safe quick starter-only plan', () => {
-  const initSource = fs.readFileSync(path.join(root, 'src/commands/init.js'), 'utf8');
-  assert.doesNotMatch(initSource, /default:\s*\d+/);
-  assert.match(initSource, /setupMode:\s*'quick'/);
-  assert.match(initSource, /integrationMode:\s*explicitIntegrationMode \|\| 'merge'/);
-  assert.match(initSource, /securityMode:\s*opts\.securityMode \|\| 'sandbox'/);
-  assert.match(initSource, /infra:\s*opts\.distributed \? 'distributed' : 'skip'/);
-  assert.match(initSource, /name: 'enableAiSecurity',[\s\S]*?default: false/);
-  assert.match(initSource, /name: 'autoAnnotate',[\s\S]*?default: false/);
+  const basic = buildInitDefaults({});
+  assert.equal(basic.explicitIntegrationMode, null);
+  assert.deepEqual(basic.defaults, {
+    setupMode: 'quick',
+    integrationMode: 'merge',
+    securityMode: 'sandbox',
+    mode: 'shadow',
+    enableAiSecurity: false,
+    autoAnnotate: false,
+    llmProviders: [],
+    infra: 'skip',
+    injectDep: true,
+    startDocker: true,
+  });
+  const explicit = buildInitDefaults({
+    standalone: true,
+    securityMode: 'full',
+    distributed: true,
+    docker: false,
+    provider: 'ollama',
+    autoAnnotate: true,
+  });
+  assert.equal(explicit.defaults.integrationMode, 'standalone');
+  assert.equal(explicit.defaults.securityMode, 'full');
+  assert.equal(explicit.defaults.infra, 'distributed');
+  assert.equal(explicit.defaults.startDocker, false);
+  assert.deepEqual(explicit.defaults.llmProviders, ['ollama']);
+  assert.equal(explicit.defaults.enableAiSecurity, true);
+  assert.equal(explicit.defaults.autoAnnotate, true);
 });
 
 test('Phase 1 release assets, compatibility and signed-manifest workflow are consistent', () => {
