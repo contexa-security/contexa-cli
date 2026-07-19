@@ -23,6 +23,11 @@ function normalizeProviderList(providerOpt, includeOllama, simulate) {
   if (providerOpt) {
     const values = String(providerOpt).split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
     if (values.includes('none')) return [];
+    const allowed = new Set(['openai', 'anthropic', 'ollama']);
+    const invalid = values.filter(value => !allowed.has(value));
+    if (invalid.length > 0) {
+      throw new Error(`Unsupported provider: ${invalid.join(', ')}. Use openai, anthropic, ollama, or none.`);
+    }
     return [...new Set(values)];
   }
   if (includeOllama || simulate) return ['ollama'];
@@ -164,6 +169,7 @@ module.exports = function (program) {
         console.log(chalk.green(`  v ${t('doctor.success') || 'All checks passed! Your local environment is ready for Contexa.'}\n`));
       } else {
         console.log(chalk.red(`  x ${t('doctor.fail') || 'Some diagnostic checks failed. Review [FIX] instructions above.'}\n`));
+        throw new Error('Contexa doctor detected one or more failed checks.');
       }
     });
 };

@@ -30,6 +30,8 @@ function buildCliContexaTree(opts = {}) {
     infra = 'standalone',
     simulate = false,
     enableAiSecurity = false,
+    securityMode = 'sandbox',
+    hostSecurityFilterChain = false,
   } = opts;
   
   // Sort providers so that 'ollama' comes first if it exists (for seamless offline out-of-the-box testing without API keys)
@@ -53,21 +55,29 @@ function buildCliContexaTree(opts = {}) {
   const dbPort = isSimulate ? '25432' : '5432';
   const dbName = isSimulate ? 'contexa_sim' : 'contexa';
   const dbUser = isSimulate ? 'contexa_sim' : 'contexa';
-  const dbPass = isSimulate ? 'contexa_sim_pw' : 'contexa1234!@#';
   const ollamaPort = isSimulate ? '31434' : '11434';
 
   const tree = {
-    datasource: {
-      url: `\${CONTEXA_DB_URL:\${DB_URL:jdbc:postgresql://localhost:${dbPort}/${dbName}}}`,
-      username: `\${CONTEXA_DB_USERNAME:\${DB_USERNAME:${dbUser}}}`,
-      password: `\${CONTEXA_DB_PASSWORD:\${DB_PASSWORD:${dbPass}}}`,
-      'driver-class-name': '${CONTEXA_DB_DRIVER:org.postgresql.Driver}',
-      isolation: { 'contexa-owned-application': true },
-    },
     security: {
       zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
     },
   };
+
+  if (isSimulate) {
+    tree.datasource = {
+      url: `\${CONTEXA_DB_URL:\${DB_URL:jdbc:postgresql://localhost:${dbPort}/${dbName}}}`,
+      username: `\${CONTEXA_DB_USERNAME:\${DB_USERNAME:${dbUser}}}`,
+      password: `\${CONTEXA_DB_PASSWORD:\${DB_PASSWORD:}}`,
+      'driver-class-name': '${CONTEXA_DB_DRIVER:org.postgresql.Driver}',
+      isolation: { 'contexa-owned-application': true },
+    };
+  }
+
+  if (enableAiSecurity && securityMode === 'full' && hostSecurityFilterChain) {
+    tree.bridge = { ownership: 'HOST_OWNED' };
+    tree.datasource = tree.datasource || {};
+    tree.datasource.isolation = { 'contexa-owned-application': false };
+  }
 
   if (enableAiSecurity || isSimulate) {
     tree.llm = {
@@ -113,18 +123,20 @@ function buildCliContexaTree(opts = {}) {
 
 // Recursively fill missing keys from source into target. Existing primitives
 // are preserved (user wins). Objects merge; arrays/primitives never overwrite.
-function fillOnly(target, source) {
+function fillOnly(target, source, prefix = [], addedPaths = []) {
   for (const key of Object.keys(source)) {
     const sv = source[key];
     if (sv && typeof sv === 'object' && !Array.isArray(sv)) {
       if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) {
         target[key] = {};
       }
-      fillOnly(target[key], sv);
+      fillOnly(target[key], sv, [...prefix, key], addedPaths);
     } else if (target[key] === undefined) {
       target[key] = sv;
+      addedPaths.push([...prefix, key].join('.'));
     }
   }
+  return addedPaths;
 }
 
 function setPath(obj, pathArr, value) {
@@ -139,69 +151,37 @@ function setPath(obj, pathArr, value) {
 
 // Apply the CLI tree onto the host application's parsed yml object.
 // Policy:
-//   - User-set values are preserved by default (fill-only merge).
-//   - A small set of CLI-managed keys are always force-overwritten because they
-//     define platform behavior and must not silently drift between init runs:
-//       * contexa.security.zerotrust.mode
-//       * contexa.hcad.geoip.enabled
-//       * contexa.datasource.isolation.contexa-owned-application
-//       * contexa.llm.selection.{chat,embedding}.priority
-//   - --distributed additionally forces contexa.infrastructure.mode = DISTRIBUTED.
+//   - User-set values are always preserved.
+//   - The first init records only leaf paths that the CLI actually created.
+//   - A later init may update only those recorded paths; provider changes never
+//     delete or overwrite customer-owned provider configuration.
 function applyCliContexaTree(rootObj, cliTree, opts) {
   if (!rootObj.contexa || typeof rootObj.contexa !== 'object' || Array.isArray(rootObj.contexa)) {
     rootObj.contexa = {};
   }
-  fillOnly(rootObj.contexa, cliTree);
-
-  setPath(rootObj.contexa, ['security', 'zerotrust', 'mode'],
-    (opts.simulate || opts.mode === 'enforce') ? 'ENFORCE' : 'SHADOW');
-  setPath(rootObj.contexa, ['datasource', 'isolation', 'contexa-owned-application'], true);
-
-  if (cliTree.hcad) {
-    setPath(rootObj.contexa, ['hcad', 'geoip', 'enabled'], true);
-    setPath(rootObj.contexa, ['hcad', 'geoip', 'dbPath'], 'contexa/data/GeoLite2-City.mmdb');
+  const managedPaths = new Set(Array.isArray(opts.managedPaths) ? opts.managedPaths : []);
+  const addedPaths = fillOnly(rootObj.contexa, cliTree);
+  for (const [pathKey, value] of leafEntries(cliTree)) {
+    if (managedPaths.has(pathKey)) setPath(rootObj.contexa, pathKey.split('.'), value);
   }
-
-  if (cliTree.llm && cliTree.llm.selection) {
-    setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'mode'],
-      cliTree.llm.selection.chat.mode);
-    setPath(rootObj.contexa, ['llm', 'selection', 'chat', 'priority'],
-      cliTree.llm.selection.chat.priority);
-
-    if (cliTree.llm.selection.embedding) {
-      setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'mode'],
-        cliTree.llm.selection.embedding.mode);
-      setPath(rootObj.contexa, ['llm', 'selection', 'embedding', 'priority'],
-        cliTree.llm.selection.embedding.priority);
-    }
-  }
-  if (opts.infra === 'distributed') {
-    setPath(rootObj.contexa, ['infrastructure', 'mode'], 'DISTRIBUTED');
-  }
-
-  // Do not create or delete spring.ai.*. Provider runtime settings belong to
-  // the user application or the starter/autoconfigure defaults, not the CLI.
-  if (rootObj.contexa && rootObj.contexa.llm && opts.enableAiSecurity !== false) {
-    const llmProviders = opts.llmProviders || [];
-    if (!llmProviders.includes('ollama')) {
-      if (rootObj.contexa.llm.chat) {
-        delete rootObj.contexa.llm.chat.ollama;
-        if (Object.keys(rootObj.contexa.llm.chat).length === 0) {
-          delete rootObj.contexa.llm.chat;
-        }
-      }
-      if (rootObj.contexa.llm.embedding) {
-        delete rootObj.contexa.llm.embedding.ollama;
-        if (Object.keys(rootObj.contexa.llm.embedding).length === 0) {
-          delete rootObj.contexa.llm.embedding;
-        }
-      }
-    }
-  }
+  for (const addedPath of addedPaths) managedPaths.add(addedPath);
   // Never write spring.* runtime settings from the CLI, including simulate mode.
   // Redis/Kafka provider defaults are owned by starter/autoconfigure or by the
   // user's explicit application configuration. This prevents `init --simulate`
   // from silently overriding a customer application's real Redis/Kafka setup.
+  return { managedPaths: [...managedPaths].sort() };
+}
+
+function leafEntries(source, prefix = [], entries = []) {
+  for (const [key, value] of Object.entries(source)) {
+    const next = [...prefix, key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      leafEntries(value, next, entries);
+    } else {
+      entries.push([next.join('.'), value]);
+    }
+  }
+  return entries;
 }
 
 // Strip a marker block written by older CLI versions. Idempotent on input
@@ -246,7 +226,7 @@ async function injectYml(ymlPath, opts = {}) {
     }
   }
 
-  applyCliContexaTree(rootObj, cliTree, opts);
+  const application = applyCliContexaTree(rootObj, cliTree, opts);
 
   await fs.ensureDir(path.dirname(ymlPath));
   const out = yaml.dump(rootObj, {
@@ -256,6 +236,7 @@ async function injectYml(ymlPath, opts = {}) {
     quotingType: '"',
   });
   await fs.writeFile(ymlPath, out);
+  return application;
 }
 
 module.exports = {

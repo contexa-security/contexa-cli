@@ -9,8 +9,8 @@ const fs    = require('fs-extra');
 const { Option } = require('commander');
 const { dockerSync, dockerTry, dockerCompose, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
 const { execSync } = require('child_process');
-const http = require('http');
-const https = require('https');
+const releaseManifest = require('../../release-manifest.json');
+const { pullOllamaModelWithProgress } = require('../core/ollama');
 
 // Normalize a user-entered path so that:
 //   1) "~" or "~/..." is expanded to the OS home directory (shells do this
@@ -46,6 +46,20 @@ function aiProviderSelected(answers) {
   return Array.isArray(answers.llmProviders) && answers.llmProviders.length > 0;
 }
 
+function trackedFileState(manifest, projectDir, filePath) {
+  const relativePath = path.relative(projectDir, filePath).split(path.sep).join('/');
+  const entry = (manifest.files || []).find(file => file.relativePath === relativePath) || null;
+  const transactionFile = manifest.transaction && Array.isArray(manifest.transaction.files)
+    ? manifest.transaction.files.find(file => file.relativePath === relativePath)
+    : null;
+  const lastCliChecksum = entry && (entry.lastCliChecksum || entry.currentChecksum);
+  return {
+    entry,
+    userModified: !!(entry && entry.ownership === 'CLI_OWNED' && lastCliChecksum
+      && transactionFile && transactionFile.startChecksum !== lastCliChecksum),
+  };
+}
+
 function printPlannedChanges(answers, project, paths) {
   const msg = (key, fallback) => {
     const value = t(key);
@@ -53,12 +67,18 @@ function printPlannedChanges(answers, project, paths) {
   };
 
   console.log(chalk.cyan(`\n  ${msg('planned.title', 'Planned changes')}`));
-  const items = [];
+  const items = ['SETUP: QUICK'];
   if (answers.integrationMode === 'standalone') {
+    items.push('INTEGRATION: STANDALONE');
     items.push(`CREATE: ${msg('planned.createStandalone', 'Create Contexa-only files')}: ${paths.standaloneDir}`);
   } else {
+    items.push('INTEGRATION: MERGE (starter dependency only unless explicitly activated)');
     items.push(`${paths.buildExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.addStarter', 'Add starter dependency')}: ${paths.buildPath}`);
-    items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply minimal Contexa settings')}: ${paths.ymlPath}`);
+    if (paths.writeHostConfig) {
+      items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${msg('planned.applyMinimal', 'Apply explicit Contexa settings')}: ${paths.ymlPath}`);
+    } else {
+      items.push('HOST CONFIG: NONE (module defaults)');
+    }
   }
   if (answers.enableAiSecurity) {
     items.push(`${msg('planned.enableAi', 'Enable AI security settings')} (${answers.llmProviders.join(', ')})`);
@@ -84,31 +104,14 @@ function printPlannedChanges(answers, project, paths) {
   items.push('DELETE: NONE');
   for (const item of items) console.log(chalk.gray(`    - ${item}`));
 }
-function downloadFile(url, dest) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
-    https.get(url, (response) => {
-      if (response.statusCode !== 200) {
-        reject(new Error(`Failed to download: ${response.statusCode}`));
-        return;
-      }
-      response.pipe(file);
-      file.on('finish', () => {
-        file.close(resolve);
-      });
-    }).on('error', (err) => {
-      fs.unlink(dest, () => reject(err));
-    });
-  });
-}
-
 const { detectSpringProject } = require('../core/detector');
+const { ensureVerifiedArtifact } = require('../core/artifact');
 const { injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
         injectSpringAiDeps, injectEnableAiSecurity, injectStandalone,
         generateDockerCompose } = require('../core/injector');
 const { inspectInfra } = require('../core/preflight');
 const { resolveProjectName, containerName, resolveInfraDir } = require('../core/project');
-const { t, setLocale, getLocale } = require('../core/i18n');
+const { t } = require('../core/i18n');
 const {
   INSTALL_MODES,
   beginInstallTransaction,
@@ -140,8 +143,8 @@ module.exports = function (program) {
     // installed by the contexa-iam runtime initializer when the application
     // starts, not by contexa-cli.
     //
-    // AI security is opt-in. Basic init installs the starter and minimal Contexa
-    // settings only. --enable-ai-security / wizard consent controls provider
+    // AI security is opt-in. Basic init installs only the starter dependency and
+    // leaves host configuration byte-identical. --enable-ai-security / wizard consent controls provider
     // dependencies, LLM settings, and optional @EnableAISecurity insertion.
     // --include-ollama only opts in to the local Ollama runtime when AI security
     // is explicitly enabled or simulation is requested.
@@ -153,6 +156,7 @@ module.exports = function (program) {
     .option('--enable-ai-security', 'Enable AI security integration during init')
     .option('--provider <name>', 'AI provider to configure for explicit AI security activation: openai, anthropic, ollama, none. Comma-separated values are allowed.')
     .option('--auto-annotate', 'When AI security is enabled, add @EnableAISecurity to the main Spring Boot application class')
+    .addOption(new Option('--security-mode <mode>', 'Explicit AI security ownership mode').choices(['sandbox', 'full']))
     // The two integration modes. By default the prompt asks the user; these
     // flags exist for prompt-bypass automation.
     .option('--merge', 'Merge mode: write contexa.* into the customer build/yml (default)')
@@ -272,7 +276,9 @@ module.exports = function (program) {
 
       // 1. Detect project
       const spinner = ora(t('init.detecting')).start();
-      const project = await detectSpringProject(opts.dir);
+      const project = await detectSpringProject(opts.dir, {
+        probeDocker: !!(opts.distributed || opts.simulate),
+      });
       spinner.stop();
 
       if (!project.isSpring) {
@@ -285,7 +291,9 @@ module.exports = function (program) {
       console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || 'unknown'}`));
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
-      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing'))}`));
+      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate)
+        ? (project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing')))
+        : 'not requested'}`));
 
       const cliProjectName = opts.simulate
         ? 'ctxa-sim'
@@ -341,24 +349,8 @@ module.exports = function (program) {
       //   --no-docker                   explicit "do not start containers" intent
       //   --yes                         CI automation: skip every prompt
       //
-      // Step 2a: language. Asked first so every subsequent prompt renders in
-      // the operator's preferred language. Skipped when --lang or --yes is
-      // explicitly given (CI / scripted runs).
-      const langFlagGiven = process.argv.includes('--lang');
-      if (!langFlagGiven && !opts.yes) {
-        console.log('');
-        const langAnswer = await inquirer.prompt([{
-          type: 'rawlist',
-          name: 'lang',
-          message: t('lang.choose') + '\n',
-          default: getLocale() === 'ko' ? 2 : 1,
-          choices: [
-            { name: t('lang.choice.en'), value: 'en' },
-            { name: t('lang.choice.ko'), value: 'ko' },
-          ],
-        }]);
-        setLocale(langAnswer.lang);
-      }
+      // The detected locale remains the default. --lang is the only language
+      // override, so an Enter-only install does not spend a question on locale.
 
       const explicitIntegrationMode = opts.standalone ? 'standalone'
         : opts.merge ? 'merge'
@@ -367,9 +359,9 @@ module.exports = function (program) {
       const providerFromFlags = normalizeProviders(opts.provider, opts.includeOllama);
       const explicitAiSecurity = !!(opts.enableAiSecurity || opts.autoAnnotate || opts.provider || opts.includeOllama || opts.simulate);
       const defaults = {
-        setupMode: opts.quick ? 'quick' : 'quick',
+        setupMode: 'quick',
         integrationMode: explicitIntegrationMode || 'merge',
-        securityMode: 'full',
+        securityMode: opts.securityMode || 'sandbox',
         mode: 'shadow',
         enableAiSecurity: explicitAiSecurity && providerFromFlags.length > 0,
         autoAnnotate: !!opts.autoAnnotate,
@@ -390,29 +382,15 @@ module.exports = function (program) {
 
       const answers = opts.yes ? defaults : await inquirer.prompt([
         {
-          type: 'rawlist', name: 'setupMode',
-          message: '\n' + t('prompt.setupMode'),
-          default: 1,
-          choices: [
-            { name: t('prompt.setupMode.quick'),    value: 'quick' },
-            { name: t('prompt.setupMode.advanced'), value: 'advanced' },
-          ],
-          when: !opts.simulate && !opts.quick,
-        },
-        {
-          type: 'rawlist', name: 'enableAiSecurity',
+          type: 'confirm', name: 'enableAiSecurity',
           message: '\n' + t('prompt.enableAiSecurity'),
-          default: 1,
-          choices: [
-            { name: t('prompt.enableAiSecurity.yes'), value: true },
-            { name: t('prompt.enableAiSecurity.no'), value: false },
-          ],
+          default: false,
           when: a => !opts.simulate && !opts.enableAiSecurity && !opts.provider && !opts.autoAnnotate,
         },
         {
           type: 'rawlist', name: 'providerQuick',
           message: '\n' + t('prompt.provider'),
-          default: 1,
+          default: 'openai',
           choices: [
             { name: t('prompt.provider.openai'), value: 'openai' },
             { name: t('prompt.provider.anthropic'), value: 'anthropic' },
@@ -422,13 +400,9 @@ module.exports = function (program) {
           when: a => (a.setupMode !== 'advanced') && (opts.enableAiSecurity || opts.autoAnnotate || a.enableAiSecurity === true) && !opts.provider,
         },
         {
-          type: 'rawlist', name: 'autoAnnotate',
+          type: 'confirm', name: 'autoAnnotate',
           message: '\n' + t('prompt.autoAnnotate'),
-          default: 1,
-          choices: [
-            { name: t('prompt.autoAnnotate.no'), value: false },
-            { name: t('prompt.autoAnnotate.yes'), value: true },
-          ],
+          default: false,
           when: a => (opts.enableAiSecurity || opts.provider || a.enableAiSecurity === true) && !opts.autoAnnotate,
         },
         {
@@ -438,7 +412,7 @@ module.exports = function (program) {
           // and treat the contexa.* keys as part of their config. Standalone
           // is for projects that must keep the customer files byte-identical
           // (e.g. heavily reviewed monorepos, vendored builds).
-          default: 1,
+          default: 'merge',
           choices: [
             { name: t('prompt.integrationMode.merge'),      value: 'merge' },
             { name: t('prompt.integrationMode.standalone'), value: 'standalone' },
@@ -458,7 +432,7 @@ module.exports = function (program) {
         {
           type: 'rawlist', name: 'securityMode',
           message: '\n' + t('prompt.securityMode'),
-          default: 1,
+          default: 'sandbox',
           choices: [
             { name: t('prompt.securityMode.full'), value: 'full' },
             { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
@@ -468,7 +442,7 @@ module.exports = function (program) {
         {
           type: 'rawlist', name: 'mode',
           message: '\n' + t('prompt.mode'),
-          default: 1,
+          default: 'shadow',
           choices: [
             { name: t('prompt.mode.shadow'), value: 'shadow' },
             { name: t('prompt.mode.enforce'), value: 'enforce' },
@@ -495,7 +469,7 @@ module.exports = function (program) {
           // Distributed is the only auto-provisioning option (Postgres + Redis +
           // Zookeeper + Kafka). Customers running their own stack should accept
           // the default.
-          default: opts.distributed ? 2 : 1,
+          default: opts.distributed ? 'distributed' : 'skip',
           choices: [
             { name: t('prompt.infra.skip'),       value: 'skip' },
             { name: t('prompt.infra.distributed') || 'Yes - install distributed (Postgres + Redis + Kafka)', value: 'distributed' },
@@ -536,7 +510,7 @@ module.exports = function (program) {
       );
 
       answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
-      answers.securityMode = answers.securityMode || 'full';
+      answers.securityMode = opts.securityMode || answers.securityMode || 'sandbox';
       answers.mode = answers.mode || 'shadow';
       answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
       answers.startDocker = opts.docker !== false && answers.startDocker !== false;
@@ -560,6 +534,7 @@ module.exports = function (program) {
 
       answers.simulate = !!opts.simulate;
       answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
+      answers.hostSecurityFilterChain = !!project.hasHostSecurityFilterChain;
       answers.injectDep = true;
       if (opts.distributed) answers.infra = 'distributed';
       if (opts.docker === false) answers.startDocker = false;
@@ -576,9 +551,12 @@ module.exports = function (program) {
         || normalizePath(answers.infraDir, opts.dir)
         || null;
 
-      const plannedYmlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
+      const projectOwnerDir = project.projectDir || opts.dir;
+      const plannedYmlPath = project.appYmlPath || path.join(projectOwnerDir, 'src/main/resources/application.yml');
+      const shouldWriteHostConfig = answers.integrationMode === 'merge'
+        && (answers.enableAiSecurity || answers.infra !== 'skip' || answers.simulate);
       const plannedBuildPath = project.buildFilePath
-        || (project.buildTool === 'maven' ? path.join(opts.dir, 'pom.xml') : path.join(opts.dir, 'build.gradle'));
+        || (project.buildTool === 'maven' ? path.join(projectOwnerDir, 'pom.xml') : path.join(projectOwnerDir, 'build.gradle'));
       const plannedGeoIpPath = (answers.enableAiSecurity || answers.simulate)
         ? path.join(opts.dir, 'contexa', installMode === INSTALL_MODES.SIMULATION ? 'simulation/data' : 'data', 'GeoLite2-City.mmdb')
         : null;
@@ -593,11 +571,20 @@ module.exports = function (program) {
       const plannedFiles = answers.integrationMode === 'standalone'
         ? [{ filePath: standaloneDir, kind: 'standalone-output', generated: true }]
         : [
-            { filePath: plannedYmlPath, kind: 'application-yml' },
             { filePath: plannedBuildPath, kind: 'build-file' },
+            ...(shouldWriteHostConfig ? [{ filePath: plannedYmlPath, kind: 'application-yml' }] : []),
           ];
       if (plannedGeoIpPath) {
         plannedFiles.push({ filePath: plannedGeoIpPath, kind: 'geoip-data', generated: true });
+      }
+      if (answers.enableAiSecurity && answers.autoAnnotate
+          && Array.isArray(project.mainApplicationCandidates)
+          && project.mainApplicationCandidates.length === 1) {
+        plannedFiles.push({
+          filePath: project.mainApplicationCandidates[0],
+          kind: 'application-source',
+          generated: false,
+        });
       }
 
       printPlannedChanges(answers, project, answers.integrationMode === 'standalone'
@@ -613,6 +600,7 @@ module.exports = function (program) {
             ymlPath: plannedYmlPath,
             buildPath: plannedBuildPath,
             ymlExists: plannedYmlExists,
+            writeHostConfig: shouldWriteHostConfig,
             buildExists: plannedBuildExists,
             composePath: plannedComposePath,
             composeExists: plannedComposeExists,
@@ -655,25 +643,20 @@ module.exports = function (program) {
         const startGeo = process.hrtime.bigint();
         const sGeo = ora('Provisioning GeoLite2-City.mmdb...').start();
         try {
-          const targetDataDir = path.dirname(plannedGeoIpPath);
-          const targetMmdbPath = path.join(targetDataDir, 'GeoLite2-City.mmdb');
-          await fs.ensureDir(targetDataDir);
-
-          if (!(await fs.pathExists(targetMmdbPath))) {
-            const localSource = process.env.CONTEXA_GEOLITE2_SOURCE_PATH;
-            if (localSource && await fs.pathExists(localSource)) {
-              await fs.copy(localSource, targetMmdbPath);
-              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' }, installMode);
-              sGeo.succeed(`GeoLite2-City.mmdb copied from local cache (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
-            } else {
-              const downloadUrl = 'https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb';
-              await downloadFile(downloadUrl, targetMmdbPath);
-              await recordChange(opts.dir, targetMmdbPath, { kind: 'geoip-data', generated: true, reason: 'GeoIP context for explicit AI security setup' }, installMode);
-              sGeo.succeed(`GeoLite2-City.mmdb downloaded successfully (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
-            }
-          } else {
-            sGeo.succeed('GeoLite2-City.mmdb already present in data directory');
+          const geoIpContract = releaseManifest.resources && releaseManifest.resources.geoIp;
+          if (!geoIpContract) throw new Error('GeoIP artifact contract is missing from the release manifest.');
+          const provisioned = await ensureVerifiedArtifact(geoIpContract, {
+            destination: plannedGeoIpPath,
+            sourcePath: process.env.CONTEXA_GEOLITE2_SOURCE_PATH || null,
+            timeoutMs: 120000,
+          });
+          if (provisioned.changed) {
+            await recordChange(opts.dir, plannedGeoIpPath, { kind: 'geoip-data', generated: true, reason: 'Verified GeoIP context for explicit AI security setup' }, installMode);
           }
+          const action = provisioned.changed
+            ? (process.env.CONTEXA_GEOLITE2_SOURCE_PATH ? 'copied and verified' : 'downloaded and verified')
+            : 'already present and verified';
+          sGeo.succeed(`GeoLite2-City.mmdb ${action} (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
         } catch (err) {
           sGeo.fail(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
           throw err;
@@ -720,28 +703,41 @@ module.exports = function (program) {
         // inside fails, every change in this block is rolled back from its .bak
         // so the customer never ends up with a half-applied install (e.g. yml
         // mutated but build dep missing).
-        const ymlPath = project.appYmlPath || path.join(opts.dir, 'src/main/resources/application.yml');
-        const buildPath = project.buildFilePath
-          || (project.buildTool === 'maven'
-            ? path.join(opts.dir, 'pom.xml')
-            : path.join(opts.dir, 'build.gradle'));
+        const ymlPath = plannedYmlPath;
+        const buildPath = plannedBuildPath;
         const ymlExistedBefore = await fs.pathExists(ymlPath);
 
-        // 3. Inject application.yml
-        const startYml = process.hrtime.bigint();
-        const s1 = ora(t('step.updatingYml')).start();
-        try {
-          await injectYml(ymlPath, answers);
-          await recordChange(opts.dir, ymlPath, { kind: 'application-yml', generated: !ymlExistedBefore, reason: answers.enableAiSecurity ? 'Contexa AI security configuration' : 'Contexa starter configuration' }, installMode);
-          const elapsed = Number(process.hrtime.bigint() - startYml) / 1e6;
-          s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
-        } catch (err) {
-          s1.fail(t('step.ymlUpdated'));
-          console.log('');
-          console.log(chalk.red('  x application.yml could not be updated.'));
-          console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
-          console.log('');
-          throw err;
+        if (shouldWriteHostConfig) {
+          // Explicit activation/infrastructure keeps the existing merge path.
+          // Starter-only init never parses or rewrites host configuration.
+          const startYml = process.hrtime.bigint();
+          const s1 = ora(t('step.updatingYml')).start();
+          try {
+            const ymlState = trackedFileState(installManifest, opts.dir, ymlPath);
+            if (ymlState.userModified) {
+              s1.warn('Skipped user-modified application.yml; CLI-owned values were not absorbed or overwritten.');
+            } else {
+              const applied = await injectYml(ymlPath, {
+                ...answers,
+                managedPaths: ymlState.entry && ymlState.entry.managedPaths,
+              });
+              await recordChange(opts.dir, ymlPath, {
+                kind: 'application-yml',
+                generated: !ymlExistedBefore,
+                reason: 'Explicit Contexa configuration',
+                managedPaths: applied.managedPaths,
+              }, installMode);
+              const elapsed = Number(process.hrtime.bigint() - startYml) / 1e6;
+              s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
+            }
+          } catch (err) {
+            s1.fail(t('step.ymlUpdated'));
+            console.log('');
+            console.log(chalk.red('  x application.yml could not be updated.'));
+            console.log(chalk.gray('    ' + String(err.message).split('\n').join('\n    ')));
+            console.log('');
+            throw err;
+          }
         }
 
 
@@ -757,11 +753,22 @@ module.exports = function (program) {
         // 4. Inject dependency (rolls back yml on failure)
         if (answers.injectDep) {
           try {
+            const buildState = trackedFileState(installManifest, opts.dir, buildPath);
             // 3.5. Inject @EnableAISecurity only when the user explicitly allowed source annotation.
             if (answers.enableAiSecurity && answers.autoAnnotate) {
               try {
                 const sAnnot = ora('Injecting @EnableAISecurity into main class...').start();
-                const injected = await injectEnableAiSecurity(opts.dir, { mode: installMode });
+                const sourceState = project.mainApplicationCandidates.length === 1
+                  ? trackedFileState(installManifest, opts.dir, project.mainApplicationCandidates[0])
+                  : { entry: null, userModified: false };
+                if (sourceState.userModified) {
+                  sAnnot.warn('Skipped user-modified main application source.');
+                }
+                const injected = sourceState.userModified ? null : await injectEnableAiSecurity(opts.dir, {
+                    mode: installMode,
+                    securityMode: answers.securityMode,
+                    mainApplicationCandidates: project.mainApplicationCandidates,
+                  });
                 if (injected && injected.changed) {
                   sAnnot.succeed('@EnableAISecurity injected into main class');
                   await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' }, installMode);
@@ -777,7 +784,11 @@ module.exports = function (program) {
               }
             }
 
-            const startDep = process.hrtime.bigint();
+            if (buildState.userModified) {
+              console.log(chalk.yellow('  ! Skipped user-modified build file; dependency provenance was not absorbed.'));
+              aiDependenciesProcessed = true;
+            } else {
+              const startDep = process.hrtime.bigint();
             const s2 = ora(t('step.addingDep')).start();
             const ok = project.buildTool === 'maven'
               ? await injectMavenDep(buildPath, { mode: installMode })
@@ -810,6 +821,7 @@ module.exports = function (program) {
               }
               const elapsedDist = Number(process.hrtime.bigint() - startDistDep) / 1e6;
               added ? s2b.succeed(`${t('step.distributedDepsAdded')} (${elapsedDist.toFixed(0)}ms)`) : s2b.info(t('step.distributedDepsPresent'));
+            }
             }
           } catch (err) {
             console.log('');
@@ -950,7 +962,9 @@ module.exports = function (program) {
       if (answers.integrationMode === 'standalone') {
         console.log(chalk.gray(`    v Standalone folder created: ${standaloneDir}`));
       } else {
-        console.log(chalk.gray('    v Contexa configuration merged into application.yml'));
+        console.log(chalk.gray(shouldWriteHostConfig
+          ? '    v Explicit Contexa configuration merged into application.yml'
+          : '    v Host application configuration left byte-identical'));
         console.log(chalk.gray('    v spring-boot-starter-contexa dependency added to build file'));
       }
 
@@ -980,14 +994,7 @@ module.exports = function (program) {
       if (answers.enableAiSecurity && !aiAnnotationApplied) {
         console.log(chalk.white(`    ${manualStep++}. Add @EnableAISecurity to your main Application class:`));
         console.log(chalk.cyan('       ----------------------------------------------------'));
-        if (answers.securityMode === 'sandbox') {
-          console.log(chalk.cyan('       @EnableAISecurity('));
-          console.log(chalk.cyan('           mode = SecurityMode.SANDBOX,'));
-          console.log(chalk.cyan('           authBridge = SessionAuthBridge.class'));
-          console.log(chalk.cyan('       )'));
-        } else {
-          console.log(chalk.cyan('       @EnableAISecurity'));
-        }
+        console.log(chalk.cyan(`       @EnableAISecurity(mode = SecurityMode.${answers.securityMode.toUpperCase()})`));
         console.log(chalk.cyan('       @SpringBootApplication'));
         console.log(chalk.cyan('       public class YourApplication { }'));
         console.log(chalk.cyan('       ----------------------------------------------------'));
@@ -1074,67 +1081,6 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function pullOllamaModelWithProgress(port, modelName, spinnerInstance, stepTextTemplate) {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({ name: modelName });
-    const options = {
-      hostname: '127.0.0.1',
-      port: port,
-      path: '/api/pull',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      }
-    };
-
-    const req = http.request(options, (res) => {
-      if (res.statusCode !== 200) {
-        reject(new Error(`Ollama returned status ${res.statusCode}`));
-        return;
-      }
-
-      let buffer = '';
-      res.on('data', (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const json = JSON.parse(line);
-            if (json.error) {
-              reject(new Error(json.error));
-              return;
-            }
-            
-            let statusText = json.status || 'pulling';
-            if (json.total && json.completed) {
-              const percent = Math.floor((json.completed / json.total) * 100);
-              spinnerInstance.text = `${stepTextTemplate} [${percent}%]`;
-            } else {
-              spinnerInstance.text = `${stepTextTemplate} (${statusText})`;
-            }
-          } catch (e) {
-            // Ignore parse errors from partial chunks
-          }
-        }
-      });
-
-      res.on('end', () => {
-        resolve();
-      });
-    });
-
-    req.on('error', (err) => {
-      reject(err);
-    });
-
-    req.write(postData);
-    req.end();
-  });
-}
               // Pull selected Ollama models when local Ollama is enabled.
 // are alphanumerics with limited punctuation (`-`, `_`, `.`, `/`). Values come
 // from OLLAMA_CHAT_MODEL / OLLAMA_EMBEDDING_MODEL env vars and end up as a

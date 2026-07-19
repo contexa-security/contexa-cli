@@ -27,6 +27,10 @@ function backupRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
   return path.join(stateRoot(projectDir, mode), 'bak');
 }
 
+function transactionBackupRoot(projectDir, transactionId, mode = INSTALL_MODES.NORMAL) {
+  return path.join(backupRoot(projectDir, mode), '__transactions__', transactionId);
+}
+
 function toRelative(projectDir, filePath) {
   return path.relative(projectDir, filePath).split(path.sep).join('/');
 }
@@ -117,6 +121,7 @@ async function recordChange(projectDir, filePath, meta = {}, mode = INSTALL_MODE
   const previous = manifest.files.find(f => f.relativePath === relativePath);
   const backupPath = path.join(backupRoot(projectDir, normalizedMode), relativePath);
   const backupChecksum = await sha256File(backupPath);
+  const currentChecksum = await sha256File(filePath);
   const entry = {
     relativePath,
     mode: normalizedMode,
@@ -124,15 +129,33 @@ async function recordChange(projectDir, filePath, meta = {}, mode = INSTALL_MODE
     kind: meta.kind || 'modified',
     generated: !!meta.generated,
     reason: meta.reason || 'contexa init',
-    originalChecksum: backupChecksum,
+    ownership: 'CLI_OWNED',
+    cliApplied: true,
+    originalChecksum: previous ? previous.originalChecksum : backupChecksum,
     backupChecksum,
-    currentChecksum: await sha256File(filePath),
+    observedChecksum: previous ? previous.observedChecksum : backupChecksum,
+    lastCliChecksum: currentChecksum,
+    currentChecksum,
+    managedPaths: Array.isArray(meta.managedPaths)
+      ? [...new Set(meta.managedPaths)].sort()
+      : (previous && Array.isArray(previous.managedPaths) ? previous.managedPaths : []),
     updatedAt: new Date().toISOString(),
   };
   if (previous) {
     Object.assign(previous, entry);
   } else {
     manifest.files.push(entry);
+  }
+  if (manifest.transaction && manifest.transaction.status === 'IN_PROGRESS') {
+    const transactionFile = (manifest.transaction.files || []).find(file => file.relativePath === relativePath);
+    if (!transactionFile || transactionFile.startChecksum !== currentChecksum) {
+      manifest.transaction.changedRelativePaths = Array.isArray(manifest.transaction.changedRelativePaths)
+        ? manifest.transaction.changedRelativePaths
+        : [];
+      if (!manifest.transaction.changedRelativePaths.includes(relativePath)) {
+        manifest.transaction.changedRelativePaths.push(relativePath);
+      }
+    }
   }
   await saveManifest(projectDir, manifest, normalizedMode);
 }
@@ -147,24 +170,48 @@ async function beginInstallTransaction(projectDir, metadata = {}, mode = INSTALL
     }
     manifest = await loadManifest(projectDir, normalizedMode);
   }
+  const manifestAlreadyExisted = await fs.pathExists(manifestPath(projectDir, normalizedMode));
+  const previousState = manifestAlreadyExisted
+    ? JSON.parse(JSON.stringify({
+        metadata: manifest.metadata || {},
+        files: manifest.files || [],
+        transaction: manifest.transaction || null,
+      }))
+    : null;
+  const transactionId = crypto.randomUUID();
   const now = new Date().toISOString();
   const updated = await recordInstallMetadata(projectDir, metadata, normalizedMode);
+  const transactionFiles = [];
   for (const planned of plannedFiles) {
     if (!planned || !planned.filePath) continue;
     const relativePath = toRelative(projectDir, planned.filePath);
     projectOwnedPath(projectDir, relativePath);
     const existing = updated.files.find(entry => entry.relativePath === relativePath);
-    if (existing) continue;
     const exists = await fs.pathExists(planned.filePath);
+    const stat = exists ? await fs.stat(planned.filePath) : null;
+    const startChecksum = stat && stat.isFile() ? await sha256File(planned.filePath) : null;
+    const snapshotPath = path.join(transactionBackupRoot(projectDir, transactionId, normalizedMode), relativePath);
+    if (stat && stat.isFile()) {
+      await fs.ensureDir(path.dirname(snapshotPath));
+      await fs.copy(planned.filePath, snapshotPath, { overwrite: false });
+    }
+    transactionFiles.push({
+      relativePath,
+      existed: exists,
+      file: !!(stat && stat.isFile()),
+      directory: !!(stat && stat.isDirectory()),
+      startChecksum,
+      priorTracked: !!existing,
+    });
+    if (existing) continue;
     const backupPath = path.join(backupRoot(projectDir, normalizedMode), relativePath);
-    if (exists) {
-      const stat = await fs.stat(planned.filePath);
-      if (stat.isFile() && !await fs.pathExists(backupPath)) {
+    if (stat && stat.isFile()) {
+      if (!await fs.pathExists(backupPath)) {
         await fs.ensureDir(path.dirname(backupPath));
         await fs.copy(planned.filePath, backupPath, { overwrite: false });
       }
     }
-    const originalChecksum = exists ? await sha256File(planned.filePath) : null;
+    const originalChecksum = startChecksum;
     updated.files.push({
       relativePath,
       mode: normalizedMode,
@@ -172,21 +219,28 @@ async function beginInstallTransaction(projectDir, metadata = {}, mode = INSTALL
       kind: planned.kind || 'modified',
       generated: planned.generated !== undefined ? !!planned.generated : !exists,
       reason: planned.reason || 'planned contexa init change',
+      ownership: exists ? 'USER_OWNED' : 'CLI_PENDING',
+      cliApplied: false,
       originalChecksum,
       backupChecksum: await sha256File(backupPath),
+      observedChecksum: originalChecksum,
+      lastCliChecksum: null,
       currentChecksum: originalChecksum,
       planned: true,
       updatedAt: now,
     });
   }
   updated.transaction = {
-    id: crypto.randomUUID(),
+    id: transactionId,
     status: 'IN_PROGRESS',
     startedAt: now,
     committedAt: null,
     rolledBackAt: null,
     rollbackErrors: [],
     externalFiles: [],
+    files: transactionFiles,
+    changedRelativePaths: [],
+    previousState,
   };
   await saveManifest(projectDir, updated, normalizedMode);
   return updated.transaction.id;
@@ -198,9 +252,27 @@ async function commitInstallTransaction(projectDir, transactionId, mode = INSTAL
   if (!manifest.transaction || manifest.transaction.id !== transactionId || manifest.transaction.status !== 'IN_PROGRESS') {
     throw new Error(`Cannot commit unknown or inactive ${normalizedMode} install transaction`);
   }
-  manifest.transaction.status = 'COMMITTED';
-  manifest.transaction.committedAt = new Date().toISOString();
+  const transaction = manifest.transaction;
+  const changed = (transaction.changedRelativePaths || []).length > 0
+    || (transaction.externalFiles || []).some(file => file.currentChecksum !== file.originalChecksum);
+  if (!changed && transaction.previousState) {
+    for (const entry of (transaction.files || []).filter(file => !file.priorTracked)) {
+      const originalBackup = path.join(backupRoot(projectDir, normalizedMode), entry.relativePath);
+      if (await fs.pathExists(originalBackup)) await fs.remove(originalBackup);
+    }
+    manifest.metadata = transaction.previousState.metadata;
+    manifest.files = transaction.previousState.files;
+    manifest.transaction = transaction.previousState.transaction;
+  } else {
+    transaction.status = 'COMMITTED';
+    transaction.committedAt = new Date().toISOString();
+    delete transaction.previousState;
+    delete transaction.files;
+  }
   await saveManifest(projectDir, manifest, normalizedMode);
+  const transactionBackups = transactionBackupRoot(projectDir, transactionId, normalizedMode);
+  if (await fs.pathExists(transactionBackups)) await fs.remove(transactionBackups);
+  return { changed };
 }
 
 function projectOwnedPath(projectDir, relativePath) {
@@ -232,6 +304,17 @@ function pathWithinRoot(rootPath, candidatePath) {
   const root = path.resolve(rootPath);
   const candidate = path.resolve(candidatePath);
   return candidate === root || candidate.startsWith(root + path.sep);
+}
+
+async function removeEmptyParents(startPath, stopPath) {
+  const stop = path.resolve(stopPath);
+  let current = path.resolve(startPath);
+  while (current !== stop && pathWithinRoot(stop, current) && await fs.pathExists(current)) {
+    const entries = await fs.readdir(current);
+    if (entries.length > 0) return;
+    await fs.remove(current);
+    current = path.dirname(current);
+  }
 }
 
 async function prepareExternalFileChange(
@@ -303,6 +386,94 @@ async function rollbackInstallTransaction(projectDir, transactionId, mode = INST
     throw new Error(`Cannot roll back unknown ${normalizedMode} install transaction`);
   }
   const failures = [];
+  const transaction = manifest.transaction;
+  if (Array.isArray(transaction.files)) {
+    for (const entry of [...transaction.files].reverse()) {
+      try {
+        const originalPath = projectOwnedPath(projectDir, entry.relativePath);
+        const snapshotPath = path.join(transactionBackupRoot(projectDir, transactionId, normalizedMode), entry.relativePath);
+        if (entry.file && entry.existed) {
+          if (!await fs.pathExists(snapshotPath)) throw new Error('transaction snapshot is missing');
+          await fs.ensureDir(path.dirname(originalPath));
+          await fs.copy(snapshotPath, originalPath, { overwrite: true });
+        } else if (!entry.existed && await fs.pathExists(originalPath)) {
+          await fs.remove(originalPath);
+        }
+        if (!entry.existed) {
+          await removeEmptyParents(path.dirname(originalPath), projectDir);
+        }
+      } catch (error) {
+        failures.push(`${entry.relativePath}: ${error.message}`);
+      }
+    }
+    for (const entry of [...(transaction.externalFiles || [])].reverse()) {
+      try {
+        if (!pathWithinRoot(entry.rootPath, entry.filePath)) {
+          throw new Error('external file escapes its recorded root');
+        }
+        const backupPath = path.join(backupRoot(projectDir, normalizedMode), entry.backupRelativePath);
+        if (entry.existed) {
+          if (!await fs.pathExists(backupPath)) throw new Error('required external backup is missing');
+          await fs.ensureDir(path.dirname(entry.filePath));
+          await fs.copy(backupPath, entry.filePath, { overwrite: true });
+        } else if (await fs.pathExists(entry.filePath)) {
+          await fs.remove(entry.filePath);
+        }
+        if (!entry.rootExisted && await fs.pathExists(entry.rootPath)) {
+          const remaining = await fs.readdir(entry.rootPath);
+          if (remaining.length === 0) await fs.remove(entry.rootPath);
+        }
+      } catch (error) {
+        failures.push(`${entry.filePath}: ${error.message}`);
+      }
+    }
+    if (transaction.files.length === 0 && !transaction.previousState) {
+      try {
+        const backups = backupRoot(projectDir, normalizedMode);
+        for (const backupPath of await collectBackupFiles(backups)) {
+          const relativePath = path.relative(backups, backupPath);
+          if (relativePath === '__external__'
+              || relativePath.startsWith('__external__' + path.sep)
+              || relativePath === '__transactions__'
+              || relativePath.startsWith('__transactions__' + path.sep)) continue;
+          const originalPath = projectOwnedPath(projectDir, relativePath);
+          await fs.ensureDir(path.dirname(originalPath));
+          await fs.copy(backupPath, originalPath, { overwrite: true });
+        }
+      } catch (error) {
+        failures.push(`backup tree: ${error.message}`);
+      }
+    }
+
+    if (failures.length === 0) {
+      if (transaction.previousState) {
+        for (const entry of transaction.files.filter(file => !file.priorTracked)) {
+          const originalBackup = path.join(backupRoot(projectDir, normalizedMode), entry.relativePath);
+          if (await fs.pathExists(originalBackup)) await fs.remove(originalBackup);
+        }
+        manifest.metadata = transaction.previousState.metadata;
+        manifest.files = transaction.previousState.files;
+        manifest.transaction = transaction.previousState.transaction;
+        const transactionBackups = transactionBackupRoot(projectDir, transactionId, normalizedMode);
+        if (await fs.pathExists(transactionBackups)) await fs.remove(transactionBackups);
+      } else {
+        transaction.status = 'ROLLED_BACK';
+        transaction.rolledBackAt = new Date().toISOString();
+        transaction.rollbackErrors = [];
+        delete transaction.previousState;
+        delete transaction.files;
+        manifest.files = [];
+        const backups = backupRoot(projectDir, normalizedMode);
+        if (await fs.pathExists(backups)) await fs.remove(backups);
+      }
+    } else {
+      transaction.status = 'ROLLBACK_FAILED';
+      transaction.rolledBackAt = new Date().toISOString();
+      transaction.rollbackErrors = failures;
+    }
+    await saveManifest(projectDir, manifest, normalizedMode);
+    return { rolledBack: failures.length === 0, failures };
+  }
   const restoredRelativePaths = new Set();
   for (const entry of [...manifest.files].reverse()) {
     try {

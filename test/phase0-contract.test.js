@@ -32,16 +32,15 @@ async function createSpringFixture(prefix) {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   const build = path.join(project, 'build.gradle');
   const yml = path.join(project, 'src/main/resources/application.yml');
+  const source = path.join(project, 'src/main/java/example/SampleApplication.java');
   const originalBuild = "plugins { id 'org.springframework.boot' version '3.3.0' }\ndependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }\n";
   const originalYml = "server:\n  port: 9080\nspring:\n  datasource:\n    url: jdbc:postgresql://127.0.0.1:35433/host-owned\n  security:\n    user:\n      name: host-user\n      password: host-password\n  ai:\n    provider: host-owned\n";
   await fs.outputFile(build, originalBuild, 'utf8');
   await fs.outputFile(path.join(project, 'settings.gradle'), "rootProject.name = 'phase0-fixture'\n", 'utf8');
   await fs.outputFile(yml, originalYml, 'utf8');
-  await fs.outputFile(
-    path.join(project, 'src/main/java/example/SampleApplication.java'),
-    'package example;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class SampleApplication {}\n',
-    'utf8');
-  return { project, build, yml, originalBuild, originalYml };
+  const originalSource = 'package example;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class SampleApplication {}\n';
+  await fs.outputFile(source, originalSource, 'utf8');
+  return { project, build, yml, source, originalBuild, originalYml, originalSource };
 }
 
 test('Phase 0 release and primary-command contract has one canonical source', () => {
@@ -58,6 +57,17 @@ test('Phase 0 release and primary-command contract has one canonical source', ()
   const common = fs.readFileSync(path.join(root, 'src/core/injector/common.js'), 'utf8');
   assert.match(common, /releaseManifest\.starter\.version/);
   assert.equal(common.includes("CONTEXA_VERSION = '"), false);
+});
+
+test('interactive init defaults are value-based and resolve to the safe quick starter-only plan', () => {
+  const initSource = fs.readFileSync(path.join(root, 'src/commands/init.js'), 'utf8');
+  assert.doesNotMatch(initSource, /default:\s*\d+/);
+  assert.match(initSource, /setupMode:\s*'quick'/);
+  assert.match(initSource, /integrationMode:\s*explicitIntegrationMode \|\| 'merge'/);
+  assert.match(initSource, /securityMode:\s*opts\.securityMode \|\| 'sandbox'/);
+  assert.match(initSource, /infra:\s*opts\.distributed \? 'distributed' : 'skip'/);
+  assert.match(initSource, /name: 'enableAiSecurity',[\s\S]*?default: false/);
+  assert.match(initSource, /name: 'autoAnnotate',[\s\S]*?default: false/);
 });
 
 test('Phase 1 release assets, compatibility and signed-manifest workflow are consistent', () => {
@@ -223,6 +233,85 @@ test('an interrupted transaction is recovered before the next transaction starts
   }
 });
 
+test('transaction rollback restores build, overlay, Java, GeoIP, manifest, and compose stages', async t => {
+  const stages = ['overlay', 'java', 'build', 'geoip', 'manifest', 'compose'];
+  for (const stage of stages) {
+    await t.test(stage, async () => {
+      const fixture = await createSpringFixture(`ctxa-phase2-rollback-${stage}-`);
+      const infra = path.join(os.tmpdir(), `ctxa-phase2-rollback-infra-${stage}-${path.basename(fixture.project)}`);
+      const geo = path.join(fixture.project, 'contexa', 'data', 'GeoLite2-City.mmdb');
+      const compose = path.join(infra, 'docker-compose.yml');
+      const unrelated = path.join(fixture.project, 'customer-owned.txt');
+      await fs.writeFile(unrelated, 'customer-owned\n', 'utf8');
+      const before = {
+        build: crypto.createHash('sha256').update(await fs.readFile(fixture.build)).digest('hex'),
+        yml: crypto.createHash('sha256').update(await fs.readFile(fixture.yml)).digest('hex'),
+        source: crypto.createHash('sha256').update(await fs.readFile(fixture.source)).digest('hex'),
+        unrelated: crypto.createHash('sha256').update(await fs.readFile(unrelated)).digest('hex'),
+      };
+      try {
+        const transactionId = await beginInstallTransaction(
+          fixture.project,
+          { projectName: 'rollback-fixture', infraDir: infra },
+          INSTALL_MODES.NORMAL,
+          [
+            { filePath: fixture.build, kind: 'build-file' },
+            { filePath: fixture.yml, kind: 'application-yml' },
+            { filePath: fixture.source, kind: 'application-source' },
+            { filePath: geo, kind: 'geoip-data', generated: true },
+          ]
+        );
+
+        await fs.writeFile(fixture.yml, 'contexa:\n  changed: true\n', 'utf8');
+        await recordChange(fixture.project, fixture.yml, { kind: 'application-yml' }, INSTALL_MODES.NORMAL);
+        if (stage !== 'overlay') {
+          await fs.writeFile(fixture.source, 'package example; class Changed {}\n', 'utf8');
+          await recordChange(fixture.project, fixture.source, { kind: 'application-source' }, INSTALL_MODES.NORMAL);
+        }
+        if (!['overlay', 'java'].includes(stage)) {
+          await fs.writeFile(fixture.build, 'broken build\n', 'utf8');
+          if (stage === 'manifest') {
+            const originalRename = fs.rename;
+            fs.rename = async () => { throw new Error('injected manifest write failure'); };
+            try {
+              await assert.rejects(
+                () => recordChange(fixture.project, fixture.build, { kind: 'build-file' }, INSTALL_MODES.NORMAL),
+                /injected manifest write failure/
+              );
+            } finally {
+              fs.rename = originalRename;
+            }
+          } else {
+            await recordChange(fixture.project, fixture.build, { kind: 'build-file' }, INSTALL_MODES.NORMAL);
+          }
+        }
+        if (['geoip', 'compose'].includes(stage)) {
+          await fs.outputFile(geo, 'partial geoip\n', 'utf8');
+          await recordChange(fixture.project, geo, { kind: 'geoip-data', generated: true }, INSTALL_MODES.NORMAL);
+        }
+        if (stage === 'compose') {
+          await prepareExternalFileChange(fixture.project, transactionId, compose, infra, INSTALL_MODES.NORMAL);
+          await fs.outputFile(compose, 'services:\n  broken: {}\n', 'utf8');
+          await recordExternalFileChange(fixture.project, transactionId, compose, INSTALL_MODES.NORMAL);
+        }
+
+        const rollback = await rollbackInstallTransaction(fixture.project, transactionId, INSTALL_MODES.NORMAL);
+        assert.equal(rollback.rolledBack, true, rollback.failures.join('; '));
+        assert.equal(crypto.createHash('sha256').update(await fs.readFile(fixture.build)).digest('hex'), before.build);
+        assert.equal(crypto.createHash('sha256').update(await fs.readFile(fixture.yml)).digest('hex'), before.yml);
+        assert.equal(crypto.createHash('sha256').update(await fs.readFile(fixture.source)).digest('hex'), before.source);
+        assert.equal(crypto.createHash('sha256').update(await fs.readFile(unrelated)).digest('hex'), before.unrelated);
+        assert.equal(await fs.pathExists(geo), false);
+        assert.equal(await fs.pathExists(path.dirname(geo)), false);
+        assert.equal(await fs.pathExists(compose), false);
+      } finally {
+        await fs.remove(fixture.project);
+        await fs.remove(infra);
+      }
+    });
+  }
+});
+
 test('rollback failure is explicit and preserves recovery metadata', async () => {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-rollback-failure-'));
   const build = path.join(project, 'build.gradle');
@@ -234,7 +323,12 @@ test('rollback failure is explicit and preserves recovery metadata', async () =>
       INSTALL_MODES.NORMAL,
       [{ filePath: build, kind: 'build-file' }]
     );
-    await fs.remove(path.join(backupRoot(project, INSTALL_MODES.NORMAL), 'build.gradle'));
+    await fs.remove(path.join(
+      backupRoot(project, INSTALL_MODES.NORMAL),
+      '__transactions__',
+      transactionId,
+      'build.gradle'
+    ));
     await fs.writeFile(build, 'broken\n', 'utf8');
     const result = await rollbackInstallTransaction(project, transactionId, INSTALL_MODES.NORMAL);
     assert.equal(result.rolledBack, false);
@@ -336,8 +430,46 @@ test('manifestless repeated reset is a safe no-op', async () => {
   }
 });
 
-test('actual starter-only init and reset preserve the host project byte-for-byte', async () => {
-  const { project, build, yml, originalBuild, originalYml } = await createSpringFixture('ctxa-phase0-command-');
+test('async command error matrix returns non-zero on stderr without success or residual child processes', async t => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-error-matrix-'));
+  const emptyProject = path.join(rootDir, 'empty-project');
+  const missingSimulation = path.join(rootDir, 'missing-simulation');
+  const corruptReset = path.join(rootDir, 'corrupt-reset');
+  await fs.ensureDir(emptyProject);
+  await fs.ensureDir(missingSimulation);
+  await fs.outputFile(path.join(corruptReset, 'contexa', 'manifest.json'), '{invalid', 'utf8');
+  const cases = [
+    { name: 'init', args: ['init', '--yes', '--dir', emptyProject] },
+    { name: 'doctor', args: ['doctor', '--provider', 'invalid-provider'] },
+    { name: 'mode', args: ['mode', '--dir', emptyProject] },
+    { name: 'simulate', args: ['simulate', 'up', '--infra-dir', missingSimulation] },
+    { name: 'reset', args: ['reset', '--yes', '--dir', corruptReset] },
+  ];
+  try {
+    for (const command of cases) {
+      await t.test(command.name, () => {
+        const startedAt = Date.now();
+        const result = spawnSync(process.execPath, [cliPath, ...command.args], {
+          encoding: 'utf8',
+          timeout: 5000,
+        });
+        assert.notEqual(result.status, 0, `${command.name} unexpectedly succeeded`);
+        assert.equal(result.signal, null, `${command.name} exceeded its timeout`);
+        assert.ok(result.stderr.trim().length > 0, `${command.name} did not report its error on stderr`);
+        assert.doesNotMatch(result.stdout, /successfully completed|initialization completed|All checks passed/i);
+        assert.ok(Date.now() - startedAt < 5000, `${command.name} did not terminate within the configured timeout`);
+        if (result.pid) {
+          assert.throws(() => process.kill(result.pid, 0), undefined, `${command.name} child process is still alive`);
+        }
+      });
+    }
+  } finally {
+    await fs.remove(rootDir);
+  }
+});
+
+test('actual starter-only init is idempotent and reset preserves the host project byte-for-byte', async () => {
+  const { project, build, yml, source, originalBuild, originalYml, originalSource } = await createSpringFixture('ctxa-phase0-command-');
   try {
     const init = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8' });
     assert.equal(init.status, 0, init.stderr + init.stdout);
@@ -347,10 +479,21 @@ test('actual starter-only init and reset preserve the host project byte-for-byte
     assert.equal(manifest.metadata.mode, INSTALL_MODES.NORMAL);
     assert.match(await fs.readFile(build, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa:0\.1\.0-SNAPSHOT/);
     assert.ok(manifest.files.every(entry => entry.installationId === manifest.metadata.installationId));
+    assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
+    assert.deepEqual(await fs.readFile(source), Buffer.from(originalSource, 'utf8'));
     const updatedYml = yaml.load(await fs.readFile(yml, 'utf8'));
     assert.equal(updatedYml.spring.security.user.name, 'host-user');
     assert.equal(updatedYml.spring.datasource.url, 'jdbc:postgresql://127.0.0.1:35433/host-owned');
     assert.equal(updatedYml.spring.ai.provider, 'host-owned');
+
+    const firstBuild = await fs.readFile(build);
+    const firstManifest = await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL));
+    const repeatedInit = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8' });
+    assert.equal(repeatedInit.status, 0, repeatedInit.stderr + repeatedInit.stdout);
+    assert.deepEqual(await fs.readFile(build), firstBuild);
+    assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
+    assert.deepEqual(await fs.readFile(source), Buffer.from(originalSource, 'utf8'));
+    assert.deepEqual(await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL)), firstManifest);
 
     const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
     assert.equal(reset.status, 0, reset.stderr + reset.stdout);
@@ -366,28 +509,111 @@ test('actual starter-only init and reset preserve the host project byte-for-byte
   }
 });
 
-test('actual init failure rolls back host files and records ROLLED_BACK', async () => {
-  const { project, build, yml, originalBuild } = await createSpringFixture('ctxa-phase0-command-failure-');
-  const invalidYml = Buffer.from('spring: [unterminated\r\n', 'utf8');
-  await fs.writeFile(yml, invalidYml);
+test('init provenance distinguishes user starter and preserves post-init user changes through reset', async () => {
+  const cliOwned = await createSpringFixture('ctxa-phase2-provenance-cli-');
+  const userOwned = await createSpringFixture('ctxa-phase2-provenance-user-');
   try {
-    const init = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8' });
-    assert.notEqual(init.status, 0, init.stdout);
-    assert.deepEqual(await fs.readFile(build), Buffer.from(originalBuild, 'utf8'));
-    assert.deepEqual(await fs.readFile(yml), invalidYml);
-    const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
-    assert.equal(manifest.transaction.status, 'ROLLED_BACK');
-    assert.equal(manifest.files.length, 0);
+    const first = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
+    assert.equal(first.status, 0, first.stderr + first.stdout);
+    const firstManifestBytes = await fs.readFile(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL));
+    const firstManifest = await loadManifest(cliOwned.project, INSTALL_MODES.NORMAL);
+    const cliEntry = firstManifest.files.find(entry => entry.relativePath === 'build.gradle');
+    assert.equal(cliEntry.ownership, 'CLI_OWNED');
+    assert.equal(cliEntry.cliApplied, true);
+    assert.equal(cliEntry.lastCliChecksum, cliEntry.currentChecksum);
+
+    await fs.appendFile(cliOwned.build, '// customer change after init\n', 'utf8');
+    const customerBuild = await fs.readFile(cliOwned.build);
+    const second = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
+    assert.equal(second.status, 0, second.stderr + second.stdout);
+    assert.deepEqual(await fs.readFile(cliOwned.build), customerBuild);
+    assert.deepEqual(await fs.readFile(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL)), firstManifestBytes);
+
+    const resetCliOwned = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
+    assert.notEqual(resetCliOwned.status, 0);
+    assert.match(resetCliOwned.stdout, /Skipped user-modified file/);
+    assert.deepEqual(await fs.readFile(cliOwned.build), customerBuild);
+
+    const preinstalled = userOwned.originalBuild.replace(
+      `implementation 'org.springframework.boot:spring-boot-starter-web'`,
+      `implementation 'org.springframework.boot:spring-boot-starter-web'\n  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'`
+    );
+    await fs.writeFile(userOwned.build, preinstalled, 'utf8');
+    const initUserOwned = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
+    assert.equal(initUserOwned.status, 0, initUserOwned.stderr + initUserOwned.stdout);
+    const userManifest = await loadManifest(userOwned.project, INSTALL_MODES.NORMAL);
+    const userEntry = userManifest.files.find(entry => entry.relativePath === 'build.gradle');
+    assert.equal(userEntry.ownership, 'USER_OWNED');
+    assert.equal(userEntry.cliApplied, false);
+    assert.equal(userEntry.lastCliChecksum, null);
+    const resetUserOwned = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
+    assert.equal(resetUserOwned.status, 0, resetUserOwned.stderr + resetUserOwned.stdout);
+    assert.equal(await fs.readFile(userOwned.build, 'utf8'), preinstalled);
   } finally {
-    await fs.remove(project);
+    await fs.remove(cliOwned.project);
+    await fs.remove(userOwned.project);
   }
 });
 
-test('normal and simulation command states coexist and reset independently', async () => {
+test('reset retry accepts a file already restored before a previous partial failure', async () => {
+  const fixture = await createSpringFixture('ctxa-phase2-reset-retry-');
+  try {
+    const init = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', fixture.project], { encoding: 'utf8' });
+    assert.equal(init.status, 0, init.stderr + init.stdout);
+    const manifest = await loadManifest(fixture.project, INSTALL_MODES.NORMAL);
+    const buildEntry = manifest.files.find(entry => entry.relativePath === 'build.gradle');
+    assert.ok(buildEntry);
+
+    await fs.writeFile(fixture.build, fixture.originalBuild, 'utf8');
+    const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', fixture.project], { encoding: 'utf8' });
+    assert.equal(reset.status, 0, reset.stderr + reset.stdout);
+    assert.match(reset.stdout, /Already restored/);
+    assert.doesNotMatch(reset.stdout, /Skipped user-modified file/);
+    assert.equal(await fs.readFile(fixture.build, 'utf8'), fixture.originalBuild);
+    assert.equal(await fs.pathExists(manifestPath(fixture.project, INSTALL_MODES.NORMAL)), false);
+  } finally {
+    await fs.remove(fixture.project);
+  }
+});
+
+test('actual init failure rolls back host files and records ROLLED_BACK', async () => {
+  const { project, build, yml, originalBuild } = await createSpringFixture('ctxa-phase0-command-failure-');
+  const infra = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-command-failure-infra-'));
+  const invalidYml = Buffer.from('spring: [unterminated\r\n', 'utf8');
+  await fs.writeFile(yml, invalidYml);
+  try {
+    const args = [
+      cliPath, 'init', '--yes', '--distributed', '--no-docker',
+      '--dir', project, '--infra-dir', infra,
+    ];
+    const init = spawnSync(process.execPath, args, { encoding: 'utf8' });
+    assert.notEqual(init.status, 0, init.stdout);
+    assert.doesNotMatch(init.stdout, /Contexa initialization completed successfully/i);
+    assert.deepEqual(await fs.readFile(build), Buffer.from(originalBuild, 'utf8'));
+    assert.deepEqual(await fs.readFile(yml), invalidYml);
+    assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), false);
+    const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
+    assert.equal(manifest.transaction.status, 'ROLLED_BACK');
+    assert.equal(manifest.files.length, 0);
+
+    await fs.writeFile(yml, 'server:\n  port: 9080\n', 'utf8');
+    const retry = spawnSync(process.execPath, args, { encoding: 'utf8' });
+    assert.equal(retry.status, 0, retry.stderr + retry.stdout);
+    assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), true);
+  } finally {
+    await fs.remove(project);
+    await fs.remove(infra);
+  }
+});
+
+test('normal and simulation command states coexist and reset independently', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false
+    : 'Phase 4 requires the approved GeoIP artifact through CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
   const { project, build, yml, originalBuild, originalYml } = await createSpringFixture('ctxa-phase0-coexist-');
   const infraDir = path.join(os.tmpdir(), 'ctxa-phase0-sim-infra-' + path.basename(project));
-  const geoSource = path.join(project, 'fixture.mmdb');
-  await fs.writeFile(geoSource, 'phase0-fixture', 'utf8');
+  const geoSource = path.resolve(process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH);
   const childEnv = {
     ...process.env,
     PATH: path.dirname(process.execPath),

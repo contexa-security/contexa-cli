@@ -3,205 +3,224 @@
 const fs = require('fs-extra');
 const path = require('path');
 
+const CONTEXA_GROUP_ID = 'ai.ctxa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
 
 async function detectSpringProject(dir = process.cwd(), opts = {}) {
+  const rootDir = path.resolve(dir);
   const result = {
-    isSpring: false,
-    buildTool: null,
-    buildFilePath: null,
-    hasSpringBoot: false,
-    hasSpringSecurityCore: false,
-    hasContexta: false,
-    projectName: null,
-    appYmlPath: null,
-    appPropertiesPath: null,
-    hasDocker: false,
-    gradleRootDir: null,
-    // True iff a Java source file in src/main/java references @EnableAISecurity
-    // (or its FQN). Only when this is true should the CLI add the Spring AI
-    // ChatModel starter and the pgvector vector store - the contexa platform
-    // creates those beans only when the annotation is present, and adding the
-    // dependencies preemptively causes PgVector bean instantiation errors in
-    // applications that only depend on spring-boot-starter-contexa without
-    // declaring the annotation.
-    hasEnableAiSecurity: false,
+    isSpring: false, buildTool: null, buildFilePath: null, hasSpringBoot: false,
+    hasSpringSecurityCore: false, hasContexta: false, projectName: null,
+    projectDir: rootDir, appYmlPath: null, appPropertiesPath: null,
+    applicationConfigPaths: [], mainApplicationCandidates: [], hasDocker: false,
+    gradleRootDir: null, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false,
+    ambiguousModules: [],
   };
 
-  // Maven detection
-  const pomPath = path.join(dir, 'pom.xml');
-  if (await fs.pathExists(pomPath)) {
-    result.buildTool = 'maven';
-    result.buildFilePath = pomPath;
-    result.isSpring = true;
-    const pom = await fs.readFile(pomPath, 'utf8');
-    result.hasSpringBoot = pom.includes('spring-boot');
-    result.hasSpringSecurityCore = pom.includes('spring-security')
-        || pom.includes('spring-boot-starter-security')
-        || pom.includes('spring-security-web');
-    result.hasContexta = pom.includes(CONTEXA_ARTIFACT_ID);
-    // Strip <parent>...</parent> first so we don't accidentally match the parent's artifactId.
-    const projectPom = pom.replace(/<parent>[\s\S]*?<\/parent>/, '');
-    const m = projectPom.match(/<artifactId>([^<]+)<\/artifactId>/);
-    if (m) result.projectName = m[1];
+  const localCandidate = await readBuildCandidate(rootDir);
+  let candidate = localCandidate && localCandidate.hasSpringBoot ? localCandidate : null;
+  if (!candidate) {
+    const springModules = (await discoverModuleCandidates(rootDir)).filter(item => item.hasSpringBoot);
+    if (springModules.length === 1) candidate = springModules[0];
+    else if (springModules.length > 1) {
+      result.ambiguousModules = springModules.map(item => item.dir);
+      return finishDetection(result, rootDir, opts);
+    } else if (localCandidate) candidate = localCandidate;
   }
 
-  // Gradle detection (build.gradle and build.gradle.kts)
-  const gradlePath = path.join(dir, 'build.gradle');
-  const gradleKtsPath = path.join(dir, 'build.gradle.kts');
-  const actualGradlePath = await fs.pathExists(gradlePath) ? gradlePath
-      : await fs.pathExists(gradleKtsPath) ? gradleKtsPath : null;
-
-  if (!result.isSpring && actualGradlePath) {
-    result.buildTool = 'gradle';
-    result.buildFilePath = actualGradlePath;
-    result.isSpring = true;
-    const gradle = await fs.readFile(actualGradlePath, 'utf8');
-    result.hasSpringBoot = gradle.includes('spring-boot');
-    result.hasSpringSecurityCore = gradle.includes('spring-security')
-        || gradle.includes('spring-boot-starter-security');
-    result.hasContexta = gradle.includes(CONTEXA_ARTIFACT_ID);
+  if (candidate) {
+    Object.assign(result, {
+      buildTool: candidate.buildTool,
+      buildFilePath: candidate.buildFilePath,
+      hasSpringBoot: candidate.hasSpringBoot,
+      isSpring: candidate.hasSpringBoot,
+      hasSpringSecurityCore: candidate.hasSpringSecurityCore,
+      hasContexta: candidate.hasContexta,
+      projectName: candidate.projectName,
+      projectDir: candidate.dir,
+    });
+    if (candidate.buildTool === 'gradle' && candidate.dir !== rootDir) result.gradleRootDir = rootDir;
   }
 
-  // Resolve a project name for Gradle: settings.gradle's rootProject.name takes
-  // precedence; otherwise fall back to the directory basename. Maven users get
-  // the artifactId already, so we only run this branch for Gradle.
-  if (result.buildTool === 'gradle' && !result.projectName) {
-    const settingsLocal = await firstExisting([
-      path.join(dir, 'settings.gradle'),
-      path.join(dir, 'settings.gradle.kts'),
-    ]);
-    if (settingsLocal) {
-      const content = await fs.readFile(settingsLocal, 'utf8');
-      const m = content.match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/);
-      if (m) result.projectName = m[1];
-    }
-    if (!result.projectName) result.projectName = path.basename(dir);
-  }
+  await inventoryConfiguration(result, result.projectDir);
+  await inventoryApplicationSources(result, result.projectDir);
+  return finishDetection(result, rootDir, opts);
+}
 
-  // Multi-module Gradle: walk up to find a parent settings.gradle that includes
-  // this directory. Common in mono-repos that share a root with subprojects { }
-  // dependency injection. Without this check, detector reports hasContexta=false
-  // even when the parent's subprojects block already adds the starter, and init
-  // would then add a redundant per-module dependency line.
-  if (result.buildTool === 'gradle') {
-    const moduleName = path.basename(dir);
-    let cur = path.resolve(dir, '..');
-    for (let depth = 0; depth < 4; depth++) {
-      const parentSettings = await firstExisting([
-        path.join(cur, 'settings.gradle'),
-        path.join(cur, 'settings.gradle.kts'),
-      ]);
-      if (parentSettings) {
-        const settingsContent = await fs.readFile(parentSettings, 'utf8');
-        // Match include 'module-name' (Groovy) or include("module-name") (Kotlin DSL).
-        // Skip commented-out occurrences: a previous version matched
-        //   // include 'this-module'
-        // anywhere in the file, which led to false positives where init
-        // skipped the dependency add even though the module had been
-        // commented out of the parent settings.gradle. We strip block
-        // comments first and then strip line comments per line before
-        // applying the match so both forms are ignored.
-        const cleaned = settingsContent.replace(/\/\*[\s\S]*?\*\//g, '');
-        const includeRegex = new RegExp(
-          `\\binclude[\\s(]*['"]:?${escapeRegex(moduleName)}['"]`
-        );
-        const isIncluded = cleaned.split('\n').some(line => {
-          const noLineComment = line.replace(/\/\/.*$/, '');
-          return includeRegex.test(noLineComment);
-        });
-        if (isIncluded) {
-          result.gradleRootDir = cur;
-          const rootBuild = await firstExisting([
-            path.join(cur, 'build.gradle'),
-            path.join(cur, 'build.gradle.kts'),
-          ]);
-          if (rootBuild) {
-            const rb = await fs.readFile(rootBuild, 'utf8');
-            if (rb.includes(CONTEXA_ARTIFACT_ID)) result.hasContexta = true;
-            if (rb.includes('spring-security') ||
-                rb.includes('spring-boot-starter-security')) {
-              result.hasSpringSecurityCore = true;
-            }
-          }
-          break;
-        }
-      }
-      const next = path.resolve(cur, '..');
-      if (next === cur) break;
-      cur = next;
-    }
-  }
-
-  // Track application.yml and application.properties independently so callers
-  // can warn the operator when both exist - Spring loads one and silently
-  // shadows the other depending on classpath order.
-  const ymlPath = path.join(dir, 'src/main/resources/application.yml');
-  const propsPath = path.join(dir, 'src/main/resources/application.properties');
-  if (await fs.pathExists(ymlPath)) result.appYmlPath = ymlPath;
-  if (await fs.pathExists(propsPath)) result.appPropertiesPath = propsPath;
-
-  // Detect @EnableAISecurity in src/main/java to decide whether vector/
-  // ai-starter dependencies are required. Recursive shallow scan capped at
-  // ~200 files to keep init fast on big repos.
-  const javaRoot = path.join(dir, 'src/main/java');
-  if (await fs.pathExists(javaRoot)) {
-    result.hasEnableAiSecurity = await scanForAnnotation(javaRoot,
-      /@EnableAISecurity\b|io\.contexa\.[\w.]*EnableAISecurity\b/);
-  }
-
-  // Docker detection. Lazy: only probe when the caller asks for it. status,
-  // scan, and mode commands do not need this signal, and probing on every
-  // detector call adds a noticeable startup cost (and can spawn a child
-  // process the user did not expect for a read-only command).
-  if (opts.probeDocker !== false) {
+async function finishDetection(result, rootDir, opts) {
+  if (!result.projectName && result.projectDir) result.projectName = path.basename(result.projectDir);
+  if (opts.probeDocker === true) {
     const { isDockerCliInstalled } = require('./docker');
     result.hasDocker = isDockerCliInstalled();
-  } else {
-    result.hasDocker = false;
   }
-
+  result.rootDir = rootDir;
   return result;
 }
 
-function escapeRegex(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-async function firstExisting(paths) {
-  for (const p of paths) {
-    if (await fs.pathExists(p)) return p;
+async function readBuildCandidate(dir) {
+  const pomPath = path.join(dir, 'pom.xml');
+  if (await fs.pathExists(pomPath)) {
+    const clean = (await fs.readFile(pomPath, 'utf8')).replace(/<!--[\s\S]*?-->/g, '');
+    const hasSpringBoot = mavenCoordinateExists(clean, 'org.springframework.boot', 'spring-boot-starter-parent')
+      || mavenCoordinateExists(clean, 'org.springframework.boot', 'spring-boot-maven-plugin')
+      || /<groupId>\s*org\.springframework\.boot\s*<\/groupId>[\s\S]{0,400}<artifactId>\s*spring-boot-starter(?:-[^<]+)?\s*<\/artifactId>/.test(clean);
+    return {
+      dir, buildTool: 'maven', buildFilePath: pomPath, hasSpringBoot,
+      hasSpringSecurityCore: mavenArtifactExists(clean, 'spring-boot-starter-security')
+        || /<artifactId>\s*spring-security-(?:core|web|config)\s*<\/artifactId>/.test(clean),
+      hasContexta: mavenCoordinateExists(clean, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+      projectName: mavenProjectArtifactId(clean),
+    };
   }
-  return null;
+
+  const gradlePath = await firstExisting([path.join(dir, 'build.gradle'), path.join(dir, 'build.gradle.kts')]);
+  if (!gradlePath) return null;
+  const clean = stripCodeComments(await fs.readFile(gradlePath, 'utf8'));
+  const hasSpringBoot = /\bid\s*(?:\(\s*)?['"]org\.springframework\.boot['"]/.test(clean)
+    || /\bapply\s+plugin\s*:\s*['"]org\.springframework\.boot['"]/.test(clean)
+    || /['"]org\.springframework\.boot:spring-boot-starter(?:-[^:'"]+)?(?::[^'"]+)?['"]/.test(clean);
+  return {
+    dir, buildTool: 'gradle', buildFilePath: gradlePath, hasSpringBoot,
+    hasSpringSecurityCore: /['"]org\.springframework\.boot:spring-boot-starter-security(?::[^'"]+)?['"]/.test(clean)
+      || /['"]org\.springframework\.security:spring-security-(?:core|web|config)(?::[^'"]+)?['"]/.test(clean),
+    hasContexta: new RegExp(`['"]${escapeRegex(CONTEXA_GROUP_ID)}:${escapeRegex(CONTEXA_ARTIFACT_ID)}(?::[^'"]+)?['"]`).test(clean),
+    projectName: await gradleProjectName(dir),
+  };
 }
 
-// Walk src/main/java looking for the first Java file matching `regex`.
-// Capped at MAX_FILES so init stays snappy on big monorepos. Returns true on
-// the first match, false if no match within the cap.
-async function scanForAnnotation(rootDir, regex) {
-  const MAX_FILES = 250;
-  const queue = [rootDir];
-  let scanned = 0;
-  while (queue.length > 0 && scanned < MAX_FILES) {
-    const cur = queue.shift();
-    let entries;
-    try { entries = await fs.readdir(cur, { withFileTypes: true }); }
-    catch { continue; }
-    for (const e of entries) {
-      const full = path.join(cur, e.name);
-      if (e.isDirectory()) {
-        queue.push(full);
-      } else if (e.isFile() && e.name.endsWith('.java')) {
-        scanned++;
-        try {
-          const text = await fs.readFile(full, 'utf8');
-          if (regex.test(text)) return true;
-        } catch {}
-        if (scanned >= MAX_FILES) break;
+async function discoverModuleCandidates(rootDir) {
+  const moduleDirs = new Set();
+  const pomPath = path.join(rootDir, 'pom.xml');
+  if (await fs.pathExists(pomPath)) {
+    const pom = (await fs.readFile(pomPath, 'utf8')).replace(/<!--[\s\S]*?-->/g, '');
+    for (const match of pom.matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) moduleDirs.add(path.resolve(rootDir, match[1].trim()));
+  }
+  const settingsPath = await firstExisting([path.join(rootDir, 'settings.gradle'), path.join(rootDir, 'settings.gradle.kts')]);
+  if (settingsPath) {
+    const settings = stripCodeComments(await fs.readFile(settingsPath, 'utf8'));
+    for (const line of settings.split(/\r?\n/).filter(value => /\binclude\b/.test(value))) {
+      for (const match of line.matchAll(/['"](:?[^'"]+)['"]/g)) {
+        moduleDirs.add(path.resolve(rootDir, match[1].replace(/^:/, '').replace(/:/g, path.sep)));
       }
     }
   }
-  return false;
+  const candidates = [];
+  for (const moduleDir of moduleDirs) {
+    const candidate = await readBuildCandidate(moduleDir);
+    if (candidate) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+async function inventoryConfiguration(result, projectDir) {
+  const resourcesDir = path.join(projectDir, 'src/main/resources');
+  if (!await fs.pathExists(resourcesDir)) return;
+  let entries;
+  try { entries = await fs.readdir(resourcesDir, { withFileTypes: true }); } catch { return; }
+  result.applicationConfigPaths = entries
+    .filter(entry => entry.isFile() && /^(?:application|bootstrap)(?:-[^.]+)?\.(?:yml|yaml|properties)$/.test(entry.name))
+    .map(entry => path.join(resourcesDir, entry.name)).sort();
+  result.appYmlPath = result.applicationConfigPaths.find(file => /application\.yml$/.test(file))
+    || result.applicationConfigPaths.find(file => /application\.yaml$/.test(file)) || null;
+  result.appPropertiesPath = result.applicationConfigPaths.find(file => /application\.properties$/.test(file)) || null;
+}
+
+async function inventoryApplicationSources(result, projectDir) {
+  const roots = [
+    { dir: path.join(projectDir, 'src/main/java'), extension: '.java' },
+    { dir: path.join(projectDir, 'src/main/kotlin'), extension: '.kt' },
+  ];
+  for (const root of roots) {
+    if (!await fs.pathExists(root.dir)) continue;
+    for (const file of await listSourceFiles(root.dir, root.extension)) {
+      let source;
+      try { source = await fs.readFile(file, 'utf8'); } catch { continue; }
+      const code = stripCommentsAndStrings(source);
+      if (/@SpringBootApplication\b/.test(code)
+          || /@org\.springframework\.boot\.autoconfigure\.SpringBootApplication\b/.test(code)) {
+        result.mainApplicationCandidates.push(file);
+      }
+      if (/@EnableAISecurity\b/.test(code)
+          || /@io\.contexa\.[\w.]*EnableAISecurity\b/.test(code)) {
+        result.hasEnableAiSecurity = true;
+      }
+      const javaSecurityChain = /@Bean(?:\s*\([^)]*\))?[\s\S]{0,500}?\bSecurityFilterChain\s+\w+\s*\(/.test(code);
+      const kotlinSecurityChain = /@Bean(?:\s*\([^)]*\))?[\s\S]{0,500}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*SecurityFilterChain\b/.test(code);
+      if (javaSecurityChain || kotlinSecurityChain) {
+        result.hasHostSecurityFilterChain = true;
+      }
+    }
+  }
+}
+
+async function listSourceFiles(rootDir, extension) {
+  const files = [];
+  const queue = [rootDir];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    let entries;
+    try { entries = await fs.readdir(current, { withFileTypes: true }); } catch { continue; }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) queue.push(full);
+      else if (entry.isFile() && entry.name.endsWith(extension)) files.push(full);
+    }
+  }
+  return files;
+}
+
+function stripCodeComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\r\n]*/g, '');
+}
+
+function stripCommentsAndStrings(source) {
+  let output = '', state = 'code', quote = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i], next = source[i + 1];
+    if (state === 'line') { if (ch === '\n') { state = 'code'; output += '\n'; } else output += ' '; continue; }
+    if (state === 'block') {
+      if (ch === '*' && next === '/') { output += '  '; i++; state = 'code'; }
+      else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (state === 'string') {
+      if (ch === '\\') { output += '  '; i++; continue; }
+      if (ch === quote) { state = 'code'; output += ' '; } else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (ch === '/' && next === '/') { output += '  '; i++; state = 'line'; continue; }
+    if (ch === '/' && next === '*') { output += '  '; i++; state = 'block'; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; state = 'string'; output += ' '; continue; }
+    output += ch;
+  }
+  return output;
+}
+
+function mavenCoordinateExists(pom, groupId, artifactId) {
+  const blocks = pom.match(/<(?:dependency|plugin|parent)>[\s\S]*?<\/(?:dependency|plugin|parent)>/g) || [];
+  return blocks.some(block => new RegExp(`<groupId>\\s*${escapeRegex(groupId)}\\s*<\\/groupId>`).test(block)
+    && new RegExp(`<artifactId>\\s*${escapeRegex(artifactId)}\\s*<\\/artifactId>`).test(block));
+}
+function mavenArtifactExists(pom, artifactId) {
+  return new RegExp(`<artifactId>\\s*${escapeRegex(artifactId)}\\s*<\\/artifactId>`).test(pom);
+}
+function mavenProjectArtifactId(pom) {
+  const match = pom.replace(/<parent>[\s\S]*?<\/parent>/, '').match(/<artifactId>\s*([^<]+?)\s*<\/artifactId>/);
+  return match ? match[1].trim() : null;
+}
+async function gradleProjectName(dir) {
+  const settingsPath = await firstExisting([path.join(dir, 'settings.gradle'), path.join(dir, 'settings.gradle.kts')]);
+  if (!settingsPath) return path.basename(dir);
+  const match = stripCodeComments(await fs.readFile(settingsPath, 'utf8')).match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/);
+  return match ? match[1] : path.basename(dir);
+}
+async function firstExisting(paths) {
+  for (const file of paths) if (await fs.pathExists(file)) return file;
+  return null;
+}
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^\x24{}()|[\]\\]/g, '\\$&');
 }
 
 module.exports = { detectSpringProject };

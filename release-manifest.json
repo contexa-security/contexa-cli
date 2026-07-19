@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "channel": "snapshot",
-  "releaseTag": "v0.1.2-phase1.1",
-  "cliVersion": "0.1.2-phase1.1",
+  "releaseTag": "v0.1.2-phase2.1",
+  "cliVersion": "0.1.2-phase2.1",
   "starter": {
     "groupId": "ai.ctxa",
     "artifactId": "spring-boot-starter-contexa",
@@ -24,6 +24,15 @@
     "algorithm": "RSA-3072-SHA256",
     "file": "release-manifest.json.sig",
     "publicKeyFile": "release-signing-public.pem"
+  },
+  "resources": {
+    "geoIp": {
+      "version": "contexa-0e9c9577bfdad11136c392d30d94b93b4ac3d968",
+      "url": "https://raw.githubusercontent.com/contexa-security/contexa/0e9c9577bfdad11136c392d30d94b93b4ac3d968/data/GeoLite2-City.mmdb",
+      "sha256": "78758017b97a2c648ef09cbd98d4d1177ddc6bfa492847fdbbe484a89c355230",
+      "size": 63510258,
+      "format": "maxmind-mmdb"
+    }
   },
   "primaryCommands": [
     "contexa init",

@@ -35,7 +35,12 @@ const SIM_PROJECT = 'ctxa-sim';
 // `args` is an array of compose arguments (e.g. ['-p', 'ctxa-sim', 'up', '-d']).
 // No shell expansion: each entry is passed verbatim as a separate argv slot.
 function dockerCompose(args, cwd) {
-  return dockerComposeExec(args, { cwd, stdio: 'inherit' });
+  const result = dockerComposeExec(args, { cwd, stdio: 'inherit' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`docker compose ${args.join(' ')} exited with status ${result.status}`);
+  }
+  return result;
 }
 
 function findCompose(infraDir) {
@@ -88,7 +93,7 @@ module.exports = function (program) {
       if (!compose) {
         console.log(chalk.red('\n  x Simulation stack not initialized.'));
         notReadyHint(infraDir);
-        process.exit(1);
+        throw new Error('Simulation stack is not initialized.');
       }
       console.log(chalk.cyan(`\n  Starting simulation stack "${projectName}"`));
       console.log(chalk.gray(`    Infra dir : ${infraDir}\n`));
@@ -118,7 +123,7 @@ module.exports = function (program) {
       if (!compose) {
         console.log(chalk.red('\n  x Simulation stack not initialized.'));
         notReadyHint(infraDir);
-        process.exit(1);
+        throw new Error('Simulation stack is not initialized.');
       }
       console.log(chalk.yellow(`\n  Resetting simulation stack "${projectName}" (down -v + up -d)...\n`));
       dockerCompose(['-p', projectName, 'down', '-v'], infraDir);
@@ -140,6 +145,7 @@ module.exports = function (program) {
         { stdio: 'inherit' });
       if (r.error || r.status !== 0) {
         console.log(chalk.red('  x Docker not reachable.'));
+        throw r.error || new Error(`docker ps exited with status ${r.status}`);
       }
     });
 
@@ -152,7 +158,7 @@ module.exports = function (program) {
       if (!compose) {
         console.log(chalk.red('\n  x Simulation stack not initialized.'));
         notReadyHint(infraDir);
-        process.exit(1);
+        throw new Error('Simulation stack is not initialized.');
       }
       const args = ['-p', projectName, 'logs', '-f'];
       if (service) args.push(service);

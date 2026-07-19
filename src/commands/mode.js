@@ -18,7 +18,7 @@ module.exports = function (program) {
       if (!opts.shadow && !opts.enforce) {
         console.log(chalk.gray('\n  contexa mode --shadow'));
         console.log(chalk.gray('  contexa mode --enforce\n'));
-        return;
+        throw new Error('Choose exactly one mode: --shadow or --enforce.');
       }
 
       const target = opts.enforce ? 'enforce' : 'shadow';
@@ -28,7 +28,7 @@ module.exports = function (program) {
 
       if (!project.appYmlPath || !await fs.pathExists(project.appYmlPath)) {
         console.log(chalk.red('\n  x ' + t('mode.notInstalled') + '\n'));
-        return;
+        throw new Error('Contexa mode configuration was not found.');
       }
 
       const s = ora('...').start();
@@ -40,7 +40,7 @@ module.exports = function (program) {
       } catch (err) {
         s.stop();
         console.log(chalk.red('\n  x cannot parse application.yml: ' + err.message + '\n'));
-        return;
+        throw new Error(`Cannot parse application.yml: ${err.message}`);
       }
       if (!root || typeof root !== 'object' || Array.isArray(root)) root = {};
 
@@ -48,7 +48,7 @@ module.exports = function (program) {
       if (!root.contexa || !root.contexa.security || !root.contexa.security.zerotrust) {
         s.stop();
         console.log(chalk.red('\n  x ' + t('mode.noBlock') + '\n'));
-        return;
+        throw new Error('The Contexa zero-trust mode block was not found.');
       }
       const previousUpper = (previous || '').toString().toUpperCase();
       if (previousUpper === targetUpper) {

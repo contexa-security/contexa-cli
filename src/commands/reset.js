@@ -115,6 +115,11 @@ function fileChangedSinceInit(entry, originalFile) {
   return sha256FileSync(originalFile) !== entry.currentChecksum;
 }
 
+function fileAlreadyRestored(entry, originalFile) {
+  if (!entry || !entry.originalChecksum || !fs.existsSync(originalFile)) return false;
+  return sha256FileSync(originalFile) === entry.originalChecksum;
+}
+
 async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
   const backupsDir = backupRoot(projectDir, mode);
   const manifest = await loadManifest(projectDir, mode);
@@ -133,6 +138,10 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
       const backupPath = path.join(backupsDir, entry.relativePath);
       if (entry.relativePath === 'contexa' && fs.existsSync(originalFile)) {
         removeIfEmpty(originalFile);
+        continue;
+      }
+      if (fileAlreadyRestored(entry, originalFile)) {
+        console.log(chalk.gray(`    - Already restored: ${originalFile}`));
         continue;
       }
       if (fileChangedSinceInit(entry, originalFile)) {
@@ -249,7 +258,7 @@ module.exports = function (program) {
       if (!proceed) {
         console.log(chalk.yellow('\n  ! Reset cancelled.'));
         console.log('');
-        process.exit(0);
+        return;
       }
 
       console.log(chalk.cyan('\n  ============================================='));
@@ -288,7 +297,7 @@ module.exports = function (program) {
           if (!answer.targets || answer.targets.length === 0) {
             console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget') || 'No targets selected. Aborting reset.'}`));
             console.log('');
-            process.exit(0);
+            return;
           }
 
           targets = {
@@ -378,7 +387,7 @@ module.exports = function (program) {
           }
         } catch (error) {
           spinner.fail(`Project file restore failed: ${error.message}`);
-          process.exit(1);
+          throw error;
         }
       }
 

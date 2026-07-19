@@ -19,12 +19,17 @@
 //      so callers that need to branch on status can do so cleanly.
 
 const { spawnSync } = require('child_process');
+const DEFAULT_DOCKER_TIMEOUT_MS = 120000;
+
+function boundedOptions(opts, defaultTimeoutMs = DEFAULT_DOCKER_TIMEOUT_MS) {
+  return opts.timeout === undefined ? { ...opts, timeout: defaultTimeoutMs } : opts;
+}
 
 // Run `docker <args>` and throw if the process exits non-zero or fails to
 // spawn. Mirrors execSync's contract so existing call sites can switch over
 // without restructuring control flow.
 function dockerSync(args, opts = {}) {
-  const r = spawnSync('docker', args, { ...opts, shell: false });
+  const r = spawnSync('docker', args, { ...boundedOptions(opts), shell: false });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     const err = new Error(`docker ${args.join(' ')} exited with status ${r.status}`);
@@ -40,14 +45,14 @@ function dockerSync(args, opts = {}) {
 // Use this when non-zero exit is a meaningful signal (e.g. health probes,
 // presence checks) rather than an error.
 function dockerTry(args, opts = {}) {
-  return spawnSync('docker', args, { ...opts, shell: false });
+  return spawnSync('docker', args, { ...boundedOptions(opts), shell: false });
 }
 
 // Run `docker compose <args>` in the given working directory. Same array-arg
 // safety guarantee as dockerSync. cwd is required because compose is always
 // scoped to a specific directory in this CLI.
 function dockerCompose(args, opts = {}) {
-  return spawnSync('docker', ['compose', ...args], { ...opts, shell: false });
+  return spawnSync('docker', ['compose', ...args], { ...boundedOptions(opts), shell: false });
 }
 
 // True if the docker CLI is on PATH. Used by detector.js / preflight.js to
@@ -68,6 +73,7 @@ module.exports = {
   dockerSync,
   dockerTry,
   dockerCompose,
+  DEFAULT_DOCKER_TIMEOUT_MS,
   isDockerCliInstalled,
   isDockerDaemonRunning,
 };

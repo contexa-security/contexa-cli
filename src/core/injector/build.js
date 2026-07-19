@@ -24,28 +24,7 @@ const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION, backupFile } = r
 async function injectMavenDep(pomPath, options = {}) {
   if (!await fs.pathExists(pomPath)) return false;
   const pom = await fs.readFile(pomPath, 'utf8');
-  if (pom.includes(CONTEXA_ARTIFACT_ID)) return false;
-
-  // Locate the project-level </dependencies>, skipping over any
-  // <dependencyManagement>...</dependencyManagement> block whose inner
-  // </dependencies> tag must NOT be the injection point.
-  const mgmtRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
-  const mgmtRanges = [];
-  let m;
-  while ((m = mgmtRegex.exec(pom)) !== null) {
-    mgmtRanges.push([m.index, m.index + m[0].length]);
-  }
-  const isInsideMgmt = (idx) => mgmtRanges.some(([a, b]) => idx >= a && idx < b);
-
-  let target = -1;
-  let cursor = 0;
-  while (true) {
-    const found = pom.indexOf('</dependencies>', cursor);
-    if (found === -1) break;
-    if (!isInsideMgmt(found)) { target = found; break; }
-    cursor = found + 1;
-  }
-  if (target === -1) return false;
+  if (hasMavenDependency(pom, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID)) return false;
 
   // Backup
   await backupFile(pomPath, options);
@@ -56,9 +35,55 @@ async function injectMavenDep(pomPath, options = {}) {
     `            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>\n` +
     `            <version>${CONTEXA_VERSION}</version>\n` +
     `        </dependency>\n    `;
-  const updated = pom.slice(0, target) + dep + pom.slice(target);
+  const target = findProjectDependenciesClose(pom);
+  let updated;
+  if (target !== -1) {
+    updated = pom.slice(0, target) + dep + pom.slice(target);
+  } else {
+    const projectClose = pom.lastIndexOf('</project>');
+    if (projectClose === -1) {
+      throw new Error('Maven injection impossible: pom.xml has no project closing tag.');
+    }
+    const dependencies = `    <dependencies>\n${dep}</dependencies>\n`;
+    updated = pom.slice(0, projectClose) + dependencies + pom.slice(projectClose);
+  }
   await fs.writeFile(pomPath, updated);
   return true;
+}
+
+function hasMavenDependency(pom, groupId, artifactId) {
+  const clean = pom.replace(/<!--[\s\S]*?-->/g, '');
+  const management = [];
+  const managementRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
+  let match;
+  while ((match = managementRegex.exec(clean)) !== null) management.push([match.index, match.index + match[0].length]);
+  const dependencyRegex = /<dependency>[\s\S]*?<\/dependency>/g;
+  while ((match = dependencyRegex.exec(clean)) !== null) {
+    if (management.some(([start, end]) => match.index >= start && match.index < end)) continue;
+    if (new RegExp(`<groupId>\\s*${escapeForRegex(groupId)}\\s*<\\/groupId>`).test(match[0])
+        && new RegExp(`<artifactId>\\s*${escapeForRegex(artifactId)}\\s*<\\/artifactId>`).test(match[0])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findProjectDependenciesClose(pom) {
+  const management = [];
+  const managementRegex = /<dependencyManagement>[\s\S]*?<\/dependencyManagement>/g;
+  let match;
+  while ((match = managementRegex.exec(pom)) !== null) management.push([match.index, match.index + match[0].length]);
+  let cursor = 0;
+  while (true) {
+    const found = pom.indexOf('</dependencies>', cursor);
+    if (found === -1) return -1;
+    if (!management.some(([start, end]) => found >= start && found < end)) return found;
+    cursor = found + 1;
+  }
+}
+
+function escapeForRegex(value) {
+  return String(value).replace(/[.*+?^\x24{}()|[\]\\]/g, '\\$&');
 }
 
 // Locate the top-level `dependencies {` block in a Gradle build script.
@@ -81,16 +106,14 @@ async function injectMavenDep(pomPath, options = {}) {
 // because Gradle DSL rarely embeds raw `{`/`}` inside string literals; a
 // future refinement can add a real Groovy/Kotlin tokenizer if needed.
 function findTopLevelDependenciesInsertIndex(content) {
-  const re = /dependencies\s*\{/g;
+  const masked = maskGradleNonCode(content);
+  const re = /\bdependencies\s*\{/g;
   let m;
-  while ((m = re.exec(content)) !== null) {
-    const before = content.slice(0, m.index);
-    const cleaned = before
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/\/\/[^\n]*/g, '');
+  while ((m = re.exec(masked)) !== null) {
+    const before = masked.slice(0, m.index);
     let depth = 0;
-    for (let i = 0; i < cleaned.length; i++) {
-      const ch = cleaned.charAt(i);
+    for (let i = 0; i < before.length; i++) {
+      const ch = before.charAt(i);
       if (ch === '{') depth++;
       else if (ch === '}') depth--;
     }
@@ -100,6 +123,52 @@ function findTopLevelDependenciesInsertIndex(content) {
     }
   }
   return -1;
+}
+
+function findTopLevelDependenciesRange(content) {
+  const insertIndex = findTopLevelDependenciesInsertIndex(content);
+  if (insertIndex === -1) return null;
+  const masked = maskGradleNonCode(content);
+  const openingBrace = masked.lastIndexOf('{', insertIndex);
+  let depth = 1;
+  for (let i = openingBrace + 1; i < masked.length; i++) {
+    if (masked[i] === '{') depth++;
+    else if (masked[i] === '}') {
+      depth--;
+      if (depth === 0) return { insertIndex, closeIndex: i };
+    }
+  }
+  throw new Error('Gradle injection impossible: top-level dependencies block is not closed.');
+}
+
+function maskGradleNonCode(content) {
+  let output = '', state = 'code', quote = '';
+  for (let i = 0; i < content.length; i++) {
+    const ch = content[i], next = content[i + 1];
+    if (state === 'line') { if (ch === '\n') { state = 'code'; output += '\n'; } else output += ' '; continue; }
+    if (state === 'block') {
+      if (ch === '*' && next === '/') { output += '  '; i++; state = 'code'; }
+      else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (state === 'string') {
+      if (ch === '\\') { output += '  '; i++; continue; }
+      if (ch === quote) { output += ' '; state = 'code'; } else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (ch === '/' && next === '/') { output += '  '; i++; state = 'line'; continue; }
+    if (ch === '/' && next === '*') { output += '  '; i++; state = 'block'; continue; }
+    if (ch === '"' || ch === "'") { output += ' '; quote = ch; state = 'string'; continue; }
+    output += ch;
+  }
+  return output;
+}
+
+function hasGradleDependency(content, groupId, artifactId) {
+  const range = findTopLevelDependenciesRange(content);
+  if (!range) return false;
+  const block = content.slice(range.insertIndex, range.closeIndex);
+  return new RegExp(`['"]${escapeForRegex(groupId)}:${escapeForRegex(artifactId)}(?::[^'"]+)?['"]`).test(block);
 }
 
 // Insert one or more dependency lines at the start of the top-level
@@ -121,7 +190,7 @@ function insertIntoTopLevelDependencies(content, lines) {
 async function injectGradleDep(gradlePath, options = {}) {
   if (!await fs.pathExists(gradlePath)) return false;
   let gradle = await fs.readFile(gradlePath, 'utf8');
-  if (gradle.includes(CONTEXA_ARTIFACT_ID)) return false;
+  if (hasGradleDependency(gradle, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID)) return false;
 
   // Backup
   await backupFile(gradlePath, options);
@@ -285,18 +354,8 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
       }
     }
 
-    // 2. Add or remove selected model starters in the top-level dependencies block.
-    const cleanMavenDep = (provName) => {
-      const pat = new RegExp(`<dependency>\\s*<groupId>org\\.springframework\\.ai</groupId>\\s*<artifactId>spring-ai-starter-model-${provName}</artifactId>\\s*</dependency>\\s*`, 'g');
-      updated = updated.replace(pat, '');
-    };
-
-    const beforeClean = updated;
-    if (!llmProviders.includes('openai')) cleanMavenDep('openai');
-    if (!llmProviders.includes('anthropic')) cleanMavenDep('anthropic');
-    if (!llmProviders.includes('ollama')) cleanMavenDep('ollama');
-    if (updated !== beforeClean) changed = true;
-
+    // Add selected model starters. Dependencies that predate Contexa are
+    // customer-owned and are never removed when provider selection changes.
     const additions = [];
     if (llmProviders.includes('openai') && !updated.includes('spring-ai-starter-model-openai')) {
       additions.push(
@@ -358,17 +417,6 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     const isKts = buildPath.endsWith('.kts');
     let updated = content;
 
-    const cleanLines = (provName) => {
-      const pat = isKts
-        ? new RegExp(`^[ \\t]*implementation\\("org\\.springframework\\.ai:spring-ai-starter-model-${provName}"\\)[ \\t]*\\r?\\n?`, 'gm')
-        : new RegExp(`^[ \\t]*implementation 'org\\.springframework\\.ai:spring-ai-starter-model-${provName}'[ \\t]*\\r?\\n?`, 'gm');
-      updated = updated.replace(pat, '');
-    };
-
-    if (!llmProviders.includes('openai')) cleanLines('openai');
-    if (!llmProviders.includes('anthropic')) cleanLines('anthropic');
-    if (!llmProviders.includes('ollama')) cleanLines('ollama');
-
     const lines = [];
 
     if (!updated.includes('spring-ai-bom')) {
@@ -406,61 +454,94 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
 }
 
 async function injectEnableAiSecurity(projectDir, options = {}) {
-  const javaRoot = path.join(projectDir, 'src/main/java');
-  if (!await fs.pathExists(javaRoot)) return { changed: false, filePath: null };
-
-  const queue = [javaRoot];
-  while (queue.length > 0) {
-    const cur = queue.shift();
-    let entries;
-    try { entries = await fs.readdir(cur, { withFileTypes: true }); }
-    catch { continue; }
-    for (const e of entries) {
-      const full = path.join(cur, e.name);
-      if (e.isDirectory()) {
-        queue.push(full);
-      } else if (e.isFile() && e.name.endsWith('.java')) {
-        try {
-          let text = await fs.readFile(full, 'utf8');
-          if (text.includes('@SpringBootApplication')) {
-            if (text.includes('@EnableAISecurity') || text.includes('EnableAISecurity')) {
-              return { changed: false, filePath: full };
-            }
-
-            await backupFile(full, options);
-
-            const importLine = "import io.contexa.contexacommon.annotation.EnableAISecurity;\n";
-            const lastImportIndex = text.lastIndexOf('import ');
-            if (lastImportIndex !== -1) {
-              const endOfImportLine = text.indexOf(';', lastImportIndex);
-              if (endOfImportLine !== -1) {
-                text = text.slice(0, endOfImportLine + 1) + '\n' + importLine + text.slice(endOfImportLine + 1);
-              }
-            } else {
-              const packageIndex = text.indexOf('package ');
-              if (packageIndex !== -1) {
-                const endOfPackage = text.indexOf(';', packageIndex);
-                if (endOfPackage !== -1) {
-                  text = text.slice(0, endOfPackage + 1) + '\n\n' + importLine + text.slice(endOfPackage + 1);
-                }
-              } else {
-                text = importLine + '\n' + text;
-              }
-            }
-
-            const annotIndex = text.indexOf('@SpringBootApplication');
-            if (annotIndex !== -1) {
-              text = text.slice(0, annotIndex) + "@EnableAISecurity\n" + text.slice(annotIndex);
-            }
-
-            await fs.writeFile(full, text);
-            return { changed: true, filePath: full };
-          }
-        } catch {}
-      }
-    }
+  const securityMode = String(options.securityMode || 'sandbox').toLowerCase();
+  if (!['sandbox', 'full'].includes(securityMode)) {
+    throw new Error(`Unsupported AI security mode: ${securityMode}`);
   }
-  return { changed: false, filePath: null };
+  let candidates = options.mainApplicationCandidates;
+  if (!Array.isArray(candidates)) {
+    const { detectSpringProject } = require('../detector');
+    candidates = (await detectSpringProject(projectDir, { probeDocker: false })).mainApplicationCandidates;
+  }
+  if (candidates.length !== 1) {
+    const reason = candidates.length === 0 ? 'no main application class was found' : `${candidates.length} main application classes were found`;
+    throw new Error(`Automatic @EnableAISecurity injection stopped safely: ${reason}.`);
+  }
+
+  const filePath = candidates[0];
+  const extension = path.extname(filePath);
+  if (!['.java', '.kt'].includes(extension)) {
+    throw new Error(`Automatic @EnableAISecurity injection does not support ${extension || 'this source type'}.`);
+  }
+  let source = await fs.readFile(filePath, 'utf8');
+  let code = maskSourceNonCode(source);
+  if (/@EnableAISecurity\b/.test(code)
+      || /@io\.contexa\.[\w.]*EnableAISecurity\b/.test(code)) {
+    return { changed: false, filePath };
+  }
+  const springAnnotation = code.match(/@(?:org\.springframework\.boot\.autoconfigure\.)?SpringBootApplication\b/);
+  if (!springAnnotation) {
+    throw new Error('Automatic @EnableAISecurity injection stopped safely: the selected source has no real @SpringBootApplication annotation.');
+  }
+
+  await backupFile(filePath, options);
+  const newline = source.includes('\r\n') ? '\r\n' : '\n';
+  const imports = [
+    'io.contexa.contexacommon.annotation.EnableAISecurity',
+    'io.contexa.contexacommon.security.bridge.SecurityMode',
+  ];
+  for (const importedType of imports) {
+    const importPattern = new RegExp(`^\\s*import\\s+${escapeForRegex(importedType)}(?:;)?\\s*$`, 'm');
+    if (importPattern.test(source)) continue;
+    source = insertImport(source, importedType, extension, newline);
+  }
+
+  code = maskSourceNonCode(source);
+  const refreshedSpringAnnotation = code.match(/@(?:org\.springframework\.boot\.autoconfigure\.)?SpringBootApplication\b/);
+  const annotation = `@EnableAISecurity(mode = SecurityMode.${securityMode.toUpperCase()})${newline}`;
+  source = source.slice(0, refreshedSpringAnnotation.index) + annotation + source.slice(refreshedSpringAnnotation.index);
+  await fs.writeFile(filePath, source);
+  return { changed: true, filePath };
+}
+
+function insertImport(source, importedType, extension, newline) {
+  const suffix = extension === '.java' ? ';' : '';
+  const importLine = `import ${importedType}${suffix}`;
+  const importMatches = [...source.matchAll(/^\s*import\s+[^\r\n]+/gm)];
+  if (importMatches.length > 0) {
+    const last = importMatches[importMatches.length - 1];
+    const end = last.index + last[0].length;
+    return source.slice(0, end) + newline + importLine + source.slice(end);
+  }
+  const packageMatch = source.match(/^\s*package\s+[^;\r\n]+;?/m);
+  if (packageMatch) {
+    const end = packageMatch.index + packageMatch[0].length;
+    return source.slice(0, end) + newline + newline + importLine + source.slice(end);
+  }
+  return importLine + newline + newline + source;
+}
+
+function maskSourceNonCode(source) {
+  let output = '', state = 'code', quote = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i], next = source[i + 1];
+    if (state === 'line') { if (ch === '\n') { state = 'code'; output += '\n'; } else output += ' '; continue; }
+    if (state === 'block') {
+      if (ch === '*' && next === '/') { output += '  '; i++; state = 'code'; }
+      else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (state === 'string') {
+      if (ch === '\\') { output += '  '; i++; continue; }
+      if (ch === quote) { output += ' '; state = 'code'; } else output += ch === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (ch === '/' && next === '/') { output += '  '; i++; state = 'line'; continue; }
+    if (ch === '/' && next === '*') { output += '  '; i++; state = 'block'; continue; }
+    if (ch === '"' || ch === "'") { output += ' '; quote = ch; state = 'string'; continue; }
+    output += ch;
+  }
+  return output;
 }
 
 module.exports = {

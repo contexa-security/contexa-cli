@@ -32,6 +32,17 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: actions/setup-java@v4
+        if: runner.os == 'Linux'
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: runner.os == 'Linux'
+        with:
+          gradle-version: '8.14.3'
+
       - run: npm install
 
       - name: Validate release contract
@@ -41,6 +52,24 @@ jobs:
 
       - name: Run unit tests
         run: npm test
+
+      - name: Validate Phase 2 interactive and build models
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CONTEXA_TRANSCRIPT_DIR: phase2-evidence/interactive
+          CONTEXA_BUILD_MODEL_DIR: phase2-evidence/build-models
+        run: |
+          set -euo pipefail
+          mkdir -p "$CONTEXA_TRANSCRIPT_DIR" "$CONTEXA_BUILD_MODEL_DIR"
+          node test/interactive-defaults.cjs
+          node test/build-models.cjs
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: phase2-acceptance-evidence
+          path: phase2-evidence/
 
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs

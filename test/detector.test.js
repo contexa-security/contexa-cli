@@ -146,3 +146,111 @@ test('detector: only application.yml present leaves properties path null', async
     await fs.remove(dir);
   }
 });
+
+test('detector: non-Spring Maven and Gradle build files are not accepted', async () => {
+  const maven = await makeTempProject({
+    'pom.xml': '<project><artifactId>plain</artifactId><dependencies><dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency></dependencies></project>',
+  });
+  const gradle = await makeTempProject({
+    'build.gradle': "plugins { id 'java' }\ndependencies { implementation 'org.slf4j:slf4j-api:2.0.0' }\n",
+  });
+  try {
+    assert.equal((await detectSpringProject(maven, { probeDocker: false })).isSpring, false);
+    assert.equal((await detectSpringProject(gradle, { probeDocker: false })).isSpring, false);
+  } finally {
+    await fs.remove(maven);
+    await fs.remove(gradle);
+  }
+});
+
+test('detector: inventories application, profile and bootstrap config variants', async () => {
+  const dir = await makeTempProject({
+    'build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+    'src/main/resources/application.yml': '',
+    'src/main/resources/application-local.yaml': '',
+    'src/main/resources/application-prod.properties': '',
+    'src/main/resources/bootstrap.yml': '',
+    'src/main/resources/bootstrap-test.properties': '',
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, true);
+    assert.deepEqual(result.applicationConfigPaths.map(file => path.basename(file)), [
+      'application-local.yaml',
+      'application-prod.properties',
+      'application.yml',
+      'bootstrap-test.properties',
+      'bootstrap.yml',
+    ]);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: ignores annotations in comments and strings and scans Java after 250 files plus Kotlin', async () => {
+  const dir = await makeTempProject({
+    'build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' }\n",
+    'src/main/java/example/Fake.java': 'package example; // @EnableAISecurity\nclass Fake { String value = "@SpringBootApplication"; }\n',
+    'src/main/java/z/ActualApplication.java': 'package z;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class ActualApplication {}\n',
+    'src/main/kotlin/example/KotlinApplication.kt': 'package example\nimport org.springframework.boot.autoconfigure.SpringBootApplication\n@SpringBootApplication\nclass KotlinApplication\n',
+  });
+  const generated = path.join(dir, 'src/main/java/generated');
+  await fs.ensureDir(generated);
+  for (let i = 0; i < 260; i++) {
+    await fs.writeFile(path.join(generated, `Generated${String(i).padStart(3, '0')}.java`), `package generated; class Generated${i} {}\n`);
+  }
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.hasEnableAiSecurity, false);
+    assert.deepEqual(result.mainApplicationCandidates.map(file => path.basename(file)).sort(), [
+      'ActualApplication.java',
+      'KotlinApplication.kt',
+    ]);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: selects one Spring module and safely rejects ambiguous module roots', async () => {
+  const single = await makeTempProject({
+    'settings.gradle': "rootProject.name='root'\ninclude 'plain', 'app'\n",
+    'build.gradle': "plugins { id 'base' }\n",
+    'plain/build.gradle': "plugins { id 'java' }\n",
+    'app/build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' }\n",
+  });
+  const ambiguous = await makeTempProject({
+    'settings.gradle.kts': "rootProject.name = \"root\"\ninclude(\"app-a\", \"app-b\")\n",
+    'build.gradle.kts': 'plugins { base }\n',
+    'app-a/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+    'app-b/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+  });
+  try {
+    const selected = await detectSpringProject(single, { probeDocker: false });
+    assert.equal(selected.isSpring, true);
+    assert.equal(selected.buildFilePath, path.join(single, 'app', 'build.gradle'));
+    const rejected = await detectSpringProject(ambiguous, { probeDocker: false });
+    assert.equal(rejected.isSpring, false);
+    assert.equal(rejected.ambiguousModules.length, 2);
+  } finally {
+    await fs.remove(single);
+    await fs.remove(ambiguous);
+  }
+});
+
+test('detector: identifies host-owned Java and Kotlin SecurityFilterChain beans', async () => {
+  const javaProject = await makeTempProject({
+    'build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' }\n",
+    'src/main/java/example/SecurityConfig.java': 'package example;\n@Configuration class SecurityConfig {\n@Bean SecurityFilterChain hostChain(HttpSecurity http) throws Exception { return http.build(); }\n}\n',
+  });
+  const kotlinProject = await makeTempProject({
+    'build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+    'src/main/kotlin/example/SecurityConfig.kt': 'package example\n@Configuration class SecurityConfig {\n@Bean fun hostChain(http: HttpSecurity): SecurityFilterChain = http.build()\n}\n',
+  });
+  try {
+    assert.equal((await detectSpringProject(javaProject)).hasHostSecurityFilterChain, true);
+    assert.equal((await detectSpringProject(kotlinProject)).hasHostSecurityFilterChain, true);
+  } finally {
+    await fs.remove(javaProject);
+    await fs.remove(kotlinProject);
+  }
+});
