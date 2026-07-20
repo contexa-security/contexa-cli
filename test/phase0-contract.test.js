@@ -171,7 +171,8 @@ test('init rejects an infra path outside owned roots with zero project and infra
       env: { ...process.env, PATH: path.dirname(process.execPath) },
     });
     assert.notEqual(result.status, 0, result.stderr + result.stdout);
-    assert.match(result.stderr + result.stdout, /outside Contexa-owned roots/);
+    assert.match(result.stderr + result.stdout, /UNSAFE_INFRA_PATH/);
+    assert.doesNotMatch(result.stderr + result.stdout, /outside Contexa-owned roots/);
     assert.deepEqual(await snapshotDirectory(fixture.project), projectBefore);
     assert.deepEqual(await snapshotDirectory(outsideInfra), infraBefore);
   } finally {
@@ -211,7 +212,6 @@ test('init prints the complete plan before the first filesystem mutation', async
         'contexa',
         'init',
         '--yes',
-        '--quick',
         '--dir',
         fixture.project,
       ]),
@@ -1150,11 +1150,13 @@ test('reset retry accepts a file already restored before a previous partial fail
   }
 });
 
-test('actual init failure rolls back host files and records ROLLED_BACK', async () => {
-  const { project, build, yml, originalBuild } = await createSpringFixture('ctxa-phase0-command-failure-');
-  const infra = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-command-failure-infra-'));
+test('actual overlay init failure rolls back host files and records ROLLED_BACK', async () => {
+  const { project, build, yml, originalBuild, originalYml } =
+    await createSpringFixture('ctxa-phase0-command-failure-');
+  const infra = path.join(project, '.contexa-test-infra');
+  const overlay = path.join(project, 'src/main/resources/application-contexa.yml');
   const invalidYml = Buffer.from('spring: [unterminated\r\n', 'utf8');
-  await fs.writeFile(yml, invalidYml);
+  await fs.writeFile(overlay, invalidYml);
   try {
     const args = [
       cliPath, 'init', '--yes', '--distributed', '--no-docker',
@@ -1164,13 +1166,14 @@ test('actual init failure rolls back host files and records ROLLED_BACK', async 
     assert.notEqual(init.status, 0, init.stdout);
     assert.doesNotMatch(init.stdout, /Contexa initialization completed successfully/i);
     assert.deepEqual(await fs.readFile(build), Buffer.from(originalBuild, 'utf8'));
-    assert.deepEqual(await fs.readFile(yml), invalidYml);
+    assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
+    assert.deepEqual(await fs.readFile(overlay), invalidYml);
     assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), false);
     const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
     assert.equal(manifest.transaction.status, 'ROLLED_BACK');
     assert.equal(manifest.files.length, 0);
 
-    await fs.writeFile(yml, 'server:\n  port: 9080\n', 'utf8');
+    await fs.remove(overlay);
     const retry = spawnSync(process.execPath, args, { encoding: 'utf8' });
     assert.equal(retry.status, 0, retry.stderr + retry.stdout);
     assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), true);

@@ -186,7 +186,9 @@ module.exports = function (program) {
       try {
         resetManifest = await loadManifest(projectDir, installMode);
       } catch (error) {
-    resetAudit.conflict.push({ resource: resetManifestPath, detail: formatError(error) });
+        const formattedError = formatError(error);
+        console.error(chalk.red('  x ' + formattedError));
+        resetAudit.conflict.push({ resource: resetManifestPath, detail: formattedError });
         printAudit(resetAudit);
         printResetResult(RESET_RESULTS.CONFLICT, installMode, resetAudit, dockerCalls);
         process.exitCode = 1;

@@ -53,6 +53,7 @@
   "init.simulation.manage": "Manage only the simulation stack: contexa simulate up | down | reset",
   "init.error.simulationStarterRequired": "Simulation requires the normal Contexa starter dependency; project files were not changed. Run contexa init first, then retry contexa init --simulate.",
   "init.error.preflight": "Infrastructure preflight failed before project files were changed.",
+  "init.error.unsafeInfraPath": "The infrastructure directory must be a dedicated child of the project or Contexa home.",
   "init.error.geoIpContractMissing": "The release manifest has no GeoIP artifact contract.",
   "init.error.standaloneWrite": "Standalone artifacts could not be written.",
   "init.error.ymlUpdate": "application.yml could not be updated.",
