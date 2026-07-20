@@ -539,6 +539,36 @@ test('transaction journal persists every lifecycle state and retains an external
     });
     assert.deepEqual(await fs.readFile(compose), originalCompose);
     assert.deepEqual((await loadManifest(project)).metadata.externalResources, []);
+
+    const generatedPath = path.join(infra, 'generated.yml');
+    const generatedBytes = Buffer.from('generated\n');
+    await fs.writeFile(generatedPath, generatedBytes);
+    const generatedManifest = await loadManifest(project);
+    generatedManifest.metadata.externalResources = [{
+      rootPath: infra,
+      rootExisted: true,
+      filePath: generatedPath,
+      originalExisted: false,
+      appliedChecksum: crypto.createHash('sha256').update(generatedBytes).digest('hex'),
+    }];
+    await saveManifest(project, generatedManifest, INSTALL_MODES.NORMAL);
+    const generatedAudit = await restoreExternalResources(
+      project, generatedManifest, INSTALL_MODES.NORMAL);
+    assert.deepEqual(generatedAudit.removed.map(item => item.resource), [generatedPath]);
+
+    const missingPath = path.join(infra, 'already-removed.yml');
+    const missingManifest = await loadManifest(project);
+    missingManifest.metadata.externalResources = [{
+      rootPath: infra,
+      rootExisted: true,
+      filePath: missingPath,
+      originalExisted: false,
+      appliedChecksum: crypto.createHash('sha256').update('not-written').digest('hex'),
+    }];
+    await saveManifest(project, missingManifest, INSTALL_MODES.NORMAL);
+    const missingAudit = await restoreExternalResources(
+      project, missingManifest, INSTALL_MODES.NORMAL);
+    assert.equal(missingAudit.removed.length, 0);
   } finally {
     await fs.remove(project);
   }

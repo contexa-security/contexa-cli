@@ -98,7 +98,8 @@ async function canonicalBoundaryPath(inputPath) {
     suffix.unshift(path.basename(existing));
     existing = parent;
   }
-  const canonicalExisting = await fs.realpath(existing);
+  const realpath = fs.realpathSync.native || fs.realpathSync;
+  const canonicalExisting = realpath(existing);
   return path.resolve(canonicalExisting, ...suffix);
 }
 
