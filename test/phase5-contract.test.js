@@ -19,6 +19,11 @@ const {
 const { INSTALLATION_STATES, inspectInstallationState } = require('../src/core/installation-state');
 const { TIMEOUTS } = require('../src/core/timeouts');
 const { executeCompose } = require('../src/commands/simulate');
+const { formatError, setLocale } = require('../src/core/i18n');
+const {
+  DEPENDENCY_VERSION_DEFAULTS,
+  resolveDependencyVersions,
+} = require('../src/core/injector/common');
 const {
   INSTALL_MODES,
   beginInstallTransaction,
@@ -68,6 +73,18 @@ test('provider, model, port, and credential defaults have canonical validation',
   assert.equal(TIMEOUTS.javaCommandProbeMs, 5000);
   assert.equal(TIMEOUTS.dockerComposeMutationMs, 150000);
   assert.equal(TIMEOUTS.ollamaPullMs, 600000);
+  assert.deepEqual(DEPENDENCY_VERSION_DEFAULTS, {
+    springAiBom: '1.1.2',
+    redisson: '3.48.0',
+    springStateMachine: '4.0.0',
+  });
+  assert.equal(resolveDependencyVersions({}, {
+    CONTEXA_REDISSON_VERSION: '3.49.1',
+  }).redisson, '3.49.1');
+  assert.throws(
+    () => resolveDependencyVersions({}, { CONTEXA_REDISSON_VERSION: '../bad' }),
+    error => error.code === 'INVALID_DEPENDENCY_VERSION'
+  );
 });
 
 test('status classifier distinguishes uninstalled, normal, both, partial failure, and conflict', async () => {
@@ -269,6 +286,16 @@ test('English and Korean bundles are key-identical and command help exposes no r
       assert.equal(result.stdout.includes('\uFFFD'), false);
     }
   }
+  const initHelp = spawnSync(process.execPath,
+    [cliPath, 'init', '--help'], { encoding: 'utf8' });
+  assert.doesNotMatch(initHelp.stdout, /--quick\b/);
+  assert.match(initHelp.stdout, /--check\b/);
+  setLocale('ko');
+  const localizedUnknown = formatError(new Error('raw English internal detail'));
+  assert.match(localizedUnknown, /^UNEXPECTED_ERROR /);
+  assert.doesNotMatch(localizedUnknown, /raw English internal detail/);
+  assert.equal(localizedUnknown.includes('\uFFFD'), false);
+  setLocale('en');
 });
 
 test('dead cleanup and command-local Docker/Ollama duplicates are absent', async () => {
@@ -279,6 +306,8 @@ test('dead cleanup and command-local Docker/Ollama duplicates are absent', async
   assert.doesNotMatch(ollamaCommand, /function pullOllamaModelWithProgress\s*\(/);
   assert.doesNotMatch(ollamaCommand, /function detectOllamaSource\s*\(/);
   const initCommand = await fs.readFile(path.resolve(__dirname, '../src/commands/init.js'), 'utf8');
+  const initApplication = await fs.readFile(
+    path.resolve(__dirname, '../src/core/init-application.js'), 'utf8');
   const artifact = await fs.readFile(path.resolve(__dirname, '../src/core/artifact.js'), 'utf8');
   assert.equal((artifact.match(/function downloadToFile\s*\(/g) || []).length, 1);
   for (const commandSource of [reset, ollamaCommand, initCommand]) {
@@ -286,8 +315,21 @@ test('dead cleanup and command-local Docker/Ollama duplicates are absent', async
   }
   assert.doesNotMatch(initCommand, /function (?:normalizePath|trackedFileState|printPlannedChanges)\s*\(/);
   assert.doesNotMatch(initCommand, /inquirer\.prompt|require\(['"]inquirer['"]\)/);
+  assert.match(initCommand, /\.action\(executeInit\)/);
+  assert.doesNotMatch(initCommand,
+    /beginInstallTransaction|commitInstallTransaction|rollbackInstallTransaction|dockerCompose/);
+  assert.match(initApplication, /beginInstallTransaction/);
+  assert.match(initApplication, /commitInstallTransaction/);
+  assert.match(initApplication, /rollbackInstallTransaction/);
   assert.equal(await fs.pathExists(path.resolve(__dirname, '../src/core/init-plan.js')), true);
   assert.equal(await fs.pathExists(path.resolve(__dirname, '../src/core/init-input.js')), true);
   assert.equal(await fs.pathExists(path.resolve(__dirname, '../src/core/init-diagnostics.js')), true);
   assert.equal(await fs.pathExists(path.resolve(__dirname, '../src/core/init-report.js')), true);
+  const buildInjector = await fs.readFile(
+    path.resolve(__dirname, '../src/core/injector/build.js'), 'utf8');
+  const standaloneInjector = await fs.readFile(
+    path.resolve(__dirname, '../src/core/injector/standalone.js'), 'utf8');
+  for (const source of [buildInjector, standaloneInjector]) {
+    assert.doesNotMatch(source, /['"](?:1\.1\.2|3\.48\.0|4\.0\.0)['"]/);
+  }
 });

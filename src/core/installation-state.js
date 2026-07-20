@@ -1,7 +1,12 @@
 'use strict';
 
 const fs = require('fs-extra');
-const { INSTALL_MODES, loadManifest, manifestPath } = require('./manifest');
+const {
+  INSTALL_MODES,
+  MANIFEST_VERSION,
+  loadManifest,
+  manifestPath,
+} = require('./manifest');
 
 const INSTALLATION_STATES = Object.freeze({
   UNINSTALLED: 'UNINSTALLED',
@@ -18,6 +23,7 @@ async function inspectMode(projectDir, mode) {
   try {
     const manifest = await loadManifest(projectDir, mode);
     const transactionStatus = manifest.transaction ? manifest.transaction.status : 'UNKNOWN';
+    const digestStatus = manifest.version === MANIFEST_VERSION ? 'VERIFIED' : 'LEGACY_PROVEN';
     if (!manifest.metadata || !manifest.metadata.installationId) {
       return { mode, status: INSTALLATION_STATES.CONFLICT, path, reason: 'installationId is missing' };
     }
@@ -28,6 +34,7 @@ async function inspectMode(projectDir, mode) {
         path,
         installationId: manifest.metadata.installationId,
         transactionStatus,
+        digestStatus,
       };
     }
     return {
@@ -36,9 +43,16 @@ async function inspectMode(projectDir, mode) {
       path,
       installationId: manifest.metadata.installationId,
       transactionStatus,
+      digestStatus,
     };
   } catch (error) {
-    return { mode, status: INSTALLATION_STATES.CONFLICT, path, reason: error.message };
+    return {
+      mode,
+      status: INSTALLATION_STATES.CONFLICT,
+      path,
+      conflictType: error.code || 'MANIFEST_OWNERSHIP_CONFLICT',
+      reason: error.message,
+    };
   }
 }
 

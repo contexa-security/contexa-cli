@@ -24,6 +24,7 @@
 
 const path = require('path');
 const os = require('os');
+const fs = require('fs-extra');
 
 function resolveProjectName(fallbackName = 'contexa') {
   const envName = process.env.CONTEXA_PROJECT && process.env.CONTEXA_PROJECT.trim();
@@ -48,17 +49,20 @@ function containerName(svc, projectName) {
 //                   else $HOME/.contexa/<projectName>
 //   Windows       : %LOCALAPPDATA%\Contexa\<projectName>
 //                   else %USERPROFILE%\AppData\Local\Contexa\<projectName>
-function osDefaultInfraDir(projectName) {
-  const safeName = sanitizeProjectName(projectName);
+function osContexaHome() {
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA
       || (process.env.USERPROFILE && path.join(process.env.USERPROFILE, 'AppData', 'Local'))
       || os.homedir();
-    return path.join(localAppData, 'Contexa', safeName);
+    return path.join(localAppData, 'Contexa');
   }
   const xdg = process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim();
-  if (xdg) return path.join(xdg, 'contexa', safeName);
-  return path.join(os.homedir(), '.contexa', safeName);
+  if (xdg) return path.join(xdg, 'contexa');
+  return path.join(os.homedir(), '.contexa');
+}
+
+function osDefaultInfraDir(projectName) {
+  return path.join(osContexaHome(), sanitizeProjectName(projectName));
 }
 
 // Resolve the effective infrastructure directory: explicit --infra-dir wins,
@@ -67,6 +71,69 @@ function resolveInfraDir(projectName, opts = {}) {
   const explicit = opts.infraDir && String(opts.infraDir).trim();
   const dir = explicit || osDefaultInfraDir(projectName);
   return path.resolve(dir);
+}
+
+function pathWithinRoot(rootPath, candidatePath) {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative === '' || (relative !== '..'
+    && !relative.startsWith('..' + path.sep)
+    && !path.isAbsolute(relative));
+}
+
+function pathsEqual(left, right) {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+async function canonicalBoundaryPath(inputPath) {
+  const resolved = path.resolve(inputPath);
+  let existing = resolved;
+  const suffix = [];
+  while (!await fs.pathExists(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    suffix.unshift(path.basename(existing));
+    existing = parent;
+  }
+  const canonicalExisting = await fs.realpath(existing);
+  return path.resolve(canonicalExisting, ...suffix);
+}
+
+async function assertSafeInfraDir(projectDir, infraDir, requestedPath = null) {
+  if (!infraDir) return null;
+  const raw = requestedPath === null || requestedPath === undefined ? '' : String(requestedPath).trim();
+  if (raw && raw.replace(/\\/g, '/').split('/').includes('..')) {
+    throw new Error(`Infrastructure path must not contain parent traversal: ${raw}`);
+  }
+  const resolvedCandidate = path.resolve(infraDir);
+  const allowedVolumeRoots = new Set([projectDir, osContexaHome()]
+    .map(value => path.parse(path.resolve(value)).root.toLowerCase()));
+  if (!allowedVolumeRoots.has(path.parse(resolvedCandidate).root.toLowerCase())) {
+    throw new Error(`Infrastructure path changes drive or UNC root: ${resolvedCandidate}`);
+  }
+  const [canonicalProjectRoot, canonicalContexaHome, canonicalCandidate] = await Promise.all([
+    canonicalBoundaryPath(projectDir),
+    canonicalBoundaryPath(osContexaHome()),
+    canonicalBoundaryPath(resolvedCandidate),
+  ]);
+  const volumeRoot = path.parse(canonicalCandidate).root;
+  if (pathsEqual(canonicalCandidate, volumeRoot)
+      || pathsEqual(canonicalCandidate, canonicalProjectRoot)
+      || pathsEqual(canonicalCandidate, canonicalContexaHome)) {
+    throw new Error(`Infrastructure path must be a dedicated child directory: ${canonicalCandidate}`);
+  }
+  if (!pathWithinRoot(canonicalProjectRoot, canonicalCandidate)
+      && !pathWithinRoot(canonicalContexaHome, canonicalCandidate)) {
+    throw new Error([
+      `Infrastructure path is outside Contexa-owned roots: ${path.resolve(infraDir)}`,
+      `Allowed project root: ${canonicalProjectRoot}`,
+      `Allowed Contexa home: ${canonicalContexaHome}`,
+    ].join('\n'));
+  }
+  return canonicalCandidate;
 }
 
 // Project names end up as compose project + container prefix + filesystem path.
@@ -85,7 +152,11 @@ function sanitizeProjectName(name) {
 module.exports = {
   resolveProjectName,
   containerName,
+  osContexaHome,
   osDefaultInfraDir,
   resolveInfraDir,
+  assertSafeInfraDir,
+  canonicalBoundaryPath,
+  pathsEqual,
   sanitizeProjectName,
 };

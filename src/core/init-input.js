@@ -11,6 +11,8 @@ const { resolveInfraDir } = require('./project');
 function initInputError(code, key) {
   const error = new Error(`${code} ${t(key)}`);
   error.code = code;
+  error.messageKey = key;
+  error.messageArgs = [];
   return error;
 }
 
@@ -193,6 +195,9 @@ async function collectInitAnswers(opts, project, cliProjectName) {
   answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
   if (answers.autoAnnotate && !aiProviderSelected(answers)) {
     throw initInputError('AUTO_ANNOTATE_PROVIDER_REQUIRED', 'init.error.autoAnnotateProviderRequired');
+  }
+  if (requestedAiSecurity && !aiProviderSelected(answers)) {
+    throw initInputError('AI_SECURITY_PROVIDER_REQUIRED', 'init.error.aiSecurityProviderRequired');
   }
   answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
   answers.simulate = !!opts.simulate;

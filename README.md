@@ -50,18 +50,17 @@ Run inside a Spring Boot project root:
 contexa init
 ```
 
-The guided setup asks only the decisions that matter:
-
-1. Which language should the CLI use?
-2. Do you want the recommended quick setup?
-3. Do you want to enable AI security now?
-4. If AI security is enabled, which AI provider should be configured?
-5. May Contexa add `@EnableAISecurity` to the main Spring Boot class?
+The CLI selects its language from `--lang`, `CONTEXA_LANG`, or the host locale,
+and uses the recommended quick path by default. The guided setup asks only
+whether AI security should be enabled now. If enabled, it then asks for the AI
+provider and whether it may add `@EnableAISecurity` to the main Spring Boot
+class.
 
 If you choose starter-only setup, changes stay small:
 
 - Adds `ai.ctxa:spring-boot-starter-contexa`.
-- Writes only the Contexa-managed settings that are safe for a customer app.
+- Leaves every host `application.yml`, `.yaml`, `.properties`, and profile file
+  byte-identical.
 - Does not inject `spring.ai.*`.
 - Does not add provider dependencies unless AI security is explicitly selected.
 - Does not modify Java source unless the user explicitly allows it.
@@ -97,11 +96,11 @@ You can also set `CONTEXA_LANG=ko` or `CONTEXA_LANG=en`.
 `contexa init` detects Maven or Gradle and then applies the selected changes.
 Before writing files, the CLI prints the planned changes.
 
-Basic setup:
+Basic starter-only setup:
 
 - Build file: adds the Contexa Spring Boot starter.
-- `application.yml`: adds a Contexa-managed block with minimal
-  `contexa.datasource.*` and runtime mode defaults.
+- Host application configuration: no change. Defaults are owned by Contexa
+  properties and auto-configuration.
 - Runtime schema and seed data: handled by Contexa auto-configuration when the
   application starts, not by copied SQL files in the CLI.
 
@@ -144,7 +143,6 @@ not required for normal installation.
 | Flag | Purpose |
 |---|---|
 | `--yes` | Skip prompts and use safe defaults. |
-| `--quick` | Use the recommended setup path. |
 | `--enable-ai-security` | Explicitly enable AI security during init. |
 | `--provider <openai\|anthropic\|ollama\|none>` | Select an AI provider for explicit AI setup. |
 | `--auto-annotate` | Add `@EnableAISecurity` to the main Spring Boot class. |

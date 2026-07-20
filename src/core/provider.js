@@ -23,6 +23,8 @@ function normalizeProviders(providerOption, options = {}) {
       + `Use ${SUPPORTED_PROVIDERS.join(', ')}, or none.`
     );
     error.code = 'INVALID_PROVIDER';
+    error.messageKey = 'common.invalidProvider';
+    error.messageArgs = [invalid.join(', '), SUPPORTED_PROVIDERS.join(', ')];
     throw error;
   }
   return [...new Set(values)];

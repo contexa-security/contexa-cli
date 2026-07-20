@@ -57,7 +57,7 @@ async function generateDockerCompose(infraDir, opts = {}) {
 #   CONTEXA_ZOOKEEPER_PORT         Zookeeper host port           (default ${DEFAULT_INFRASTRUCTURE_PORTS.zookeeper})  [distributed]
 #   CONTEXA_KAFKA_PORT             Kafka host port               (default ${DEFAULT_INFRASTRUCTURE_PORTS.kafka})  [distributed]
 #   CONTEXA_PGVECTOR_IMAGE_TAG     pgvector image tag            (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.pgvector})
-#   CONTEXA_OLLAMA_IMAGE_TAG       ollama image tag              (default latest - PIN IN PROD)
+#   CONTEXA_OLLAMA_IMAGE_TAG       ollama image tag              (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.ollama})
 #   CONTEXA_REDIS_IMAGE_TAG        redis image tag               (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.redis})
 #   CONTEXA_KAFKA_PLATFORM_VERSION confluentinc cp-* version     (default ${INFRASTRUCTURE_IMAGE_DEFAULTS.kafkaPlatform})
 name: \${CONTEXA_PROJECT:-${defaultProjectName}}
@@ -94,7 +94,7 @@ services:
     content += `
   # Ollama - Local LLM runtime for offline / no-API-key operation.
   # Default tag is "latest" for evaluation. Production deployments MUST set
-  # CONTEXA_OLLAMA_IMAGE_TAG to a specific version for reproducibility.
+  # CONTEXA_OLLAMA_IMAGE_TAG can select another validated version when required.
   ollama:
     labels: *contexa-ownership
     image: ollama/ollama:\${CONTEXA_OLLAMA_IMAGE_TAG:-${INFRASTRUCTURE_IMAGE_DEFAULTS.ollama}}

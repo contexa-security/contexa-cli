@@ -10,7 +10,7 @@ function printInitCompletion(context) {
     answers,
     project,
     standaloneDir,
-    shouldWriteHostConfig,
+    shouldWriteOverlay,
     standaloneResult,
     simulate,
     projectDir,
@@ -26,7 +26,7 @@ function printInitCompletion(context) {
   if (answers.integrationMode === 'standalone') {
     console.log(chalk.gray(`    v ${t('init.report.standaloneCreated', standaloneDir)}`));
   } else {
-    console.log(chalk.gray(shouldWriteHostConfig
+    console.log(chalk.gray(shouldWriteOverlay
       ? `    v ${t('init.report.hostConfigMerged')}`
       : `    v ${t('init.report.hostConfigPreserved')}`));
     console.log(chalk.gray(`    v ${t('init.report.starterAdded')}`));

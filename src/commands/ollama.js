@@ -2,7 +2,7 @@
 
 const chalk = require('chalk');
 const ora = require('ora');
-const { t } = require('../core/i18n');
+const { t, formatError } = require('../core/i18n');
 const {
   detectOllamaSource,
   pullOllamaModelWithProgress,
@@ -16,9 +16,11 @@ const {
 } = require('../core/provider');
 const { TIMEOUTS } = require('../core/timeouts');
 
-function commandFailure(code, message) {
-  const error = new Error(`${code} ${message}`);
+function commandFailure(code, key, ...args) {
+  const error = new Error(code);
   error.code = code;
+  error.messageKey = key;
+  error.messageArgs = args;
   return error;
 }
 
@@ -27,8 +29,8 @@ async function pullModel(source, model, spinner, label) {
     await pullOllamaModelWithProgress(source.port, model, spinner, label);
   } catch (error) {
     spinner.fail(t('ollama.pull.failed', model));
-    console.log(chalk.gray(`    ${t('common.error')}: ${error.message}`));
-    throw commandFailure('OLLAMA_PULL_FAILED', error.message);
+    console.log(chalk.gray(`    ${t('common.error')}: ${formatError(error, 'OLLAMA_RUNTIME_FAILED')}`));
+    throw commandFailure('OLLAMA_PULL_FAILED', 'ollama.pull.failed', model);
   }
 }
 

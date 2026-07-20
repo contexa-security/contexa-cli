@@ -2,6 +2,13 @@
 
 const fs = require('fs-extra');
 const path = require('path');
+const {
+  parseMavenModel,
+  parseGradleModel,
+  gradleProjectName: readGradleProjectName,
+  gradleModuleDirectories,
+  hasCoordinate,
+} = require('./build-model');
 
 const CONTEXA_GROUP_ID = 'ai.ctxa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
@@ -18,15 +25,16 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
   };
 
   const localCandidate = await readBuildCandidate(rootDir);
-  let candidate = localCandidate && localCandidate.hasSpringBoot ? localCandidate : null;
-  if (!candidate) {
-    const springModules = (await discoverModuleCandidates(rootDir)).filter(item => item.hasSpringBoot);
-    if (springModules.length === 1) candidate = springModules[0];
-    else if (springModules.length > 1) {
-      result.ambiguousModules = springModules.map(item => item.dir);
-      return finishDetection(result, rootDir, opts);
-    } else if (localCandidate) candidate = localCandidate;
-  }
+  const moduleCandidates = await discoverModuleCandidates(rootDir);
+  const allCandidates = [localCandidate, ...moduleCandidates].filter(Boolean);
+  const distinctCandidates = [...new Map(allCandidates.map(item => [path.resolve(item.dir), item])).values()];
+  const springModules = distinctCandidates.filter(item => item.hasSpringBoot);
+  let candidate = null;
+  if (springModules.length === 1) candidate = springModules[0];
+  else if (springModules.length > 1) {
+    result.ambiguousModules = springModules.map(item => item.dir).sort();
+    return finishDetection(result, rootDir, opts);
+  } else if (localCandidate) candidate = localCandidate;
 
   if (candidate) {
     const inheritedGradle = candidate.buildTool === 'gradle'
@@ -59,7 +67,7 @@ async function inheritedGradleMetadata(moduleDir) {
       path.join(parentDir, 'settings.gradle.kts'),
     ]);
     if (settingsPath) {
-      const settings = stripCodeComments(await fs.readFile(settingsPath, 'utf8'));
+      const settings = await fs.readFile(settingsPath, 'utf8');
       const includedDirs = gradleIncludedModuleDirs(parentDir, settings);
       const normalizedModuleDir = path.resolve(moduleDir);
       if (includedDirs.some(dir => path.resolve(dir) === normalizedModuleDir)) {
@@ -69,12 +77,19 @@ async function inheritedGradleMetadata(moduleDir) {
         ]);
         if (!buildPath) return { rootDir: parentDir, hasContexta: false, hasSpringSecurityCore: false };
         const build = await fs.readFile(buildPath, 'utf8');
-        const inheritedBlocks = gradleNamedBlocks(build, ['allprojects', 'subprojects']).join('\n');
+        const model = parseGradleModel(build);
+        const inheritedCoordinates = model.dependencyBlocks
+          .filter(item => item.coordinates.some(coordinate =>
+            coordinate.scope.includes('allprojects') || coordinate.scope.includes('subprojects')))
+          .flatMap(item => item.coordinates);
         return {
           rootDir: parentDir,
-          hasContexta: new RegExp(`['"]${escapeRegex(CONTEXA_GROUP_ID)}:${escapeRegex(CONTEXA_ARTIFACT_ID)}(?::[^'"]+)?['"]`).test(inheritedBlocks),
-          hasSpringSecurityCore: /['"]org\.springframework\.boot:spring-boot-starter-security(?::[^'"]+)?['"]/.test(inheritedBlocks)
-            || /['"]org\.springframework\.security:spring-security-(?:core|web|config)(?::[^'"]+)?['"]/.test(inheritedBlocks),
+          hasContexta: hasCoordinate(inheritedCoordinates, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+          hasSpringSecurityCore: inheritedCoordinates.some(coordinate =>
+            (coordinate.group === 'org.springframework.boot'
+              && coordinate.artifact === 'spring-boot-starter-security')
+            || (coordinate.group === 'org.springframework.security'
+              && /^spring-security-(?:core|web|config)$/.test(coordinate.artifact))),
         };
       }
     }
@@ -85,36 +100,7 @@ async function inheritedGradleMetadata(moduleDir) {
 }
 
 function gradleIncludedModuleDirs(rootDir, settings) {
-  const moduleDirs = [];
-  for (const line of settings.split(/\r?\n/).filter(value => /\binclude\b/.test(value))) {
-    for (const match of line.matchAll(/['"](:?[^'"]+)['"]/g)) {
-      moduleDirs.push(path.resolve(rootDir, match[1].replace(/^:/, '').replace(/:/g, path.sep)));
-    }
-  }
-  return moduleDirs;
-}
-
-function gradleNamedBlocks(source, names) {
-  const masked = stripCommentsAndStrings(source);
-  const blocks = [];
-  const pattern = new RegExp(`\\b(?:${names.join('|')})\\s*\\{`, 'g');
-  let match;
-  while ((match = pattern.exec(masked)) !== null) {
-    const openingBrace = masked.indexOf('{', match.index);
-    let depth = 1;
-    for (let index = openingBrace + 1; index < masked.length; index++) {
-      if (masked[index] === '{') depth++;
-      else if (masked[index] === '}') {
-        depth--;
-        if (depth === 0) {
-          blocks.push(stripCodeComments(source.slice(openingBrace + 1, index)));
-          pattern.lastIndex = index + 1;
-          break;
-        }
-      }
-    }
-  }
-  return blocks;
+  return gradleModuleDirectories(rootDir, settings);
 }
 
 async function finishDetection(result, rootDir, opts) {
@@ -130,50 +116,74 @@ async function finishDetection(result, rootDir, opts) {
 async function readBuildCandidate(dir) {
   const pomPath = path.join(dir, 'pom.xml');
   if (await fs.pathExists(pomPath)) {
-    const clean = (await fs.readFile(pomPath, 'utf8')).replace(/<!--[\s\S]*?-->/g, '');
-    const hasSpringBoot = mavenCoordinateExists(clean, 'org.springframework.boot', 'spring-boot-starter-parent')
-      || mavenCoordinateExists(clean, 'org.springframework.boot', 'spring-boot-maven-plugin')
-      || /<groupId>\s*org\.springframework\.boot\s*<\/groupId>[\s\S]{0,400}<artifactId>\s*spring-boot-starter(?:-[^<]+)?\s*<\/artifactId>/.test(clean);
+    const source = await fs.readFile(pomPath, 'utf8');
+    const model = parseMavenModel(source);
+    const bootParent = model.parent
+      && model.parent.group === 'org.springframework.boot'
+      && model.parent.artifact === 'spring-boot-starter-parent';
+    const bootPlugin = hasCoordinate(model.plugins,
+      'org.springframework.boot', 'spring-boot-maven-plugin');
+    const bootDependency = model.dependencies.some(coordinate =>
+      coordinate.group === 'org.springframework.boot'
+      && /^spring-boot-starter(?:-.+)?$/.test(coordinate.artifact));
+    const hasSpringBoot = !!(bootDependency || bootPlugin
+      || (model.packaging !== 'pom' && bootParent));
     return {
       dir, buildTool: 'maven', buildFilePath: pomPath, hasSpringBoot,
-      hasSpringSecurityCore: mavenArtifactExists(clean, 'spring-boot-starter-security')
-        || /<artifactId>\s*spring-security-(?:core|web|config)\s*<\/artifactId>/.test(clean),
-      hasContexta: mavenCoordinateExists(clean, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
-      projectName: mavenProjectArtifactId(clean),
+      hasSpringSecurityCore: model.dependencies.some(coordinate =>
+        (coordinate.group === 'org.springframework.boot'
+          && coordinate.artifact === 'spring-boot-starter-security')
+        || (coordinate.group === 'org.springframework.security'
+          && /^spring-security-(?:core|web|config)$/.test(coordinate.artifact))),
+      hasContexta: hasCoordinate(model.dependencies, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+      projectName: model.projectName,
+      moduleDirs: model.modules.map(moduleName => path.resolve(dir, moduleName)),
     };
   }
 
   const gradlePath = await firstExisting([path.join(dir, 'build.gradle'), path.join(dir, 'build.gradle.kts')]);
   if (!gradlePath) return null;
-  const clean = stripCodeComments(await fs.readFile(gradlePath, 'utf8'));
-  const hasSpringBoot = /\bid\s*(?:\(\s*)?['"]org\.springframework\.boot['"]/.test(clean)
-    || /\bapply\s+plugin\s*:\s*['"]org\.springframework\.boot['"]/.test(clean)
-    || /['"]org\.springframework\.boot:spring-boot-starter(?:-[^:'"]+)?(?::[^'"]+)?['"]/.test(clean);
+  const source = await fs.readFile(gradlePath, 'utf8');
+  const model = parseGradleModel(source);
+  const hasSpringBoot = model.pluginIds.includes('org.springframework.boot')
+    || model.dependencies.some(coordinate => coordinate.group === 'org.springframework.boot'
+      && /^spring-boot-starter(?:-.+)?$/.test(coordinate.artifact));
   return {
     dir, buildTool: 'gradle', buildFilePath: gradlePath, hasSpringBoot,
-    hasSpringSecurityCore: /['"]org\.springframework\.boot:spring-boot-starter-security(?::[^'"]+)?['"]/.test(clean)
-      || /['"]org\.springframework\.security:spring-security-(?:core|web|config)(?::[^'"]+)?['"]/.test(clean),
-    hasContexta: new RegExp(`['"]${escapeRegex(CONTEXA_GROUP_ID)}:${escapeRegex(CONTEXA_ARTIFACT_ID)}(?::[^'"]+)?['"]`).test(clean),
+    hasSpringSecurityCore: model.dependencies.some(coordinate =>
+      (coordinate.group === 'org.springframework.boot'
+        && coordinate.artifact === 'spring-boot-starter-security')
+      || (coordinate.group === 'org.springframework.security'
+        && /^spring-security-(?:core|web|config)$/.test(coordinate.artifact))),
+    hasContexta: hasCoordinate(model.dependencies, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
     projectName: await gradleProjectName(dir),
+    moduleDirs: await gradleChildModuleDirs(dir),
   };
 }
 
 async function discoverModuleCandidates(rootDir) {
   const moduleDirs = new Set();
-  const pomPath = path.join(rootDir, 'pom.xml');
-  if (await fs.pathExists(pomPath)) {
-    const pom = (await fs.readFile(pomPath, 'utf8')).replace(/<!--[\s\S]*?-->/g, '');
-    for (const match of pom.matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) moduleDirs.add(path.resolve(rootDir, match[1].trim()));
-  }
+  const visited = new Set([path.resolve(rootDir)]);
+  const rootCandidate = await readBuildCandidate(rootDir);
+  for (const moduleDir of (rootCandidate && rootCandidate.moduleDirs) || []) moduleDirs.add(moduleDir);
   const settingsPath = await firstExisting([path.join(rootDir, 'settings.gradle'), path.join(rootDir, 'settings.gradle.kts')]);
   if (settingsPath) {
-    const settings = stripCodeComments(await fs.readFile(settingsPath, 'utf8'));
+    const settings = await fs.readFile(settingsPath, 'utf8');
     for (const moduleDir of gradleIncludedModuleDirs(rootDir, settings)) moduleDirs.add(moduleDir);
   }
   const candidates = [];
-  for (const moduleDir of moduleDirs) {
+  const queue = [...moduleDirs];
+  while (queue.length > 0) {
+    const moduleDir = path.resolve(queue.shift());
+    if (visited.has(moduleDir)) continue;
+    if (moduleDir !== rootDir && !moduleDir.startsWith(rootDir + path.sep)) {
+      throw new Error(`Build module escapes the selected project root: ${moduleDir}`);
+    }
+    visited.add(moduleDir);
     const candidate = await readBuildCandidate(moduleDir);
-    if (candidate) candidates.push(candidate);
+    if (!candidate) continue;
+    candidates.push(candidate);
+    for (const childDir of candidate.moduleDirs || []) queue.push(childDir);
   }
   return candidates;
 }
@@ -263,30 +273,22 @@ function stripCommentsAndStrings(source) {
   return output;
 }
 
-function mavenCoordinateExists(pom, groupId, artifactId) {
-  const blocks = pom.match(/<(?:dependency|plugin|parent)>[\s\S]*?<\/(?:dependency|plugin|parent)>/g) || [];
-  return blocks.some(block => new RegExp(`<groupId>\\s*${escapeRegex(groupId)}\\s*<\\/groupId>`).test(block)
-    && new RegExp(`<artifactId>\\s*${escapeRegex(artifactId)}\\s*<\\/artifactId>`).test(block));
-}
-function mavenArtifactExists(pom, artifactId) {
-  return new RegExp(`<artifactId>\\s*${escapeRegex(artifactId)}\\s*<\\/artifactId>`).test(pom);
-}
-function mavenProjectArtifactId(pom) {
-  const match = pom.replace(/<parent>[\s\S]*?<\/parent>/, '').match(/<artifactId>\s*([^<]+?)\s*<\/artifactId>/);
-  return match ? match[1].trim() : null;
-}
 async function gradleProjectName(dir) {
   const settingsPath = await firstExisting([path.join(dir, 'settings.gradle'), path.join(dir, 'settings.gradle.kts')]);
   if (!settingsPath) return path.basename(dir);
-  const match = stripCodeComments(await fs.readFile(settingsPath, 'utf8')).match(/rootProject\.name\s*=\s*['"]([^'"]+)['"]/);
-  return match ? match[1] : path.basename(dir);
+  const name = readGradleProjectName(await fs.readFile(settingsPath, 'utf8'));
+  return name || path.basename(dir);
+}
+async function gradleChildModuleDirs(dir) {
+  const settingsPath = await firstExisting([
+    path.join(dir, 'settings.gradle'),
+    path.join(dir, 'settings.gradle.kts'),
+  ]);
+  if (!settingsPath) return [];
+  return gradleIncludedModuleDirs(dir, await fs.readFile(settingsPath, 'utf8'));
 }
 async function firstExisting(paths) {
   for (const file of paths) if (await fs.pathExists(file)) return file;
   return null;
 }
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^\x24{}()|[\]\\]/g, '\\$&');
-}
-
 module.exports = { detectSpringProject };

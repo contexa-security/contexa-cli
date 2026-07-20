@@ -25,7 +25,12 @@ const fs = require('fs-extra');
 const path = require('path');
 const yaml = require('js-yaml');
 
-const { CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, CONTEXA_VERSION } = require('./common');
+const {
+  CONTEXA_GROUP_ID,
+  CONTEXA_ARTIFACT_ID,
+  CONTEXA_VERSION,
+  resolveDependencyVersions,
+} = require('./common');
 const { buildCliContexaTree, applyCliContexaTree } = require('./yml');
 
 // Returns { ymlPath, buildFragmentPath, importHints }. The caller is responsible
@@ -34,6 +39,8 @@ const { buildCliContexaTree, applyCliContexaTree } = require('./yml');
 async function injectStandalone(standaloneDir, project, opts = {}) {
   const { infra = 'standalone', force = false } = opts;
   const includeDistributed = infra === 'distributed';
+  const { redisson: redissonVersion } =
+    resolveDependencyVersions(opts.dependencyVersions);
   const isMaven = project.buildTool === 'maven';
   const isKotlinDsl = !isMaven && project.buildFilePath && project.buildFilePath.endsWith('.kts');
 
@@ -129,7 +136,6 @@ async function injectStandalone(standaloneDir, project, opts = {}) {
     lines.push(`        <version>${CONTEXA_VERSION}</version>`);
     lines.push('    </dependency>');
     if (includeDistributed) {
-      const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
       lines.push('    <dependency>');
       lines.push('        <groupId>org.springframework.kafka</groupId>');
       lines.push('        <artifactId>spring-kafka</artifactId>');
@@ -157,7 +163,6 @@ async function injectStandalone(standaloneDir, project, opts = {}) {
     lines.push('dependencies {');
     lines.push(`    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`);
     if (includeDistributed) {
-      const redissonVersion = process.env.CONTEXA_REDISSON_VERSION || '3.48.0';
       lines.push(`    implementation 'org.springframework.kafka:spring-kafka'`);
       lines.push(`    implementation 'org.redisson:redisson:${redissonVersion}'`);
     }

@@ -12,6 +12,7 @@ const {
   sha256FileSync,
   validatedRelativePath,
 } = require('./manifest');
+const { parseMavenModel, parseGradleModel } = require('./build-model');
 
 const MAX_MERGE_BYTES = 2 * 1024 * 1024;
 
@@ -42,10 +43,28 @@ function buildDockerResourceContract(projectName, options = {}) {
 }
 
 function dockerContractResources(contract) {
+  const projectName = contract.projectName;
+  const containerServices = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka'];
+  const volumeKeys = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'zookeeper-log', 'kafka-data'];
   return [
-    ...(contract.containers || []).map(name => ({ type: 'container', name })),
-    ...(contract.volumes || []).map(name => ({ type: 'volume', name })),
-    ...(contract.networks || []).map(name => ({ type: 'network', name })),
+    ...(contract.containers || []).map(name => ({
+      type: 'container',
+      name,
+      composeLabel: 'com.docker.compose.service',
+      composeValue: containerServices.find(service => name === `${projectName}-${service}`),
+    })),
+    ...(contract.volumes || []).map(name => ({
+      type: 'volume',
+      name,
+      composeLabel: 'com.docker.compose.volume',
+      composeValue: volumeKeys.find(volume => name === `${projectName}_${volume}`),
+    })),
+    ...(contract.networks || []).map(name => ({
+      type: 'network',
+      name,
+      composeLabel: 'com.docker.compose.network',
+      composeValue: name === `${projectName}_default` ? 'default' : undefined,
+    })),
   ];
 }
 
@@ -60,7 +79,9 @@ function validateDockerContract(contract, expected) {
   if (resources.length === 0) throw new Error('Docker resource contract has no exact resource IDs.');
   const names = new Set();
   for (const resource of resources) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(resource.name) || names.has(`${resource.type}:${resource.name}`)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(resource.name)
+        || !resource.composeValue
+        || names.has(`${resource.type}:${resource.name}`)) {
       throw new Error(`Docker resource ID is invalid or duplicated: ${resource.name}`);
     }
     names.add(`${resource.type}:${resource.name}`);
@@ -85,7 +106,8 @@ async function performOwnedDockerCleanup(context, adapter) {
     if (labels['io.ctxa.owner'] !== 'contexa-cli'
         || labels['io.ctxa.mode'] !== context.mode
         || labels['io.ctxa.installation-id'] !== context.installationId
-        || labels['com.docker.compose.project'] !== context.projectName) {
+        || labels['com.docker.compose.project'] !== context.projectName
+        || labels[resource.composeLabel] !== resource.composeValue) {
       throw new Error(`Docker ${resource.type} ownership mismatch; preserved: ${resource.name}`);
     }
     present.push(resource);
@@ -349,10 +371,33 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
   const entries = [...manifest.files].sort((left, right) => right.relativePath.length - left.relativePath.length);
   for (const entry of entries) {
     try {
+      const moduleProvenance = dependencyProvenanceForEntry(
+        manifest.metadata.dependencyProvenance, entry);
+      if (moduleProvenance.length > 0) {
+        const target = validatedRelativePath(projectDir, entry.relativePath);
+        const current = await fs.pathExists(target) ? await fs.readFile(target, 'utf8') : '';
+        if (!dependencyProvenanceMatches(target, current, moduleProvenance)) {
+          const outcome = {
+            status: 'conflict',
+            detail: 'canonical dependency provenance no longer matches the current build file',
+          };
+          record(audit, outcome.status, entry.relativePath, outcome.detail);
+          remaining.push(entry);
+          continue;
+        }
+      }
       const outcome = await restoreEntry(projectDir, mode, entry);
       record(audit, outcome.status, entry.relativePath, outcome.detail);
       if (outcome.status === 'conflict') remaining.push(entry);
-      else await removeTrackedSnapshots(projectDir, mode, entry);
+      else {
+        await removeTrackedSnapshots(projectDir, mode, entry);
+        if (moduleProvenance.length > 0) {
+          const moduleName = moduleNameForBuildEntry(entry);
+          manifest.metadata.dependencyProvenance =
+            manifest.metadata.dependencyProvenance.filter(
+              coordinate => coordinate.targetModule !== moduleName);
+        }
+      }
     } catch (error) {
       record(audit, 'failed', entry.relativePath, error.message);
       remaining.push(entry);
@@ -361,6 +406,43 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
   manifest.files = remaining;
   await saveManifest(projectDir, manifest, mode);
   return { audit, manifest };
+}
+
+function moduleNameForBuildEntry(entry) {
+  const directory = path.posix.dirname(String(entry.relativePath || '').replace(/\\/g, '/'));
+  return directory === '.' ? '.' : directory;
+}
+
+function dependencyProvenanceForEntry(provenance, entry) {
+  if (!entry || entry.kind !== 'build-file' || !Array.isArray(provenance)) return [];
+  const moduleName = moduleNameForBuildEntry(entry);
+  return provenance.filter(coordinate => coordinate.targetModule === moduleName);
+}
+
+function dependencyProvenanceMatches(buildPath, content, provenance) {
+  let dependencies;
+  let managedDependencies = [];
+  try {
+    if (buildPath.endsWith('.xml')) {
+      const model = parseMavenModel(content);
+      dependencies = model.dependencies;
+      managedDependencies = model.managedDependencies;
+    } else {
+      dependencies = parseGradleModel(content).dependencies;
+    }
+  } catch (error) {
+    return false;
+  }
+  return provenance.every(expected => {
+    const pool = expected.configuration === 'dependencyManagement'
+      ? managedDependencies : dependencies;
+    return pool.some(actual =>
+      actual.group === expected.group
+      && actual.artifact === expected.artifact
+      && (expected.configuration === 'dependencyManagement'
+        || actual.configuration === expected.configuration)
+      && (actual.version || null) === (expected.version || null));
+  });
 }
 
 function auditIssueCount(audit) {
@@ -376,4 +458,5 @@ module.exports = {
   yamlManagedPathMerge,
   restoreProjectFiles,
   auditIssueCount,
+  dependencyProvenanceMatches,
 };

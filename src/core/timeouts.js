@@ -12,6 +12,8 @@ const TIMEOUTS = Object.freeze({
   artifactDownloadMs: 120000,
   socketIdleMs: 30000,
   simulationHealthMs: 120000,
+  simulationApplicationReadyMs: 120000,
+  simulationApplicationPollMs: 500,
   simulationPollMs: 2000,
   ollamaReadyMs: 90000,
   ollamaCommandProbeMs: 3000,

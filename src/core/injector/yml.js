@@ -1,8 +1,8 @@
 'use strict';
 
-// YAML injection: build the contexa.* tree the CLI is responsible for, merge
-// it onto the host application's parsed yml object, force-overwrite the small
-// set of CLI-managed keys, and serialize back to disk with .bak rollback.
+// YAML injection: build the contexa.* tree the CLI is responsible for and
+// write it to a Contexa-owned overlay. The host application's
+// application.yml/yaml/properties files are not parsed or serialized.
 //
 // Two integration modes share buildCliContexaTree / applyCliContexaTree:
 // merge mode (this module's injectYml) and standalone mode (standalone.js).
@@ -25,6 +25,11 @@ const {
 // merged contexa: tree instead of producing a duplicate top-level key.
 const LEGACY_MARKER_START = '# --- Contexa AI Security ---';
 const LEGACY_MARKER_END   = '# --- End Contexa ---';
+const NORMAL_OVERLAY_RESOURCE = 'application-contexa.yml';
+
+function normalOverlayPath(projectDir) {
+  return path.join(projectDir, 'src', 'main', 'resources', NORMAL_OVERLAY_RESOURCE);
+}
 
 // Build the contexa.* sub-tree this CLI version is responsible for.
 // The shape mirrors the @ConfigurationProperties surface in the platform.
@@ -289,6 +294,12 @@ async function injectYml(ymlPath, opts = {}) {
     rootObj.spring.kafka = rootObj.spring.kafka && typeof rootObj.spring.kafka === 'object'
       ? rootObj.spring.kafka : {};
     rootObj.spring.kafka['bootstrap-servers'] = '${KAFKA_BOOTSTRAP_SERVERS}';
+  } else {
+    rootObj.server = rootObj.server && typeof rootObj.server === 'object'
+      ? rootObj.server : {};
+    if (rootObj.server.port === undefined) {
+      rootObj.server.port = '${CONTEXA_SERVER_PORT:9080}';
+    }
   }
 
   const application = applyCliContexaTree(rootObj, cliTree, opts);
@@ -305,6 +316,8 @@ async function injectYml(ymlPath, opts = {}) {
 }
 
 module.exports = {
+  NORMAL_OVERLAY_RESOURCE,
+  normalOverlayPath,
   buildCliContexaTree,
   applyCliContexaTree,
   stripLegacyMarker,

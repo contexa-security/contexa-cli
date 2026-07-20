@@ -15,6 +15,7 @@ const standalone = require('./injector/standalone');
 module.exports = {
   // yml
   injectYml: yml.injectYml,
+  normalOverlayPath: yml.normalOverlayPath,
   buildCliContexaTree: yml.buildCliContexaTree,
   applyCliContexaTree: yml.applyCliContexaTree,
   stripLegacyMarker: yml.stripLegacyMarker,
@@ -25,6 +26,7 @@ module.exports = {
   injectDistributedDeps: build.injectDistributedDeps,
   injectSpringAiDeps: build.injectSpringAiDeps,
   injectEnableAiSecurity: build.injectEnableAiSecurity,
+  inspectAiDependencies: build.inspectAiDependencies,
   // Exported for unit testing of the brace-aware Gradle insertion logic.
   findTopLevelDependenciesInsertIndex: build.findTopLevelDependenciesInsertIndex,
   insertIntoTopLevelDependencies: build.insertIntoTopLevelDependencies,

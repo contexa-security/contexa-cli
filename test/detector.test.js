@@ -147,6 +147,65 @@ test('detector: only application.yml present leaves properties path null', async
   }
 });
 
+test('detector: Maven dependencyManagement and pluginManagement are not installed application features', async () => {
+  const dir = await makeTempProject({
+    'pom.xml': `<project>
+  <modelVersion>4.0.0</modelVersion>
+  <artifactId>managed-only</artifactId>
+  <packaging>pom</packaging>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security</artifactId></dependency>
+  </dependencies></dependencyManagement>
+  <build><pluginManagement><plugins>
+    <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+  </plugins></pluginManagement></build>
+</project>`,
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, false);
+    assert.equal(result.hasContexta, false);
+    assert.equal(result.hasSpringSecurityCore, false);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: nested Maven modules select the only Spring application owner', async () => {
+  const dir = await makeTempProject({
+    'pom.xml': '<project><artifactId>root</artifactId><packaging>pom</packaging><modules><module>services</module></modules></project>',
+    'services/pom.xml': '<project><artifactId>services</artifactId><packaging>pom</packaging><modules><module>api</module></modules></project>',
+    'services/api/pom.xml': '<project><parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId></parent><artifactId>api</artifactId></project>',
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, true);
+    assert.equal(result.projectDir, path.join(dir, 'services', 'api'));
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: Gradle strings, buildscript and pluginManagement are not application ownership', async () => {
+  const dir = await makeTempProject({
+    'settings.gradle.kts': 'pluginManagement { plugins { id("org.springframework.boot") version "3.5.4" } }\nrootProject.name = "decoy"\n',
+    'build.gradle.kts': `buildscript {
+  dependencies { classpath("org.springframework.boot:spring-boot-gradle-plugin:3.5.4") }
+}
+val documentation = "ai.ctxa:spring-boot-starter-contexa:0.1.0"
+dependencies { implementation("org.slf4j:slf4j-api:2.0.0") }
+`,
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, false);
+    assert.equal(result.hasContexta, false);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
 test('detector: non-Spring Maven and Gradle build files are not accepted', async () => {
   const maven = await makeTempProject({
     'pom.xml': '<project><artifactId>plain</artifactId><dependencies><dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency></dependencies></project>',
@@ -234,6 +293,24 @@ test('detector: selects one Spring module and safely rejects ambiguous module ro
   } finally {
     await fs.remove(single);
     await fs.remove(ambiguous);
+  }
+});
+
+test('detector: Gradle custom projectDir mapping selects the mapped Spring module only', async () => {
+  const dir = await makeTempProject({
+    'settings.gradle.kts': `rootProject.name = "mapped-root"
+include(":api")
+project(":api").projectDir = file("services/http-api")
+`,
+    'build.gradle.kts': 'plugins { base }\n',
+    'services/http-api/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, true);
+    assert.equal(result.projectDir, path.join(dir, 'services', 'http-api'));
+  } finally {
+    await fs.remove(dir);
   }
 });
 

@@ -4,7 +4,11 @@ const crypto = require('crypto');
 const fs = require('fs-extra');
 const path = require('path');
 const { dockerTry } = require('./docker');
-const { SIMULATION_PORTS } = require('./infrastructure');
+const {
+  INFRASTRUCTURE_IMAGE_DEFAULTS,
+  INFRASTRUCTURE_SERVICE_CONTRACTS,
+  SIMULATION_PORTS,
+} = require('./infrastructure');
 const { TIMEOUTS } = require('./timeouts');
 
 const SIMULATION_PROJECT = 'ctxa-sim';
@@ -35,6 +39,10 @@ function simulationVariables(installationId) {
     REDIS_PORT: String(SIMULATION_PORTS.redis),
     KAFKA_BOOTSTRAP_SERVERS: `127.0.0.1:${SIMULATION_PORTS.kafka}`,
     CONTEXA_SIMULATION_SERVER_PORT: '9080',
+    CONTEXA_PGVECTOR_IMAGE_TAG: INFRASTRUCTURE_IMAGE_DEFAULTS.pgvector,
+    CONTEXA_OLLAMA_IMAGE_TAG: INFRASTRUCTURE_IMAGE_DEFAULTS.ollama,
+    CONTEXA_REDIS_IMAGE_TAG: INFRASTRUCTURE_IMAGE_DEFAULTS.redis,
+    CONTEXA_KAFKA_PLATFORM_VERSION: INFRASTRUCTURE_IMAGE_DEFAULTS.kafkaPlatform,
   };
 }
 
@@ -116,20 +124,44 @@ function checkedDocker(args, description) {
   return result.stdout ? result.stdout.toString().trim() : '';
 }
 
+function assertSimulationServiceState(service, state, installationId) {
+  const expected = INFRASTRUCTURE_SERVICE_CONTRACTS[service];
+  if (!Array.isArray(state) || state[0] !== 'running' || state[1] !== 'healthy'
+      || state[2] !== 'contexa-cli' || state[3] !== 'simulation'
+      || state[4] !== installationId || !expected || state[5] !== expected.image) {
+    throw new Error(`Simulation service contract failed for ${SIMULATION_PROJECT}-${service}: ${(state || []).join('|')}`);
+  }
+}
+
+function assertSimulationVersions(versions, includeOllama = true) {
+  const versionChecks = {
+    postgres: new RegExp(`PostgreSQL\\) ${INFRASTRUCTURE_SERVICE_CONTRACTS.postgres.version}\\.`),
+    redis: new RegExp(`v=${INFRASTRUCTURE_SERVICE_CONTRACTS.redis.version}\\.`),
+    zookeeper: new RegExp(`^${INFRASTRUCTURE_SERVICE_CONTRACTS.zookeeper.version.replace(/\./g, '\\.')}($|-)`),
+    kafka: new RegExp(`^${INFRASTRUCTURE_SERVICE_CONTRACTS.kafka.version.replace(/\./g, '\\.')}($|-)`),
+    ...(includeOllama ? {
+      ollama: new RegExp(`\\b${INFRASTRUCTURE_SERVICE_CONTRACTS.ollama.version.replace(/\./g, '\\.')}\\b`),
+    } : {}),
+  };
+  for (const [service, pattern] of Object.entries(versionChecks)) {
+    if (!pattern.test(versions[service] || '')) {
+      throw new Error(`Simulation service version drift for ${service}: ${versions[service] || 'missing'}`);
+    }
+  }
+}
+
 function verifySimulationInfrastructure(installationId, includeOllama = true) {
   const services = expectedSimulationServices(includeOllama);
+  const images = {};
   for (const service of services) {
     const container = `${SIMULATION_PROJECT}-${service}`;
     const state = checkedDocker([
       'inspect', '--format',
-      '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{index .Config.Labels "io.ctxa.owner"}}|{{index .Config.Labels "io.ctxa.mode"}}|{{index .Config.Labels "io.ctxa.installation-id"}}',
+      '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{index .Config.Labels "io.ctxa.owner"}}|{{index .Config.Labels "io.ctxa.mode"}}|{{index .Config.Labels "io.ctxa.installation-id"}}|{{.Config.Image}}',
       container,
-    ], `${container} ownership and health inspection`).split('|');
-    if (state[0] !== 'running' || state[1] !== 'healthy'
-        || state[2] !== 'contexa-cli' || state[3] !== 'simulation'
-        || state[4] !== installationId) {
-      throw new Error(`Simulation service contract failed for ${container}: ${state.join('|')}`);
-    }
+    ], `${container} ownership, health, and image inspection`).split('|');
+    assertSimulationServiceState(service, state, installationId);
+    images[service] = state[5];
   }
 
   const variables = simulationVariables(installationId);
@@ -150,7 +182,20 @@ function verifySimulationInfrastructure(installationId, includeOllama = true) {
     );
   }
   const evidence = {};
-  for (const [name, args, description] of probes) evidence[name] = checkedDocker(args, description);
+  for (const [name, args, description] of probes) {
+    const output = checkedDocker(args, description);
+    evidence[name] = name === 'zookeeper' && !output ? 'TCP_OK' : output;
+  }
+  const versions = {
+    postgres: checkedDocker(['exec', `${SIMULATION_PROJECT}-postgres`,
+      'postgres', '--version'], 'PostgreSQL version probe'),
+    redis: checkedDocker(['exec', `${SIMULATION_PROJECT}-redis`,
+      'redis-server', '--version'], 'Redis version probe'),
+    zookeeper: images.zookeeper.split(':').at(-1),
+    kafka: checkedDocker(['exec', `${SIMULATION_PROJECT}-kafka`,
+      'kafka-topics', '--version'], 'Kafka version probe'),
+  };
+  if (includeOllama) versions.ollama = evidence['ollama-version'];
   if (evidence.postgres !== '1') {
     throw new Error(`PostgreSQL authenticated query returned an unexpected value: ${evidence.postgres}`);
   }
@@ -161,7 +206,8 @@ function verifySimulationInfrastructure(installationId, includeOllama = true) {
       || /\bERROR\b|DisconnectException/i.test(evidence.kafka)) {
     throw new Error(`Kafka broker API probe returned an unexpected value: ${evidence.kafka}`);
   }
-  return { services, probes: evidence };
+  assertSimulationVersions(versions, includeOllama);
+  return { services, images, versions, probes: evidence };
 }
 
 async function waitForSimulationInfrastructure(installationId, includeOllama = true, options = {}) {
@@ -200,6 +246,8 @@ module.exports = {
   writeSimulationConfiguration,
   simulationRunCommand,
   expectedSimulationServices,
+  assertSimulationServiceState,
+  assertSimulationVersions,
   verifySimulationInfrastructure,
   waitForSimulationInfrastructure,
 };

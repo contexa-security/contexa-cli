@@ -19,9 +19,10 @@ const simulationOptions = ['--simulate', '--yes', '--no-docker'];
 async function createFixture({ starterManagedByHost = false, malformedYml = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'contexa-phase6-'));
   const project = path.join(root, 'project');
-  const infra = path.join(root, 'infra');
+  const infra = path.join(project, 'contexa', 'simulation-infra');
   const build = path.join(project, 'build.gradle');
   const yml = path.join(project, 'src/main/resources/application.yml');
+  const overlay = path.join(project, 'src/main/resources/application-contexa.yml');
   const dependencies = ["  implementation 'org.springframework.boot:spring-boot-starter-web'"];
   if (starterManagedByHost) {
     dependencies.push("  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'");
@@ -45,11 +46,10 @@ async function createFixture({ starterManagedByHost = false, malformedYml = fals
     '}',
     '',
   ].join('\n'), 'utf8');
-  await fs.outputFile(yml, malformedYml
-    ? 'server:\n  port: [9080\n'
-    : 'server:\n  port: 9080\nhost:\n  marker: preserved\n', 'utf8');
+  await fs.outputFile(yml, 'server:\n  port: 9080\nhost:\n  marker: preserved\n', 'utf8');
+  if (malformedYml) await fs.outputFile(overlay, 'contexa:\n  broken: [value\n', 'utf8');
   return {
-    root, project, infra, build, yml,
+    root, project, infra, build, yml, overlay,
     baseline: { build: await digest(build), yml: await digest(yml) },
   };
 }
@@ -282,7 +282,10 @@ test('failed explicit init rolls back and the same command safely retries', asyn
       '--no-docker', '--dir', fixture.project,
     ], 1);
     assert.equal(step.state.state, INSTALLATION_STATES.PARTIAL_FAILURE);
-    await fs.writeFile(fixture.yml, 'server:\n  port: 9080\nhost:\n  marker: preserved\n', 'utf8');
+    // The malformed overlay existed before the failed transaction, so rollback
+    // correctly keeps it user-owned. Remove the diagnosed bad input before
+    // retrying the identical command; never overwrite an unowned host file.
+    await fs.remove(fixture.overlay);
     step = await executeStep(fixture, records, 'explicit init retry', [
       'init', '--yes', '--enable-ai-security', '--provider', 'ollama',
       '--no-docker', '--dir', fixture.project,

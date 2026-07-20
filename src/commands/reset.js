@@ -5,47 +5,52 @@ const ora = require('ora');
 const path = require('path');
 const fs = require('fs-extra');
 const inquirer = require('inquirer');
-const { dockerCompose, dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
-const { t } = require('../core/i18n');
+const { Option } = require('commander');
 const {
-  INSTALL_MODES, backupRoot, loadManifest, manifestPath, saveManifest,
+  dockerComposeDown,
+  inspectDockerLabels,
+  isDockerCliInstalled,
+  isDockerDaemonRunning,
+} = require('../core/docker');
+const { t, formatError } = require('../core/i18n');
+const {
+  INSTALL_MODES, backupRoot, loadManifest, manifestPath, restoreExternalResources, saveManifest,
 } = require('../core/manifest');
 const {
   auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
 } = require('../core/reset-service');
 const { simulationEnvironment } = require('../core/simulation');
 const { TIMEOUTS } = require('../core/timeouts');
+const { assertSafeInfraDir } = require('../core/project');
 
-function inspectDockerLabels(type, name) {
-  const args = type === 'container'
-    ? ['inspect', '--type', 'container', '--format', '{{json .Config.Labels}}', name]
-    : [type, 'inspect', '--format', '{{json .Labels}}', name];
-  const result = dockerTry(args, { stdio: 'pipe' });
-  if (result.error || result.status !== 0) return null;
-  try {
-    return JSON.parse(result.stdout.toString().trim() || '{}') || {};
-  } catch {
-    const error = new Error(`RESET_LABELS_UNREADABLE ${t('reset.error.labelsUnreadable', type, name)}`);
-    error.code = 'RESET_LABELS_UNREADABLE';
-    throw error;
-  }
-}
+const RESET_RESULTS = Object.freeze({
+  SUCCESS: 'SUCCESS',
+  NO_OWNED_INSTALLATION: 'NO_OWNED_INSTALLATION',
+  CONFLICT: 'CONFLICT',
+  PARTIAL_FAILURE: 'PARTIAL_FAILURE',
+});
 
 function assertExactInfraDir(expectedInfraDir, requestedInfraDir) {
   if (!expectedInfraDir) {
     const error = new Error(`RESET_INFRA_DIR_MISSING ${t('reset.error.infraDirMissing')}`);
     error.code = 'RESET_INFRA_DIR_MISSING';
+    error.messageKey = 'reset.error.infraDirMissing';
+    error.messageArgs = [];
     throw error;
   }
   const expected = path.resolve(expectedInfraDir);
   if (requestedInfraDir && path.resolve(requestedInfraDir) !== expected) {
     const error = new Error(`RESET_INFRA_DIR_MISMATCH ${t('reset.error.infraDirMismatch', expected)}`);
     error.code = 'RESET_INFRA_DIR_MISMATCH';
+    error.messageKey = 'reset.error.infraDirMismatch';
+    error.messageArgs = [expected];
     throw error;
   }
   if (fs.existsSync(expected) && fs.lstatSync(expected).isSymbolicLink()) {
     const error = new Error(`RESET_INFRA_DIR_SYMLINK ${t('reset.error.infraDirSymlink', expected)}`);
     error.code = 'RESET_INFRA_DIR_SYMLINK';
+    error.messageKey = 'reset.error.infraDirSymlink';
+    error.messageArgs = [expected];
     throw error;
   }
   return expected;
@@ -63,38 +68,50 @@ function simulateComposeEnv(installationId) {
   return simulationEnvironment(process.env, installationId);
 }
 
-async function composeDown(projectName, infraDir, env) {
-  const result = dockerCompose(['-p', projectName, 'down', '-v', '--timeout', '0'], {
-    cwd: infraDir, stdio: 'pipe', env, timeout: TIMEOUTS.dockerComposeRollbackMs,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const stderr = result.stderr ? result.stderr.toString() : 'Unknown error';
-    const error = new Error(`RESET_DOCKER_DOWN_FAILED ${t('reset.error.downFailed', projectName, stderr.trim())}`);
-    error.code = 'RESET_DOCKER_DOWN_FAILED';
-    throw error;
-  }
-  return { skipped: false };
-}
-
 function mergeAudit(target, source) {
   for (const status of Object.keys(target)) target[status].push(...(source[status] || []));
 }
 
 function printAudit(audit) {
+  const displayAudit = sanitizeAudit(audit);
   console.log(chalk.cyan(`  ${t('reset.audit.title')}`));
   for (const status of ['removed', 'restored', 'preserved', 'conflict', 'failed']) {
-    for (const item of audit[status]) {
+    for (const item of displayAudit[status]) {
       const suffix = item.detail ? ` - ${item.detail}` : '';
       console.log(chalk.gray(`    - ${status}: ${item.resource}${suffix}`));
     }
   }
 }
 
+function sanitizeAudit(audit) {
+  return JSON.parse(JSON.stringify(audit).replace(
+    /((?:password|secret|credential|token)\s*[:=]\s*)[^\s",}]+/gi, '$1[REDACTED]'));
+}
+
+function printResetResult(result, mode, audit, dockerCalls) {
+  const safeAudit = sanitizeAudit(audit);
+  const counts = Object.fromEntries(Object.entries(safeAudit)
+    .map(([status, items]) => [status, items.length]));
+  console.log(`CONTEXA_RESET_RESULT ${JSON.stringify({
+    result,
+    mode,
+    changed: counts.removed + counts.restored,
+    deleted: counts.removed,
+    dockerCalls,
+    counts,
+    audit: safeAudit,
+  })}`);
+}
+
+function issueResult(audit) {
+  return audit.failed.length === 0 && audit.conflict.length > 0
+    ? RESET_RESULTS.CONFLICT : RESET_RESULTS.PARTIAL_FAILURE;
+}
+
 function resolveTargets(opts) {
   const targets = {
     simulate: !!opts.simulate,
-    infra: !!opts.infra,
+    infra: !opts.simulate && !!opts.infra,
     code: !!opts.code
   };
 
@@ -103,8 +120,8 @@ function resolveTargets(opts) {
   }
 
   if (opts.all) {
-    targets.simulate = true;
-    targets.infra = true;
+    targets.simulate = !!opts.simulate;
+    targets.infra = !opts.simulate;
     targets.code = true;
   }
 
@@ -141,30 +158,13 @@ module.exports = function (program) {
     .command('reset')
     .description(t('reset.description'))
     .option('--dir <path>', t('reset.option.dir'), process.cwd())
-    .option('--infra-dir <path>', t('reset.option.infraDir'))
     .option('-s, --simulate', t('reset.option.simulate'))
-    .option('-i, --infra', t('reset.option.infra'))
-    .option('-c, --code', t('reset.option.code'))
-    .option('-a, --all', t('reset.option.all'))
+    .addOption(new Option('--infra-dir <path>', t('reset.option.infraDir')).hideHelp())
+    .addOption(new Option('-i, --infra', t('reset.option.infra')).hideHelp())
+    .addOption(new Option('-c, --code', t('reset.option.code')).hideHelp())
+    .addOption(new Option('-a, --all', t('reset.option.all')).hideHelp())
     .option('-y, --yes', t('reset.option.yes'))
     .action(async (opts) => {
-      let proceed = !!opts.yes;
-      if (!proceed) {
-        const answer = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'proceed',
-          message: t('reset.prompt.confirm'),
-          default: false
-        }]);
-        proceed = answer.proceed;
-      }
-
-      if (!proceed) {
-        console.log(chalk.yellow(`\n  ! ${t('reset.cancelled')}`));
-        console.log('');
-        return;
-      }
-
       console.log(chalk.cyan('\n  ============================================='));
       console.log(chalk.cyan(`  ${t('reset.starting')}`));
       console.log(chalk.cyan('  =============================================\n'));
@@ -173,46 +173,39 @@ module.exports = function (program) {
       const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
       const resetManifestPath = manifestPath(projectDir, installMode);
       const hasOwnedManifest = fs.existsSync(resetManifestPath);
-      const resetManifest = await loadManifest(projectDir, installMode);
+      const resetAudit = emptyAudit();
+      let dockerCalls = 0;
+      let resetManifest;
+      try {
+        resetManifest = await loadManifest(projectDir, installMode);
+      } catch (error) {
+    resetAudit.conflict.push({ resource: resetManifestPath, detail: formatError(error) });
+        printAudit(resetAudit);
+        printResetResult(RESET_RESULTS.CONFLICT, installMode, resetAudit, dockerCalls);
+        process.exitCode = 1;
+        return;
+      }
+      if (!hasOwnedManifest) {
+        console.log(chalk.yellow(`  i ${t('reset.noManifest.code')}`));
+        printAudit(resetAudit);
+        printResetResult(RESET_RESULTS.NO_OWNED_INSTALLATION, installMode, resetAudit, dockerCalls);
+        return;
+      }
       const projectName = resetManifest.metadata && resetManifest.metadata.projectName;
       let targets = resolveTargets(opts);
       let resetHadIssues = false;
       let infraCompleted = false;
-      const resetAudit = emptyAudit();
       const ownsManifestInfrastructure = Boolean(
         resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip');
 
       if (!hasAnyTarget(targets)) {
-        if (opts.yes) {
-          targets.code = true;
-          targets.infra = hasOwnedManifest && resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip';
-          console.log(chalk.cyan(targets.infra
-            ? `  i ${t('reset.target.autoInfraCode')}`
-            : `  i ${t('reset.target.autoCode')}`));
-        } else {
-          const answer = await inquirer.prompt([{
-            type: 'checkbox',
-            name: 'targets',
-            message: t('reset.prompt.targets'),
-            choices: [
-              { name: t('reset.target.infra'), value: 'infra', checked: true },
-              { name: t('reset.target.simulate'), value: 'simulate', checked: false },
-              { name: t('reset.target.code'), value: 'code', checked: true }
-            ]
-          }]);
-
-          if (!answer.targets || answer.targets.length === 0) {
-            console.log(chalk.yellow(`\n  ! ${t('reset.error.noTarget')}`));
-            console.log('');
-            return;
-          }
-
-          targets = {
-            infra: answer.targets.includes('infra'),
-            simulate: answer.targets.includes('simulate'),
-            code: answer.targets.includes('code')
-          };
-        }
+        targets.code = true;
+        targets.infra = hasOwnedManifest
+          && resetManifest.metadata.infra
+          && resetManifest.metadata.infra !== 'skip';
+        console.log(chalk.cyan(targets.infra
+          ? `  i ${t('reset.target.autoInfraCode')}`
+          : `  i ${t('reset.target.autoCode')}`));
       }
 
       const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
@@ -222,14 +215,6 @@ module.exports = function (program) {
         infraCompleted = true;
       }
 
-      if (!hasOwnedManifest && (targets.infra || targets.simulate)) {
-        console.log(chalk.yellow(`  i ${t('reset.noManifest.infrastructure')}`));
-        return;
-      }
-      if (!hasOwnedManifest && targets.code) {
-        console.log(chalk.yellow(`  i ${t('reset.noManifest.code')}`));
-        return;
-      }
       if ((targets.infra || targets.simulate) && !projectName) {
         const error = new Error(`RESET_PROJECT_NAME_MISSING ${t('reset.error.projectNameMissing')}`);
         error.code = 'RESET_PROJECT_NAME_MISSING';
@@ -241,6 +226,12 @@ module.exports = function (program) {
         ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
       const planInfraDir = targets.infra
         ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
+      if (planSimInfraDir) {
+        await assertSafeInfraDir(opts.dir, planSimInfraDir, opts.infraDir);
+      }
+      if (planInfraDir && planInfraDir !== planSimInfraDir) {
+        await assertSafeInfraDir(opts.dir, planInfraDir, opts.infraDir);
+      }
       printResetPlan(targets, {
         projectName,
         simInfraDir: planSimInfraDir,
@@ -248,10 +239,27 @@ module.exports = function (program) {
         simulationMode: installMode === INSTALL_MODES.SIMULATION,
       });
 
+      let proceed = !!opts.yes;
+      if (!proceed) {
+        const answer = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'proceed',
+          message: t('reset.prompt.confirm'),
+          default: false
+        }]);
+        proceed = answer.proceed;
+      }
+      if (!proceed) {
+        console.log(chalk.yellow(`\n  ! ${t('reset.cancelled')}`));
+        console.log('');
+        return;
+      }
+
       if (targets.simulate || targets.infra) {
         const spinner = ora(t('reset.stoppingContainers')).start();
         const ownedInfraDir = planSimInfraDir || planInfraDir;
         try {
+          dockerCalls += 1;
           const dockerAudit = await performOwnedDockerCleanup({
             contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
             mode: installMode,
@@ -266,15 +274,28 @@ module.exports = function (program) {
             isCliInstalled: isDockerCliInstalled,
             isDaemonRunning: isDockerDaemonRunning,
             inspectLabels: inspectDockerLabels,
-            composeDown,
+            composeDown: dockerComposeDown,
           });
           mergeAudit(resetAudit, dockerAudit);
+          const externalAudit = await restoreExternalResources(
+            projectDir,
+            resetManifest,
+            installMode,
+            {
+              metadataUpdates: {
+                infra: 'skip',
+                dockerResources: null,
+                composeChecksum: null,
+              },
+            }
+          );
+          mergeAudit(resetAudit, externalAudit);
           infraCompleted = true;
           spinner.succeed(t('reset.dockerRemoved'));
         } catch (error) {
           resetHadIssues = true;
-          resetAudit.failed.push({ resource: 'docker', detail: error.message });
-          spinner.fail(t('reset.error.dockerCleanup', error.message));
+        resetAudit.failed.push({ resource: 'docker', detail: formatError(error) });
+        spinner.fail(t('reset.error.dockerCleanup', formatError(error)));
         }
       }
 
@@ -286,6 +307,7 @@ module.exports = function (program) {
           detail: 'Docker cleanup did not complete; no project-managed state was changed.',
         });
         printAudit(resetAudit);
+        printResetResult(RESET_RESULTS.PARTIAL_FAILURE, installMode, resetAudit, dockerCalls);
         console.log(chalk.yellow(`\n  ! ${t('reset.safeStop')}\n`));
         process.exitCode = 1;
         return;
@@ -303,7 +325,7 @@ module.exports = function (program) {
             spinner.succeed(t('reset.filesRestored'));
           }
         } catch (error) {
-          spinner.fail(t('reset.error.restore', error.message));
+        spinner.fail(t('reset.error.restore', formatError(error)));
           throw error;
         }
       }
@@ -314,8 +336,7 @@ module.exports = function (program) {
         finalManifest.metadata.dockerResources = null;
         finalManifest.metadata.composeChecksum = null;
       }
-      const safeAudit = JSON.parse(JSON.stringify(resetAudit).replace(
-        /((?:password|secret|credential|token)\s*[:=]\s*)[^\s",}]+/gi, '$1[REDACTED]'));
+      const safeAudit = sanitizeAudit(resetAudit);
       finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
       const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
       if (finalManifest.files.length === 0 && !ownsInfrastructure) {
@@ -332,10 +353,15 @@ module.exports = function (program) {
       printAudit(resetAudit);
 
       if (resetHadIssues) {
+        printResetResult(issueResult(resetAudit), installMode, resetAudit, dockerCalls);
         console.log(chalk.yellow(`\n  ! ${t('reset.completedWithIssues')}\n`));
         process.exitCode = 1;
       } else {
+        printResetResult(RESET_RESULTS.SUCCESS, installMode, resetAudit, dockerCalls);
         console.log(chalk.green(`\n  v ${t('reset.success')}\n`));
       }
     });
 };
+
+module.exports.RESET_RESULTS = RESET_RESULTS;
+module.exports.resolveTargets = resolveTargets;

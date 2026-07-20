@@ -18,17 +18,31 @@ const { backupFile } = require('../src/core/injector/common');
 const { buildContext: buildSimulationContext } = require('../src/commands/simulate');
 const {
   INSTALL_MODES,
+  JOURNAL_STATES,
   backupRoot,
   beginInstallTransaction,
   commitInstallTransaction,
   loadManifest,
   manifestPath,
+  prepareDockerMutation,
   prepareExternalFileChange,
+  recordDockerMutationApplied,
   recordChange,
   recordExternalFileChange,
+  recordInstallMetadata,
   rollbackInstallTransaction,
+  restoreExternalResources,
   saveManifest,
 } = require('../src/core/manifest');
+const { buildDockerResourceContract, performOwnedDockerCleanup } = require('../src/core/reset-service');
+const {
+  dockerCompose,
+  dockerComposeDown,
+  dockerTry,
+  inspectDockerLabels,
+  isDockerCliInstalled,
+  isDockerDaemonRunning,
+} = require('../src/core/docker');
 
 async function createSpringFixture(prefix) {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -43,6 +57,29 @@ async function createSpringFixture(prefix) {
   const originalSource = 'package example;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n@SpringBootApplication\npublic class SampleApplication {}\n';
   await fs.outputFile(source, originalSource, 'utf8');
   return { project, build, yml, source, originalBuild, originalYml, originalSource };
+}
+
+async function snapshotDirectory(rootDir) {
+  const snapshot = [];
+  async function visit(currentDir) {
+    const entries = await fs.readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolute = path.join(currentDir, entry.name);
+      const relative = path.relative(rootDir, absolute).split(path.sep).join('/');
+      if (entry.isDirectory()) {
+        snapshot.push({ path: relative + '/', type: 'directory' });
+        await visit(absolute);
+      } else {
+        snapshot.push({
+          path: relative,
+          type: 'file',
+          sha256: crypto.createHash('sha256').update(await fs.readFile(absolute)).digest('hex'),
+        });
+      }
+    }
+  }
+  await visit(rootDir);
+  return snapshot.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 test('Phase 0 release and primary-command contract has one canonical source', () => {
@@ -93,6 +130,149 @@ test('interactive init defaults are value-based and resolve to the safe quick st
   assert.equal(explicit.defaults.autoAnnotate, true);
 });
 
+test('init --simulate without the starter fails with zero project writes', async () => {
+  const fixture = await createSpringFixture('ctxa-phase0-simulation-starter-required-');
+  try {
+    const before = await snapshotDirectory(fixture.project);
+    const result = spawnSync(process.execPath, [
+      cliPath, 'init', '--simulate', '--dir', fixture.project,
+    ], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
+    assert.notEqual(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stderr + result.stdout, /SIMULATION_STARTER_REQUIRED/);
+    assert.match(result.stderr + result.stdout, /contexa init/);
+    assert.deepEqual(await snapshotDirectory(fixture.project), before);
+  } finally {
+    await fs.remove(fixture.project);
+  }
+});
+
+test('init rejects an infra path outside owned roots with zero project and infra writes', async () => {
+  const fixture = await createSpringFixture('ctxa-phase0-infra-boundary-');
+  const outsideInfra = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-outside-infra-'));
+  try {
+    const projectBefore = await snapshotDirectory(fixture.project);
+    const infraBefore = await snapshotDirectory(outsideInfra);
+    const result = spawnSync(process.execPath, [
+      cliPath,
+      'init',
+      '--yes',
+      '--distributed',
+      '--no-docker',
+      '--dir',
+      fixture.project,
+      '--infra-dir',
+      outsideInfra,
+    ], {
+      encoding: 'utf8',
+      timeout: 10000,
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
+    assert.notEqual(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.stderr + result.stdout, /outside Contexa-owned roots/);
+    assert.deepEqual(await snapshotDirectory(fixture.project), projectBefore);
+    assert.deepEqual(await snapshotDirectory(outsideInfra), infraBefore);
+  } finally {
+    await fs.remove(fixture.project);
+    await fs.remove(outsideInfra);
+  }
+});
+
+test('init prints the complete plan before the first filesystem mutation', async () => {
+  const fixture = await createSpringFixture('ctxa-phase0-plan-before-write-');
+  const { Command } = require('commander');
+  const { t } = require('../src/core/i18n');
+  const registerInit = require('../src/commands/init');
+  const mutableMethods = ['ensureDir', 'writeFile', 'outputFile', 'copy', 'rename', 'remove'];
+  const originals = Object.fromEntries(mutableMethods.map(name => [name, fs[name]]));
+  const originalLog = console.log;
+  let planSeen = false;
+  let mutationCount = 0;
+  try {
+    const before = await snapshotDirectory(fixture.project);
+    console.log = (...args) => {
+      if (args.map(String).join(' ').includes(t('planned.title'))) planSeen = true;
+    };
+    for (const name of mutableMethods) {
+      fs[name] = async () => {
+        mutationCount += 1;
+        assert.equal(planSeen, true, `${name} ran before the plan was printed`);
+        throw new Error('INJECTED_FIRST_MUTATION_AFTER_PLAN');
+      };
+    }
+    const program = new Command();
+    program.exitOverride();
+    registerInit(program);
+    await assert.rejects(
+      program.parseAsync([
+        process.execPath,
+        'contexa',
+        'init',
+        '--yes',
+        '--quick',
+        '--dir',
+        fixture.project,
+      ]),
+      /INJECTED_FIRST_MUTATION_AFTER_PLAN/
+    );
+    assert.equal(planSeen, true);
+    assert.equal(mutationCount, 1);
+    for (const [name, implementation] of Object.entries(originals)) fs[name] = implementation;
+    assert.deepEqual(await snapshotDirectory(fixture.project), before);
+  } finally {
+    console.log = originalLog;
+    for (const [name, implementation] of Object.entries(originals)) fs[name] = implementation;
+    await fs.remove(fixture.project);
+  }
+});
+
+test('plain init uses the starter-only plan and is idempotent without hidden flags', async () => {
+  const fixture = await createSpringFixture('ctxa-phase0-plain-init-');
+  try {
+    const originalYml = await fs.readFile(fixture.yml);
+    const originalSource = await fs.readFile(fixture.source);
+    const initial = spawnSync(process.execPath, [cliPath, 'init'], {
+      cwd: fixture.project,
+      encoding: 'utf8',
+      input: '\n',
+      timeout: 10000,
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
+    assert.equal(initial.status, 0, initial.stderr + initial.stdout);
+    assert.match(await fs.readFile(fixture.build, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa/);
+    assert.deepEqual(await fs.readFile(fixture.yml), originalYml);
+    assert.deepEqual(await fs.readFile(fixture.source), originalSource);
+
+    const committed = await snapshotDirectory(fixture.project);
+    const repeated = spawnSync(process.execPath, [cliPath, 'init'], {
+      cwd: fixture.project,
+      encoding: 'utf8',
+      timeout: 10000,
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
+    assert.equal(repeated.status, 0, repeated.stderr + repeated.stdout);
+    assert.match(repeated.stdout, /already/i);
+    assert.deepEqual(await snapshotDirectory(fixture.project), committed);
+
+    const reset = spawnSync(process.execPath, [cliPath, 'reset'], {
+      cwd: fixture.project,
+      encoding: 'utf8',
+      input: 'y\n',
+      timeout: 10000,
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
+    assert.equal(reset.status, 0, reset.stderr + reset.stdout);
+    assert.equal(await fs.readFile(fixture.build, 'utf8'), fixture.originalBuild);
+    assert.deepEqual(await fs.readFile(fixture.yml), originalYml);
+    assert.deepEqual(await fs.readFile(fixture.source), originalSource);
+    assert.equal(await fs.pathExists(manifestPath(fixture.project, INSTALL_MODES.NORMAL)), false);
+  } finally {
+    await fs.remove(fixture.project);
+  }
+});
+
 test('Phase 1 release assets, compatibility and signed-manifest workflow are consistent', () => {
   assert.deepEqual(releaseManifest.assets.map(({ os, arch, file, checksumFile, codeSignature }) => ({
     os, arch, file, checksumFile, codeSignature,
@@ -128,6 +308,27 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /RELEASE_MANIFEST_SIGNING_KEY: \$\{\{ secrets\.RELEASE_MANIFEST_SIGNING_KEY \}\}/);
   assert.match(workflow, /openssl dgst -sha256 -verify release-signing-public\.pem/);
   assert.match(workflow, /prerelease: \$\{\{ contains\(github\.ref_name, '-'\) \}\}/);
+});
+
+test('Phase 0 snapshot channel is derived, signed, and published from the release contract', () => {
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  assert.match(workflow, /schemaVersion: 1/);
+  assert.match(workflow, /channel: release\.channel/);
+  assert.match(workflow, /releaseTag: release\.releaseTag/);
+  assert.match(workflow, /cliVersion: release\.cliVersion/);
+  assert.match(workflow, /starterVersion: release\.starter\.version/);
+  assert.match(workflow, /releaseManifestSha256: crypto\.createHash\('sha256'\)\.update\(releaseBytes\)/);
+  assert.match(workflow, /openssl dgst -sha256 -sign .* channel-manifest\.json/);
+  assert.match(workflow, /openssl dgst -sha256 -verify .* channel-manifest\.json/);
+  assert.match(workflow, /group: contexa-snapshot-channel/);
+  assert.match(workflow, /refs\/heads\/snapshot-channel/);
+  assert.match(workflow, /git mktree/);
+  assert.match(workflow, /commit-tree/);
+  assert.match(workflow, /repository: contexa-security\/install-ctxa/);
+  assert.match(workflow, /CONTEXA_RELEASE_BUNDLE_ROOT: \$\{\{ github\.workspace \}\}/);
+  assert.match(workflow, /CLI release bundle satisfies the installer signature and asset contract/);
+  assert.doesNotMatch(workflow, /printf '%s\\n' \+/);
+  assert.doesNotMatch(workflow, /github-actions \+\s+commit-tree/);
 });
 
 test('CLI version and no-argument first run match the release contract', () => {
@@ -256,6 +457,319 @@ test('an interrupted transaction is recovered before the next transaction starts
   }
 });
 
+test('transaction journal persists every lifecycle state and retains an external original through commit', async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-journal-'));
+  const infra = path.join(project, 'owned-infra');
+  const build = path.join(project, 'build.gradle');
+  const generatedConfig = path.join(project, 'generated.yml');
+  const geo = path.join(project, 'contexa', 'data', 'GeoLite2-City.mmdb');
+  const compose = path.join(infra, 'docker-compose.yml');
+  const originalCompose = Buffer.from('services: {}\r\n', 'utf8');
+  try {
+    await fs.outputFile(build, 'plugins {}\n', 'utf8');
+    await fs.outputFile(compose, originalCompose);
+    const transactionId = await beginInstallTransaction(
+      project,
+      { projectName: 'journal', infraDir: infra },
+      INSTALL_MODES.NORMAL,
+      [
+        { filePath: build, kind: 'build-file', generated: false },
+        { filePath: generatedConfig, kind: 'application-yml', generated: true },
+        { filePath: geo, kind: 'geoip-data', generated: true },
+      ]
+    );
+    const prepared = await loadManifest(project);
+    assert.equal(prepared.transaction.journal.find(entry => entry.category === 'FILE').state, JOURNAL_STATES.PREPARED);
+    assert.equal(prepared.transaction.journal.find(entry => entry.category === 'ARTIFACT').state, JOURNAL_STATES.PREPARED);
+    assert.equal(prepared.transaction.journal.find(entry => entry.category === 'MANIFEST').state, JOURNAL_STATES.PLANNED);
+    assert.match(prepared.transaction.journalDigest, /^[a-f0-9]{64}$/);
+
+    await fs.writeFile(build, 'plugins { id "java" }\n', 'utf8');
+    await recordChange(project, build, { kind: 'build-file' });
+    await fs.writeFile(generatedConfig, 'contexa: {}\n', 'utf8');
+    await recordChange(project, generatedConfig, { kind: 'application-yml', generated: true });
+    await fs.outputFile(geo, 'verified-geoip\n', 'utf8');
+    await recordChange(project, geo, { kind: 'geoip-data', generated: true });
+    await prepareExternalFileChange(project, transactionId, compose, infra);
+    await fs.writeFile(compose, 'services:\n  postgres: {}\n', 'utf8');
+    await recordExternalFileChange(project, transactionId, compose);
+
+    const active = await loadManifest(project);
+    const contract = buildDockerResourceContract('journal', {
+      infra: 'standalone',
+      mode: INSTALL_MODES.NORMAL,
+      installationId: active.metadata.installationId,
+    });
+    await recordInstallMetadata(project, {
+      dockerResources: contract,
+      composeChecksum: crypto.createHash('sha256').update(await fs.readFile(compose)).digest('hex'),
+    });
+    await prepareDockerMutation(project, transactionId, {
+      action: 'REUSE',
+      projectName: 'journal',
+      infraDir: infra,
+      composeChecksum: crypto.createHash('sha256').update(await fs.readFile(compose)).digest('hex'),
+      contract,
+      services: ['postgres'],
+    });
+    await recordDockerMutationApplied(project, transactionId);
+    await commitInstallTransaction(project, transactionId);
+
+    const committed = await loadManifest(project);
+    assert.equal(committed.transaction.status, 'COMMITTED');
+    const plannedActions = new Set(committed.transaction.plan.actions.map(entry => entry.action));
+    for (const action of ['CREATE', 'MODIFY', 'DOWNLOAD', 'DELETE', 'RESTORE', 'REUSE', 'COMMIT']) {
+      assert.ok(plannedActions.has(action), action);
+    }
+    for (const entry of committed.transaction.journal) {
+      const states = entry.history.map(item => item.state);
+      assert.ok(states.includes(JOURNAL_STATES.PLANNED), entry.id);
+      assert.ok(states.includes(JOURNAL_STATES.PREPARED), entry.id);
+      assert.ok(states.includes(JOURNAL_STATES.APPLIED), entry.id);
+      assert.ok(states.includes(JOURNAL_STATES.COMMITTED), entry.id);
+      assert.equal(entry.state, JOURNAL_STATES.COMMITTED);
+    }
+    assert.equal(committed.metadata.externalResources.length, 1);
+
+    await restoreExternalResources(project, committed, INSTALL_MODES.NORMAL, {
+      metadataUpdates: { infra: 'skip', dockerResources: null, composeChecksum: null },
+    });
+    assert.deepEqual(await fs.readFile(compose), originalCompose);
+    assert.deepEqual((await loadManifest(project)).metadata.externalResources, []);
+  } finally {
+    await fs.remove(project);
+  }
+});
+
+test('the next transaction recovers Docker PREPARED and APPLIED crash windows before new writes', async t => {
+  for (const crashState of [JOURNAL_STATES.PREPARED, JOURNAL_STATES.APPLIED]) {
+    await t.test(crashState, async () => {
+      const project = await fs.mkdtemp(path.join(os.tmpdir(), `ctxa-phase0-docker-${crashState.toLowerCase()}-`));
+      const infra = path.join(project, 'owned-infra');
+      const compose = path.join(infra, 'docker-compose.yml');
+      try {
+        const childScript = [
+          "'use strict';",
+          "const crypto = require('node:crypto');",
+          "const fs = require('fs-extra');",
+          "const path = require('node:path');",
+          "const manifest = require(" + JSON.stringify(path.join(root, 'src/core/manifest.js')) + ");",
+          "const reset = require(" + JSON.stringify(path.join(root, 'src/core/reset-service.js')) + ");",
+          "(async () => {",
+          "  const project = process.argv[1];",
+          "  const infra = process.argv[2];",
+          "  const crashState = process.argv[3];",
+          "  const compose = path.join(infra, 'docker-compose.yml');",
+          "  const interruptedId = await manifest.beginInstallTransaction(project,",
+          "    { projectName: 'docker-recovery', infraDir: infra }, manifest.INSTALL_MODES.NORMAL);",
+          "  await manifest.prepareExternalFileChange(project, interruptedId, compose, infra);",
+          "  await fs.outputFile(compose, 'services:\\n  postgres: {}\\n', 'utf8');",
+          "  await manifest.recordExternalFileChange(project, interruptedId, compose);",
+          "  const active = await manifest.loadManifest(project);",
+          "  const contract = reset.buildDockerResourceContract('docker-recovery', {",
+          "    infra: 'standalone', mode: manifest.INSTALL_MODES.NORMAL,",
+          "    installationId: active.metadata.installationId,",
+          "  });",
+          "  const composeChecksum = crypto.createHash('sha256').update(await fs.readFile(compose)).digest('hex');",
+          "  await manifest.recordInstallMetadata(project, { dockerResources: contract, composeChecksum });",
+          "  await manifest.prepareDockerMutation(project, interruptedId, {",
+          "    action: 'START', projectName: 'docker-recovery', infraDir: infra,",
+          "    composeChecksum, contract, services: ['postgres'], removeVolumes: true,",
+          "  });",
+          "  if (crashState === 'APPLIED') {",
+          "    await manifest.recordDockerMutationApplied(project, interruptedId);",
+          "  }",
+          "  process.stdout.write(interruptedId, () => process.exit(91));",
+          "})().catch(error => { console.error(error.stack || error); process.exit(92); });",
+        ].join('\n');
+        const child = spawnSync(
+          process.execPath,
+          ['-e', childScript, project, infra, crashState],
+          { cwd: root, encoding: 'utf8', timeout: 10000 }
+        );
+        assert.equal(child.status, 91, child.stderr + child.stdout);
+        const interruptedId = child.stdout.trim();
+        assert.match(interruptedId, /^[a-f0-9-]{36}$/);
+        const interrupted = await loadManifest(project);
+        const dockerActions = interrupted.transaction.plan.actions
+          .filter(entry => entry.category === 'DOCKER')
+          .map(entry => entry.action);
+        assert.deepEqual(dockerActions, ['START', 'REMOVE']);
+
+        let recovered = 0;
+        const nextId = await beginInstallTransaction(
+          project,
+          { projectName: 'docker-recovery', infraDir: infra },
+          INSTALL_MODES.NORMAL,
+          [],
+          {
+            recoverDocker: async mutation => {
+              recovered += 1;
+              assert.equal(mutation.state, crashState);
+              assert.equal(mutation.contract.projectName, 'docker-recovery');
+              if (await fs.pathExists(compose)) await fs.remove(compose);
+            },
+          }
+        );
+        assert.equal(recovered, 1);
+        assert.notEqual(nextId, interruptedId);
+        assert.equal(await fs.pathExists(compose), false);
+        await rollbackInstallTransaction(project, nextId);
+      } finally {
+        await fs.remove(project);
+      }
+    });
+  }
+});
+
+test('real Docker start followed by process exit is recovered from the persisted exact contract', {
+  skip: process.env.CONTEXA_RUN_REAL_DOCKER !== '1',
+  timeout: 30000,
+}, async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-real-docker-'));
+  const infra = path.join(project, 'owned-infra');
+  const projectName = `ctxa-p0-${crypto.randomBytes(5).toString('hex')}`;
+  const compose = path.join(infra, 'docker-compose.yml');
+  const beforeContainers = String(dockerTry(['ps', '--format', '{{.Names}}'], {
+    encoding: 'utf8', timeout: 5000,
+  }).stdout || '').trim().split(/\r?\n/).filter(Boolean).sort();
+  try {
+    assert.equal(isDockerCliInstalled(), true);
+    assert.equal(isDockerDaemonRunning(), true);
+    const childScript = [
+      "'use strict';",
+      "const fs = require('fs-extra');",
+      "const path = require('node:path');",
+      "const yaml = require('js-yaml');",
+      "const manifest = require(" + JSON.stringify(path.join(root, 'src/core/manifest.js')) + ");",
+      "const reset = require(" + JSON.stringify(path.join(root, 'src/core/reset-service.js')) + ");",
+      "const docker = require(" + JSON.stringify(path.join(root, 'src/core/docker.js')) + ");",
+      "(async () => {",
+      "  const project = process.argv[1];",
+      "  const infra = process.argv[2];",
+      "  const projectName = process.argv[3];",
+      "  const compose = path.join(infra, 'docker-compose.yml');",
+      "  const id = await manifest.beginInstallTransaction(project,",
+      "    { projectName, infraDir: infra }, manifest.INSTALL_MODES.NORMAL);",
+      "  const active = await manifest.loadManifest(project);",
+      "  const installationId = active.metadata.installationId;",
+      "  const labels = {",
+      "    'io.ctxa.owner': 'contexa-cli',",
+      "    'io.ctxa.mode': 'normal',",
+      "    'io.ctxa.installation-id': installationId,",
+      "  };",
+      "  const model = {",
+      "    services: { postgres: {",
+      "      image: 'pgvector/pgvector:pg16',",
+      "      container_name: projectName + '-postgres',",
+      "      environment: { POSTGRES_PASSWORD: 'ctxa-test-only' },",
+      "      labels,",
+      "      volumes: ['pgdata:/var/lib/postgresql/data'],",
+      "    } },",
+      "    volumes: { pgdata: { name: projectName + '_pgdata', labels } },",
+      "    networks: { default: { name: projectName + '_default', labels } },",
+      "  };",
+      "  await manifest.prepareExternalFileChange(project, id, compose, infra);",
+      "  await fs.outputFile(compose, yaml.dump(model, { noRefs: true }), 'utf8');",
+      "  await manifest.recordExternalFileChange(project, id, compose);",
+      "  const contract = reset.buildDockerResourceContract(projectName, {",
+      "    infra: 'standalone', mode: manifest.INSTALL_MODES.NORMAL, installationId,",
+      "  });",
+      "  const composeChecksum = manifest.sha256FileSync(compose);",
+      "  await manifest.recordInstallMetadata(project, { dockerResources: contract, composeChecksum });",
+      "  await manifest.prepareDockerMutation(project, id, {",
+      "    action: 'START', projectName, infraDir: infra, composeChecksum, contract,",
+      "    services: ['postgres'], removeVolumes: true,",
+      "  });",
+      "  const started = docker.dockerCompose(['-p', projectName, 'up', '-d', 'postgres'], {",
+      "    cwd: infra, stdio: 'pipe', timeout: 15000,",
+      "  });",
+      "  if (started.error || started.status !== 0) {",
+      "    throw started.error || new Error(String(started.stderr || started.stdout));",
+      "  }",
+      "  process.stdout.write(JSON.stringify({ id, installationId }), () => process.exit(91));",
+      "})().catch(error => { console.error(error.stack || error); process.exit(92); });",
+    ].join('\n');
+    const child = spawnSync(
+      process.execPath,
+      ['-e', childScript, project, infra, projectName],
+      { cwd: root, encoding: 'utf8', timeout: 25000 }
+    );
+    assert.equal(child.status, 91, child.stderr + child.stdout);
+    const interrupted = JSON.parse(child.stdout);
+    const persisted = await loadManifest(project);
+    assert.equal(persisted.transaction.id, interrupted.id);
+    assert.equal(persisted.transaction.dockerMutation.state, JOURNAL_STATES.PREPARED);
+    assert.equal(inspectDockerLabels('container', `${projectName}-postgres`)['io.ctxa.installation-id'],
+      interrupted.installationId);
+
+    const nextId = await beginInstallTransaction(
+      project,
+      { projectName, infraDir: infra },
+      INSTALL_MODES.NORMAL,
+      [],
+      {
+        recoverDocker: mutation => performOwnedDockerCleanup({
+          contract: mutation.contract,
+          mode: mutation.contract.mode,
+          installationId: mutation.contract.installationId,
+          projectName: mutation.projectName,
+          infraDir: mutation.infraDir,
+          composeChecksum: mutation.composeChecksum,
+          env: { ...process.env, CONTEXA_PROJECT: mutation.projectName },
+        }, {
+          isCliInstalled: isDockerCliInstalled,
+          isDaemonRunning: isDockerDaemonRunning,
+          inspectLabels: inspectDockerLabels,
+          composeDown: (name, dir, env) => dockerComposeDown(name, dir, env, { removeVolumes: true }),
+        }),
+      }
+    );
+    assert.equal(inspectDockerLabels('container', `${projectName}-postgres`), null);
+    assert.equal(inspectDockerLabels('volume', `${projectName}_pgdata`), null);
+    assert.equal(inspectDockerLabels('network', `${projectName}_default`), null);
+    await rollbackInstallTransaction(project, nextId);
+
+    const afterContainers = String(dockerTry(['ps', '--format', '{{.Names}}'], {
+      encoding: 'utf8', timeout: 5000,
+    }).stdout || '').trim().split(/\r?\n/).filter(Boolean).sort();
+    assert.deepEqual(afterContainers, beforeContainers);
+  } finally {
+    if (await fs.pathExists(compose)) {
+      dockerCompose(['-p', projectName, 'down', '-v', '--timeout', '0'], {
+        cwd: infra, stdio: 'pipe', timeout: 10000,
+      });
+    }
+    dockerTry(['rm', '-f', `${projectName}-postgres`], { stdio: 'pipe', timeout: 5000 });
+    dockerTry(['volume', 'rm', `${projectName}_pgdata`], { stdio: 'pipe', timeout: 5000 });
+    dockerTry(['network', 'rm', `${projectName}_default`], { stdio: 'pipe', timeout: 5000 });
+    await fs.remove(project);
+  }
+});
+
+test('transaction journal tampering is rejected without rewriting recovery state', async () => {
+  const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-journal-tamper-'));
+  try {
+    const build = path.join(project, 'build.gradle');
+    await fs.writeFile(build, 'plugins {}\n', 'utf8');
+    await beginInstallTransaction(
+      project,
+      { projectName: 'journal-tamper' },
+      INSTALL_MODES.NORMAL,
+      [{ filePath: build, kind: 'build-file' }]
+    );
+    const target = manifestPath(project);
+    const tampered = await fs.readJson(target);
+    tampered.transaction.journal[0].state = JOURNAL_STATES.COMMITTED;
+    await fs.writeJson(target, tampered, { spaces: 2 });
+    const exactTamperedBytes = await fs.readFile(target);
+    await assert.rejects(loadManifest(project), /transaction journal digest mismatch/);
+    assert.deepEqual(await fs.readFile(target), exactTamperedBytes);
+  } finally {
+    await fs.remove(project);
+  }
+});
+
 test('transaction rollback restores build, overlay, Java, GeoIP, manifest, and compose stages', async t => {
   const stages = ['overlay', 'java', 'build', 'geoip', 'manifest', 'compose'];
   for (const stage of stages) {
@@ -359,6 +873,7 @@ test('rollback failure is explicit and preserves recovery metadata', async () =>
     assert.equal(manifest.transaction.status, 'ROLLBACK_FAILED');
     assert.ok(manifest.transaction.rollbackErrors.length > 0);
     assert.ok(manifest.files.length > 0);
+    assert.ok(manifest.transaction.journal.every(entry => entry.state === JOURNAL_STATES.ROLLBACK_FAILED));
   } finally {
     await fs.remove(project);
   }
@@ -638,11 +1153,16 @@ test('normal and simulation command states coexist and reset independently', {
     : 'Phase 4 requires the approved GeoIP artifact through CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
 }, async () => {
   const { project, build, yml, originalBuild, originalYml } = await createSpringFixture('ctxa-phase0-coexist-');
-  const infraDir = path.join(os.tmpdir(), 'ctxa-phase0-sim-infra-' + path.basename(project));
+  const infraHome = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase0-sim-home-'));
+  const infraDir = process.platform === 'win32'
+    ? path.join(infraHome, 'Contexa', 'ctxa-sim')
+    : path.join(infraHome, 'contexa', 'ctxa-sim');
   const geoSource = path.resolve(process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH);
   const childEnv = {
     ...process.env,
     PATH: path.dirname(process.execPath),
+    LOCALAPPDATA: infraHome,
+    XDG_CONFIG_HOME: infraHome,
     CONTEXA_GEOLITE2_SOURCE_PATH: geoSource,
   };
   try {
@@ -652,9 +1172,9 @@ test('normal and simulation command states coexist and reset independently', {
     const normalYml = await fs.readFile(yml);
     const normalManifestBytes = await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL));
 
-    const simulationInit = spawnSync(process.execPath, [
-      cliPath, 'init', '--simulate', '--no-docker', '--yes', '--dir', project, '--infra-dir', infraDir,
-    ], { encoding: 'utf8', env: childEnv });
+    const simulationInit = spawnSync(process.execPath, [cliPath, 'init', '--simulate'], {
+      cwd: project, encoding: 'utf8', env: childEnv, timeout: 10000,
+    });
     assert.equal(simulationInit.status, 0, simulationInit.stderr + simulationInit.stdout);
     assert.match(simulationInit.stdout, /COPY: GeoLite2-City\.mmdb/);
     assert.match(simulationInit.stdout, /DOCKER: SKIP service start/);
@@ -720,21 +1240,20 @@ test('normal and simulation command states coexist and reset independently', {
     assert.match(combinedStatus.stdout, /Normal installation: COMMITTED/);
     assert.match(combinedStatus.stdout, /Simulation installation: COMMITTED/);
 
-    const simulationReset = spawnSync(process.execPath, [
-      cliPath, 'reset', '--simulate', '--yes', '--dir', project, '--infra-dir', infraDir,
-    ], { encoding: 'utf8', env: childEnv });
-    assert.notEqual(simulationReset.status, 0, simulationReset.stderr + simulationReset.stdout);
-    assert.match(simulationReset.stdout + simulationReset.stderr, /Docker CLI is unavailable/);
+    const simulationReset = spawnSync(process.execPath, [cliPath, 'reset', '--simulate'], {
+      cwd: project, encoding: 'utf8', env: childEnv, input: 'y\n', timeout: 10000,
+    });
+    assert.equal(simulationReset.status, 0, simulationReset.stderr + simulationReset.stdout);
     assert.deepEqual(await fs.readFile(build), normalBuild);
     assert.deepEqual(await fs.readFile(yml), normalYml);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.NORMAL)), true);
-    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), true);
-    assert.equal(await fs.pathExists(overlayPath), true);
-    assert.equal(await fs.pathExists(configurationPath), true);
-    assert.equal(await fs.pathExists(simulationGeoIp), true);
+    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), false);
+    assert.equal(await fs.pathExists(overlayPath), false);
+    assert.equal(await fs.pathExists(configurationPath), false);
+    assert.equal(await fs.pathExists(simulationGeoIp), false);
     const afterSimulationResetStatus = spawnSync(process.execPath, [cliPath, 'status', '--dir', project], { encoding: 'utf8', env: childEnv });
     assert.match(afterSimulationResetStatus.stdout, /Normal installation: COMMITTED/);
-    assert.match(afterSimulationResetStatus.stdout, /Simulation installation: COMMITTED/);
+    assert.match(afterSimulationResetStatus.stdout, /Simulation installation: ABSENT/);
 
     const normalReset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8', env: childEnv });
     assert.equal(normalReset.status, 0, normalReset.stderr + normalReset.stdout);
@@ -742,6 +1261,6 @@ test('normal and simulation command states coexist and reset independently', {
     assert.equal(await fs.readFile(yml, 'utf8'), originalYml);
   } finally {
     await fs.remove(project);
-    await fs.remove(infraDir);
+    await fs.remove(infraHome);
   }
 });

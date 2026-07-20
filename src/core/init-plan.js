@@ -5,6 +5,10 @@ const os = require('os');
 const path = require('path');
 const { t } = require('./i18n');
 
+const HOST_IAM_CONTRACT = 'HOST_OWNED_UNCHANGED';
+const BRIDGE_CONTRACT = 'HOST_PRINCIPAL_INPUT_ONLY';
+const FULL_MODE_CONTRACT = 'CONTEXA_POLICY_ENFORCEMENT_ONLY';
+
 function normalizePath(input, baseDir) {
   if (!input) return null;
   let normalized = String(input).trim();
@@ -20,6 +24,33 @@ function normalizePath(input, baseDir) {
 
 function aiProviderSelected(answers) {
   return Array.isArray(answers.llmProviders) && answers.llmProviders.length > 0;
+}
+
+function activationResult(answers, project, state = {}) {
+  const requested = !!answers.enableAiSecurity;
+  const providers = Array.isArray(answers.llmProviders)
+    ? [...answers.llmProviders] : [];
+  const annotationActive = !!(
+    answers.simulate || project.hasEnableAiSecurity || state.aiAnnotationApplied);
+  const dependenciesReady = !!state.aiDependenciesProcessed;
+  const enabled = requested && providers.length > 0
+    && annotationActive && dependenciesReady;
+  return {
+    requested,
+    enabled,
+    status: !requested ? 'DISABLED'
+      : !annotationActive ? 'PENDING_ANNOTATION'
+        : !dependenciesReady ? 'PENDING_DEPENDENCIES'
+          : 'ACTIVE',
+    securityMode: String(answers.securityMode || 'sandbox').toUpperCase(),
+    runtimeMode: String(answers.mode || 'shadow').toUpperCase(),
+    providers,
+    annotationActive,
+    dependenciesReady,
+    hostIamContract: HOST_IAM_CONTRACT,
+    bridgeContract: BRIDGE_CONTRACT,
+    fullModeContract: FULL_MODE_CONTRACT,
+  };
 }
 
 function trackedFileState(manifest, projectDir, filePath) {
@@ -54,7 +85,7 @@ function printPlannedChanges(answers, project, paths) {
       items.push(t('planned.pathAction', paths.buildExists ? 'MODIFY' : 'CREATE',
         t('planned.addStarter'), paths.buildPath));
     }
-    if (paths.writeHostConfig) {
+    if (paths.writeOverlay) {
       if (!answers.simulate) {
         items.push(`${paths.ymlExists ? 'MODIFY' : 'CREATE'}: ${t('planned.applyMinimal')}: ${paths.ymlPath}`);
       }
@@ -93,6 +124,10 @@ function printPlannedChanges(answers, project, paths) {
 }
 
 module.exports = {
+  HOST_IAM_CONTRACT,
+  BRIDGE_CONTRACT,
+  FULL_MODE_CONTRACT,
+  activationResult,
   aiProviderSelected,
   normalizePath,
   printPlannedChanges,

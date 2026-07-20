@@ -19,17 +19,139 @@ const yaml = require('js-yaml');
 
 const {
   generateDockerCompose,
-  injectGradleDep, injectStandalone,
+  injectGradleDep, injectStandalone, injectYml, normalOverlayPath,
   findTopLevelDependenciesInsertIndex, insertIntoTopLevelDependencies,
 } = require('../src/core/injector');
 const { containerName, resolveProjectName } = require('../src/core/project');
-const { normalizePath } = require('../src/core/init-plan');
+const {
+  normalizePath,
+  activationResult,
+  HOST_IAM_CONTRACT,
+  BRIDGE_CONTRACT,
+  FULL_MODE_CONTRACT,
+} = require('../src/core/init-plan');
+const { collectInitAnswers } = require('../src/core/init-input');
 const { detectSpringProject } = require('../src/core/detector');
 const { SIMULATION_PROJECT, simulationEnvironment } = require('../src/core/simulation');
 
 async function tempDir(prefix = 'ctxa-claim0-') {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
+
+test('explicit AI activation without a provider fails before any mutation plan is created', async () => {
+  const project = {
+    hasEnableAiSecurity: false,
+    hasHostSecurityFilterChain: true,
+    hasDocker: false,
+  };
+  await assert.rejects(
+    collectInitAnswers({
+      yes: true,
+      enableAiSecurity: true,
+      autoAnnotate: false,
+      includeOllama: false,
+      simulate: false,
+      distributed: false,
+      docker: false,
+      dir: process.cwd(),
+    }, project, 'fail-closed'),
+    error => error && error.code === 'AI_SECURITY_PROVIDER_REQUIRED'
+  );
+});
+
+test('explicit AI activation records the selected provider and requested security mode', async () => {
+  const answers = await collectInitAnswers({
+    yes: true,
+    enableAiSecurity: true,
+    provider: 'ollama',
+    securityMode: 'full',
+    autoAnnotate: false,
+    includeOllama: false,
+    simulate: false,
+    distributed: false,
+    docker: false,
+    dir: process.cwd(),
+  }, {
+    hasEnableAiSecurity: false,
+    hasHostSecurityFilterChain: true,
+    hasDocker: false,
+  }, 'explicit-activation');
+  assert.equal(answers.enableAiSecurity, true);
+  assert.deepEqual(answers.llmProviders, ['ollama']);
+  assert.equal(answers.securityMode, 'full');
+  assert.equal(answers.hostSecurityFilterChain, true);
+});
+
+test('activation result keeps FULL scoped to Contexa policy and host IAM unchanged', () => {
+  const active = activationResult({
+    enableAiSecurity: true,
+    llmProviders: ['ollama'],
+    securityMode: 'full',
+    mode: 'enforce',
+    simulate: false,
+  }, {
+    hasEnableAiSecurity: true,
+  }, {
+    aiAnnotationApplied: true,
+    aiDependenciesProcessed: true,
+  });
+  assert.equal(active.enabled, true);
+  assert.equal(active.status, 'ACTIVE');
+  assert.equal(active.securityMode, 'FULL');
+  assert.equal(active.hostIamContract, HOST_IAM_CONTRACT);
+  assert.equal(active.bridgeContract, BRIDGE_CONTRACT);
+  assert.equal(active.fullModeContract, FULL_MODE_CONTRACT);
+
+  const pending = activationResult({
+    enableAiSecurity: true,
+    llmProviders: ['ollama'],
+    securityMode: 'sandbox',
+    mode: 'shadow',
+    simulate: false,
+  }, {
+    hasEnableAiSecurity: false,
+  }, {
+    aiAnnotationApplied: false,
+    aiDependenciesProcessed: true,
+  });
+  assert.equal(pending.enabled, false);
+  assert.equal(pending.status, 'PENDING_ANNOTATION');
+});
+
+test('normal explicit activation writes only the Contexa-owned overlay', async () => {
+  const root = await tempDir('ctxa-normal-overlay-');
+  const resources = path.join(root, 'src/main/resources');
+  const hostFiles = new Map([
+    [path.join(resources, 'application.yml'), '# host yaml\nshared: &base\n  value: "keep"\n---\nserver:\n  port: 8080\n'],
+    [path.join(resources, 'application.yaml'), 'host:\n  yaml: unchanged\n'],
+    [path.join(resources, 'application.properties'), 'host.property=unchanged\\:value\n'],
+    [path.join(resources, 'application-prod.yml'), 'host:\n  profile: prod\n'],
+  ]);
+  try {
+    for (const [file, content] of hostFiles) await fs.outputFile(file, content, 'utf8');
+    const before = new Map();
+    for (const [file] of hostFiles) before.set(file, await fs.readFile(file));
+
+    const overlay = normalOverlayPath(root);
+    await injectYml(overlay, {
+      enableAiSecurity: true,
+      llmProviders: ['ollama'],
+      securityMode: 'sandbox',
+      mode: 'enforce',
+      infra: 'standalone',
+    });
+
+    assert.equal(path.basename(overlay), 'application-contexa.yml');
+    assert.equal(await fs.pathExists(overlay), true);
+    for (const [file] of hostFiles) assert.deepEqual(await fs.readFile(file), before.get(file));
+    const parsed = yaml.load(await fs.readFile(overlay, 'utf8'));
+    assert.equal(parsed.server.port, '${CONTEXA_SERVER_PORT:9080}');
+    assert.equal(parsed.contexa.security.zerotrust.mode, 'ENFORCE');
+    assert.equal(parsed.contexa.llm.selection.chat.priority, 'ollama');
+  } finally {
+    await fs.remove(root);
+  }
+});
 
 // =====================================================================
 // S1 + S2 - generateDockerCompose must operate only on the contexa-owned infra
@@ -390,6 +512,8 @@ test('A1: simulate.js targets ctxa-sim regardless of CONTEXA_PROJECT', () => {
     REDIS_HOST: 'production-redis',
     KAFKA_BOOTSTRAP_SERVERS: 'production-kafka:9092',
     OLLAMA_BASE_URL: 'http://production-ollama:11434',
+    CONTEXA_OLLAMA_IMAGE_TAG: 'latest',
+    CONTEXA_REDIS_IMAGE_TAG: 'foreign',
   }, 'test-installation');
   assert.equal(SIMULATION_PROJECT, 'ctxa-sim');
   assert.equal(env.CONTEXA_PROJECT, 'ctxa-sim');
@@ -398,6 +522,10 @@ test('A1: simulate.js targets ctxa-sim regardless of CONTEXA_PROJECT', () => {
   assert.equal(env.REDIS_HOST, '127.0.0.1');
   assert.equal(env.KAFKA_BOOTSTRAP_SERVERS, '127.0.0.1:29092');
   assert.equal(env.OLLAMA_BASE_URL, 'http://127.0.0.1:31434');
+  assert.equal(env.CONTEXA_OLLAMA_IMAGE_TAG, '0.18.2');
+  assert.equal(env.CONTEXA_REDIS_IMAGE_TAG, '7.2-alpine');
+  assert.equal(env.CONTEXA_KAFKA_PLATFORM_VERSION, '7.4.0');
+  assert.equal(env.CONTEXA_PGVECTOR_IMAGE_TAG, 'pg16');
   assert.equal(simSrc.includes('resolveProjectName'), false,
     'simulate.js must not depend on CONTEXA_PROJECT via resolveProjectName()');
   assert.match(simSrc, /loadManifest\(projectDir, INSTALL_MODES\.SIMULATION\)/,
@@ -435,13 +563,13 @@ test('A2b: reset flows restore project files and keep infra cleanup scoped', () 
     'cleanup must verify ownership labels for every exact resource');
   assert.match(resetSrc, /if \(opts\.simulate\) \{\s*targets\.code = true;\s*\}/,
     'reset --simulate must restore project files as part of the simulation reset flow');
-  assert.match(resetSrc, /targets\.infra = hasOwnedManifest && resetManifest\.metadata\.infra/,
+  assert.match(resetSrc, /targets\.infra\s*=\s*hasOwnedManifest[\s\S]{0,120}resetManifest\.metadata\.infra/,
     'plain reset must target infrastructure only when the normal ownership manifest records it');
   assert.match(resetSrc, /if \(targets\.code\)/,
     'project file restore must still be guarded by the resolved code target');
   assert.match(resetSrc, /function printResetPlan\(/,
     'reset must print the resolved reset scope before taking action');
-  assert.match(resetSrc, /Production\/project Docker stack is not targeted by --simulate/,
+  assert.match(resetSrc, /t\('reset\.plan\.productionPreserved'\)/,
     'reset --simulate must explicitly state that the production/project stack is not targeted');
 });
 

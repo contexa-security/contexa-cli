@@ -70,6 +70,42 @@ function isDockerDaemonRunning(timeoutMs = TIMEOUTS.dockerInspectMs) {
   return !r.error && r.status === 0;
 }
 
+function inspectDockerLabels(type, name) {
+  const args = type === 'container'
+    ? ['inspect', '--type', 'container', '--format', '{{json .Config.Labels}}', name]
+    : [type, 'inspect', '--format', '{{json .Labels}}', name];
+  const result = dockerTry(args, { stdio: 'pipe', timeout: TIMEOUTS.dockerInspectMs });
+  if (result.error || result.status !== 0) return null;
+  try {
+    return JSON.parse(result.stdout.toString().trim() || '{}') || {};
+  } catch {
+    const error = new Error(`Docker labels are unreadable: ${type} ${name}`);
+    error.code = 'DOCKER_LABELS_UNREADABLE';
+    throw error;
+  }
+}
+
+async function dockerComposeDown(projectName, infraDir, env, options = {}) {
+  const removeVolumes = options.removeVolumes !== false;
+  const args = ['-p', projectName, 'down'];
+  if (removeVolumes) args.push('-v');
+  args.push('--timeout', '0');
+  const result = dockerCompose(args, {
+    cwd: infraDir,
+    stdio: 'pipe',
+    env,
+    timeout: TIMEOUTS.dockerComposeRollbackMs,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const stderr = result.stderr ? result.stderr.toString().trim() : 'Unknown error';
+    const error = new Error(`docker compose down failed for ${projectName}: ${stderr}`);
+    error.code = 'DOCKER_COMPOSE_DOWN_FAILED';
+    throw error;
+  }
+  return { skipped: false };
+}
+
 module.exports = {
   dockerSync,
   dockerTry,
@@ -77,4 +113,6 @@ module.exports = {
   DEFAULT_DOCKER_TIMEOUT_MS,
   isDockerCliInstalled,
   isDockerDaemonRunning,
+  inspectDockerLabels,
+  dockerComposeDown,
 };

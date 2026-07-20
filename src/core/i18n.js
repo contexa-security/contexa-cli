@@ -49,4 +49,21 @@ function t(key, ...args) {
   return args.reduce((acc, arg, i) => acc.split(`{${i}}`).join(String(arg)), value);
 }
 
-module.exports = { detectLocale, setLocale, getLocale, t, SUPPORTED, DEFAULT_LOCALE };
+function formatError(error, fallbackCode = 'UNEXPECTED_ERROR') {
+  const code = error && error.code ? String(error.code) : fallbackCode;
+  if (error && error.messageKey) {
+    const args = Array.isArray(error.messageArgs) ? error.messageArgs : [];
+    return `${code} ${t(error.messageKey, ...args)}`;
+  }
+  return `${code} ${t('common.unexpectedError')}`;
+}
+
+module.exports = {
+  detectLocale,
+  setLocale,
+  getLocale,
+  t,
+  formatError,
+  SUPPORTED,
+  DEFAULT_LOCALE,
+};

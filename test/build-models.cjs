@@ -8,7 +8,9 @@ const path = require('path');
 const { injectMavenDep, injectGradleDep } = require('../src/core/injector/build');
 
 function run(command, args, cwd, timeout = 120000) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8', timeout, shell: false });
+  const shell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
+  const executable = shell ? `"${command}"` : command;
+  const result = spawnSync(executable, args, { cwd, encoding: 'utf8', timeout, shell });
   if (result.error) throw result.error;
   assert.equal(result.signal, null, `${command} timed out in ${cwd}`);
   assert.equal(result.status, 0, `${command} failed in ${cwd}\n${result.stdout}\n${result.stderr}`);
@@ -41,10 +43,19 @@ async function verifyMavenFixtures(root, evidence) {
     const directory = path.join(root, `maven-${name}`);
     const pomPath = path.join(directory, 'pom.xml');
     await fs.outputFile(pomPath, pom, 'utf8');
+    await writeJavaSource(directory);
     assert.equal(await injectMavenDep(pomPath), true);
     assert.equal(starterCount(await fs.readFile(pomPath, 'utf8')), 1);
     const output = path.join(directory, 'effective-pom.xml');
-    const log = run('mvn', ['-q', '-f', pomPath, 'help:effective-pom', `-Doutput=${output}`], directory);
+    const command = process.env.MAVEN_CMD || 'mvn';
+    const log = run(command, [
+      '-q',
+      '-f', pomPath,
+      '-DskipTests',
+      'compile',
+      'help:effective-pom',
+      `-Doutput=${output}`,
+    ], directory);
     assert.ok((await fs.readFile(output, 'utf8')).includes('<artifactId>spring-boot-starter-contexa</artifactId>'));
     await fs.writeFile(path.join(evidence, `maven-${name}.log`), log, 'utf8');
   }

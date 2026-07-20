@@ -3,7 +3,8 @@
 const chalk = require('chalk');
 const fs = require('fs-extra');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const http = require('http');
+const { spawn, execFileSync } = require('child_process');
 const { dockerCompose: dockerComposeExec } = require('../core/docker');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
@@ -21,6 +22,8 @@ const {
 function simulationError(code, key, ...args) {
   const error = new Error(`${code} ${t(key, ...args)}`);
   error.code = code;
+  error.messageKey = key;
+  error.messageArgs = args;
   return error;
 }
 
@@ -92,7 +95,7 @@ async function buildContext(opts = {}) {
   };
 }
 
-function executeBuild(project, env) {
+function buildLaunchSpec(project) {
   let command;
   let args;
   let cwd = project.projectDir;
@@ -133,10 +136,123 @@ function executeBuild(project, env) {
   } else {
     throw simulationError('SIMULATION_BUILD_UNSUPPORTED', 'simulate.error.build');
   }
-  const result = spawnSync(command, args, { cwd, env, stdio: 'inherit', shell: false });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw simulationError('SIMULATION_APPLICATION_FAILED', 'simulate.error.application', result.status);
+  return { command, args, cwd };
+}
+
+function probeApplication(port = 9080, timeoutMs = TIMEOUTS.httpHealthProbeMs) {
+  return new Promise(resolve => {
+    const request = http.get({
+      hostname: '127.0.0.1',
+      port,
+      path: '/',
+      timeout: timeoutMs,
+    }, response => {
+      response.resume();
+      resolve(true);
+    });
+    request.once('timeout', () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.once('error', () => resolve(false));
+  });
+}
+
+function stopOwnedChild(child, signal = 'SIGTERM', platform = process.platform) {
+  if (!child || !child.pid || child.exitCode !== null || child.killed) return false;
+  if (platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch (error) {
+      if (child.exitCode === null) child.kill(signal);
+    }
+  } else {
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      if (child.exitCode === null) child.kill(signal);
+    }
+  }
+  return true;
+}
+
+async function executeBuild(project, env, options = {}) {
+  const spec = buildLaunchSpec(project);
+  const launch = options.spawn || spawn;
+  const probe = options.probe || probeApplication;
+  const delay = options.delay || (milliseconds =>
+    new Promise(resolve => setTimeout(resolve, milliseconds)));
+  const now = options.now || Date.now;
+  const readyTimeoutMs = options.readyTimeoutMs === undefined
+    ? TIMEOUTS.simulationApplicationReadyMs : Number(options.readyTimeoutMs);
+  const pollMs = options.pollMs === undefined
+    ? TIMEOUTS.simulationApplicationPollMs : Number(options.pollMs);
+  if (!Number.isFinite(readyTimeoutMs) || readyTimeoutMs <= 0
+      || !Number.isFinite(pollMs) || pollMs < 0) {
+    throw new Error('Simulation application readiness timeout and poll interval must be bounded.');
+  }
+
+  const child = launch(spec.command, spec.args, {
+    cwd: spec.cwd,
+    env,
+    stdio: 'inherit',
+    shell: false,
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+  });
+  let interruptedSignal = null;
+  const terminate = signal => {
+    interruptedSignal = signal;
+    (options.stopChild || stopOwnedChild)(child, 'SIGTERM');
+  };
+  const onSigint = () => terminate('SIGINT');
+  const onSigterm = () => terminate('SIGTERM');
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  const deadline = now() + readyTimeoutMs;
+  let ready = false;
+  try {
+    while (!ready && now() < deadline) {
+      const outcome = await Promise.race([
+        exited.then(exit => ({ exit })),
+        Promise.resolve(probe(9080, TIMEOUTS.httpHealthProbeMs))
+          .then(value => ({ ready: value === true })),
+      ]);
+      if (outcome.exit) {
+        throw simulationError('SIMULATION_APPLICATION_FAILED',
+          'simulate.error.application', outcome.exit.code ?? outcome.exit.signal ?? 'unknown');
+      }
+      ready = outcome.ready;
+      if (!ready && now() < deadline) {
+        await delay(Math.min(pollMs, Math.max(0, deadline - now())));
+      }
+    }
+    if (!ready) {
+      (options.stopChild || stopOwnedChild)(child, 'SIGTERM');
+      throw simulationError('SIMULATION_APPLICATION_READY_TIMEOUT',
+        'simulate.error.applicationReady', readyTimeoutMs);
+    }
+    console.log(chalk.green(`  v ${t('simulate.run.ready', 9080)}`));
+    const result = await exited;
+    if (interruptedSignal) {
+      throw simulationError('SIMULATION_APPLICATION_INTERRUPTED',
+        'simulate.error.applicationInterrupted', interruptedSignal);
+    }
+    if (result.code !== 0) {
+      throw simulationError('SIMULATION_APPLICATION_FAILED',
+        'simulate.error.application', result.code ?? result.signal ?? 'unknown');
+    }
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
   }
 }
 
@@ -197,9 +313,13 @@ module.exports = function registerSimulationCommands(program) {
         throw simulationError('SIMULATION_PROJECT_INVALID', 'simulate.error.project');
       }
       verifySimulationInfrastructure(context.installationId, context.includeOllama);
-      executeBuild(project, simulationEnvironment(context.env, context.installationId, true));
+      await executeBuild(project,
+        simulationEnvironment(context.env, context.installationId, true));
     });
 };
 
 module.exports.buildContext = buildContext;
 module.exports.executeCompose = dockerCompose;
+module.exports.buildLaunchSpec = buildLaunchSpec;
+module.exports.executeBuild = executeBuild;
+module.exports.stopOwnedChild = stopOwnedChild;

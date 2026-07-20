@@ -3,7 +3,7 @@
 
 const { program, Option } = require('commander');
 const chalk = require('chalk');
-const { detectLocale, setLocale, t } = require('./core/i18n');
+const { detectLocale, setLocale, t, formatError } = require('./core/i18n');
 const releaseManifest = require('../release-manifest.json');
 
 const argv = process.argv.slice(2);
@@ -53,6 +53,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(chalk.red('  x ' + (error && error.message ? error.message : error)));
+  console.error(chalk.red('  x ' + formatError(error)));
   process.exitCode = 1;
 });

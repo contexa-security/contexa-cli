@@ -14,11 +14,104 @@ const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
 const yaml = require('js-yaml');
+const { EventEmitter } = require('events');
 
 const { detectSpringProject } = require('../src/core/detector');
 const {
   injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps,
 } = require('../src/core/injector');
+const { executeBuild } = require('../src/commands/simulate');
+
+function fakeBuildChild(pid = 41001) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.exitCode = null;
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+    return true;
+  };
+  return child;
+}
+
+function gradleLaunchProject(projectDir) {
+  return {
+    buildTool: 'gradle',
+    projectDir,
+    gradleRootDir: projectDir,
+  };
+}
+
+test('simulate run stops only its owned child when 9080 readiness times out', async () => {
+  const child = fakeBuildChild();
+  let now = 0;
+  const stopped = [];
+  await assert.rejects(executeBuild(gradleLaunchProject(process.cwd()), {}, {
+    spawn: () => child,
+    probe: async () => false,
+    now: () => now,
+    delay: async milliseconds => { now += milliseconds || 1; },
+    readyTimeoutMs: 10,
+    pollMs: 2,
+    stopChild: owned => stopped.push(owned.pid),
+  }), error => error && error.code === 'SIMULATION_APPLICATION_READY_TIMEOUT');
+  assert.deepEqual(stopped, [child.pid]);
+});
+
+test('simulate run propagates build failure before readiness', async () => {
+  const child = fakeBuildChild();
+  const execution = executeBuild(gradleLaunchProject(process.cwd()), {}, {
+    spawn: () => {
+      queueMicrotask(() => {
+        child.exitCode = 7;
+        child.emit('exit', 7, null);
+      });
+      return child;
+    },
+    probe: () => new Promise(() => {}),
+    readyTimeoutMs: 10,
+  });
+  await assert.rejects(execution,
+    error => error && error.code === 'SIMULATION_APPLICATION_FAILED');
+});
+
+test('simulate run has a readiness deadline but no total foreground deadline', async () => {
+  const child = fakeBuildChild();
+  let now = 0;
+  const execution = executeBuild(gradleLaunchProject(process.cwd()), {}, {
+    spawn: () => child,
+    probe: async () => true,
+    now: () => now,
+    readyTimeoutMs: 10,
+    pollMs: 1,
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  now = 1_000_000;
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  await execution;
+});
+
+test('simulate run Ctrl+C terminates only the launched child and removes signal listeners', async () => {
+  const child = fakeBuildChild(41002);
+  const stopped = [];
+  const before = process.listenerCount('SIGINT');
+  const execution = executeBuild(gradleLaunchProject(process.cwd()), {}, {
+    spawn: () => child,
+    probe: async () => true,
+    stopChild: owned => {
+      stopped.push(owned.pid);
+      child.exitCode = null;
+      queueMicrotask(() => child.emit('exit', null, 'SIGTERM'));
+    },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  process.emit('SIGINT');
+  await assert.rejects(execution,
+    error => error && error.code === 'SIMULATION_APPLICATION_INTERRUPTED');
+  assert.deepEqual(stopped, [child.pid]);
+  assert.equal(process.listenerCount('SIGINT'), before);
+});
 
 async function makeProject(layout) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-stress-'));

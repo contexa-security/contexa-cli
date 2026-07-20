@@ -45,10 +45,15 @@ jobs:
 
       - run: npm install
 
+      - name: Bind source provenance
+        shell: bash
+        run: |
+          node -e "const f=require('fs'),p='release-manifest.json',m=JSON.parse(f.readFileSync(p));m.source.commit=process.env.GITHUB_SHA;f.writeFileSync(p,JSON.stringify(m,null,2)+'\n')"
+
       - name: Validate release contract
         shell: bash
         run: |
-          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required')"
+          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
 
       - name: Run Phase 5 focused regression tests
         if: contains(github.ref_name, '-phase5.')
@@ -80,6 +85,15 @@ jobs:
         run: |
           set -o pipefail
           node --test test/phase6-state-transitions.test.js 2>&1 | tee phase6-evidence/state-transitions.tap
+
+      - name: Run Phase 6 exact-command pseudo-terminal and Docker acceptance
+        if: runner.os == 'Linux' && contains(github.ref_name, '-phase6.')
+        shell: bash
+        env:
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
+          CONTEXA_TRANSCRIPT_DIR: ${{ github.workspace }}/phase6-evidence/interactive
+          CONTEXA_PHASE6_ACTUAL_DOCKER: '1'
+        run: node test/interactive-defaults.cjs
 
       - name: Publish Phase 6 failure detail
         if: failure() && contains(github.ref_name, '-phase6.')
@@ -150,6 +164,10 @@ jobs:
           name: phase4-acceptance-evidence
           path: phase4-evidence/
 
+      - name: Run final full source regression once
+        if: runner.os == 'Linux'
+        run: npm test
+
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs
 
@@ -216,10 +234,18 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: contexa-snapshot-channel
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Bind source provenance
+        shell: bash
+        run: |
+          node -e "const f=require('fs'),p='release-manifest.json',m=JSON.parse(f.readFileSync(p));m.source.commit=process.env.GITHUB_SHA;f.writeFileSync(p,JSON.stringify(m,null,2)+'\n')"
 
       - uses: actions/download-artifact@v4
         with:
@@ -265,13 +291,56 @@ jobs:
           umask 077
           key_file="$(mktemp)"
           signature_file="$(mktemp)"
-          trap 'rm -f "$key_file" "$signature_file" derived-public.pem' EXIT
+          channel_signature_file="$(mktemp)"
+          trap 'rm -f "$key_file" "$signature_file" "$channel_signature_file" derived-public.pem' EXIT
           printf '%s' "$RELEASE_MANIFEST_SIGNING_KEY" > "$key_file"
           openssl pkey -in "$key_file" -pubout -out derived-public.pem
           cmp derived-public.pem release-signing-public.pem
           openssl dgst -sha256 -sign "$key_file" -out "$signature_file" release-manifest.json
           openssl base64 -A -in "$signature_file" -out release-manifest.json.sig
           openssl dgst -sha256 -verify release-signing-public.pem -signature "$signature_file" release-manifest.json
+          node <<'NODE'
+          const crypto = require('crypto');
+          const fs = require('fs');
+          const releaseBytes = fs.readFileSync('release-manifest.json');
+          const release = JSON.parse(releaseBytes);
+          if (release.channel !== 'snapshot') throw new Error('snapshot release channel is required');
+          const channel = {
+            schemaVersion: 1,
+            channel: release.channel,
+            releaseTag: release.releaseTag,
+            cliVersion: release.cliVersion,
+            starterVersion: release.starter.version,
+            sourceCommit: release.source.commit,
+            releaseManifestSha256: crypto.createHash('sha256').update(releaseBytes).digest('hex'),
+          };
+          fs.writeFileSync('channel-manifest.json', JSON.stringify(channel, null, 2) + '\n');
+          NODE
+          openssl dgst -sha256 -sign "$key_file" -out "$channel_signature_file" channel-manifest.json
+          openssl base64 -A -in "$channel_signature_file" -out channel-manifest.json.sig
+          openssl dgst -sha256 -verify release-signing-public.pem -signature "$channel_signature_file" channel-manifest.json
+
+      - name: Checkout installer release-contract gate
+        uses: actions/checkout@v4
+        with:
+          repository: contexa-security/install-ctxa
+          ref: 073f031d79e3ca1e1687ea3a63288c1751e83457
+          path: installer-contract
+          token: ${{ secrets.INSTALLER_ACCEPTANCE_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify signed assets and provenance with the install-ctxa contract
+        env:
+          CONTEXA_RELEASE_BUNDLE_ROOT: ${{ github.workspace }}
+        run: >-
+          node --test --test-name-pattern
+          "CLI release bundle satisfies the installer signature and asset contract"
+          installer-contract/test/installers.test.js &&
+          node --test --test-name-pattern=CLI.release.bundle
+          installer-contract/test/installer-runtime.test.js
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -286,6 +355,8 @@ jobs:
           files: |
             release-manifest.json
             release-manifest.json.sig
+            channel-manifest.json
+            channel-manifest.json.sig
             release-signing-public.pem
             dist/contexa-linux-x64/contexa-linux-x64
             dist/contexa-linux-x64/contexa-linux-x64.sha256
@@ -293,3 +364,31 @@ jobs:
             dist/contexa-macos-arm64/contexa-macos-arm64.sha256
             dist/contexa-win-x64.exe/contexa-win-x64.exe
             dist/contexa-win-x64.exe/contexa-win-x64.exe.sha256
+
+      - name: Publish signed snapshot channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./channel-manifest.json').channel")" = snapshot
+          git fetch origin refs/heads/snapshot-channel:refs/remotes/origin/snapshot-channel || true
+          manifest_blob="$(git hash-object -w channel-manifest.json)"
+          signature_blob="$(git hash-object -w channel-manifest.json.sig)"
+          public_key_blob="$(git hash-object -w release-signing-public.pem)"
+          channel_tree="$(
+            printf '%s\n' \
+              "100644 blob $manifest_blob"$'\t'"channel-manifest.json" \
+              "100644 blob $signature_blob"$'\t'"channel-manifest.json.sig" \
+              "100644 blob $public_key_blob"$'\t'"release-signing-public.pem" |
+              git mktree
+          )"
+          parent="$(git rev-parse --verify refs/remotes/origin/snapshot-channel 2>/dev/null || true)"
+          if [ -n "$parent" ]; then
+            channel_commit="$(printf 'Publish signed snapshot channel %s\n' "$GITHUB_REF_NAME" |
+              git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+                commit-tree "$channel_tree" -p "$parent")"
+          else
+            channel_commit="$(printf 'Publish signed snapshot channel %s\n' "$GITHUB_REF_NAME" |
+              git -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com \
+                commit-tree "$channel_tree")"
+          fi
+          git push origin "$channel_commit":refs/heads/snapshot-channel

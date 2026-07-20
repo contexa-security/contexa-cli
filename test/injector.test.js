@@ -11,6 +11,7 @@ const {
   injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps, injectEnableAiSecurity,
   generateDockerCompose,
 } = require('../src/core/injector');
+const { CONTEXA_VERSION } = require('../src/core/injector/common');
 
 async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-injector-'));
@@ -391,6 +392,32 @@ test('injectMavenDep: comment text is not treated as an installed dependency', a
   } finally { await fs.remove(dir); }
 });
 
+test('injectMavenDep: captures only the CLI-added canonical coordinate', async () => {
+  const dir = await tempDir();
+  try {
+    const pomPath = path.join(dir, 'pom.xml');
+    const addedDependencies = [];
+    await fs.writeFile(pomPath, `<project>
+  <dependencyManagement><dependencies>
+    <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId></dependency>
+  </dependencies></dependencyManagement>
+  <dependencies></dependencies>
+</project>`);
+    assert.equal(await injectMavenDep(pomPath, {
+      targetModule: 'apps/api',
+      addedDependencies,
+    }), true);
+    assert.deepEqual(addedDependencies, [{
+      group: 'ai.ctxa',
+      artifact: 'spring-boot-starter-contexa',
+      configuration: 'compile',
+      version: CONTEXA_VERSION,
+      versionSource: 'literal',
+      targetModule: 'apps/api',
+    }]);
+  } finally { await fs.remove(dir); }
+});
+
 // ============================================================
 // injectGradleDep
 // ============================================================
@@ -451,6 +478,27 @@ dependencies {
     const topLevel = out.slice(out.lastIndexOf('dependencies {'));
     assert.match(topLevel, /implementation 'ai\.ctxa:spring-boot-starter-contexa:/);
     assert.equal((out.match(/implementation 'ai\.ctxa:spring-boot-starter-contexa:/g) || []).length, 1);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectGradleDep: nested subprojects coordinate is not a top-level installed dependency', async () => {
+  const dir = await tempDir();
+  try {
+    const gradlePath = path.join(dir, 'build.gradle.kts');
+    const addedDependencies = [];
+    await fs.writeFile(gradlePath, `subprojects {
+  dependencies { implementation("ai.ctxa:spring-boot-starter-contexa:decoy") }
+}
+dependencies { implementation("org.springframework.boot:spring-boot-starter-web") }
+`);
+    assert.equal(await injectGradleDep(gradlePath, {
+      targetModule: '.',
+      addedDependencies,
+    }), true);
+    const output = await fs.readFile(gradlePath, 'utf8');
+    assert.equal((output.match(/ai\.ctxa:spring-boot-starter-contexa/g) || []).length, 2);
+    assert.equal(addedDependencies.length, 1);
+    assert.equal(addedDependencies[0].configuration, 'implementation');
   } finally { await fs.remove(dir); }
 });
 
@@ -642,6 +690,29 @@ test('injectSpringAiDeps: preserves customer-owned unselected model starters', a
     assert.ok(out.includes('spring-ai-starter-model-openai'));
     assert.ok(out.includes('spring-ai-starter-model-anthropic'));
     assert.ok(out.includes('spring-ai-starter-model-ollama'));
+  } finally { await fs.remove(dir); }
+});
+
+test('injectDistributedDeps: comments and same artifact under another group are decoys', async () => {
+  const dir = await tempDir();
+  try {
+    const pomPath = path.join(dir, 'pom.xml');
+    const addedDependencies = [];
+    await fs.writeFile(pomPath, `<project>
+  <!-- org.redisson:redisson and org.springframework.kafka:spring-kafka are documentation -->
+  <dependencies>
+    <dependency><groupId>example.decoy</groupId><artifactId>spring-kafka</artifactId></dependency>
+    <dependency><groupId>example.decoy</groupId><artifactId>redisson</artifactId></dependency>
+  </dependencies>
+</project>`);
+    assert.equal(await injectDistributedDeps(pomPath, {
+      targetModule: '.',
+      addedDependencies,
+    }), true);
+    const coordinates = new Set(addedDependencies.map(item => `${item.group}:${item.artifact}`));
+    assert.equal(coordinates.has('org.springframework.kafka:spring-kafka'), true);
+    assert.equal(coordinates.has('org.redisson:redisson'), true);
+    assert.equal(coordinates.has('example.decoy:spring-kafka'), false);
   } finally { await fs.remove(dir); }
 });
 
