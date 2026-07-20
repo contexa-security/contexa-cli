@@ -135,8 +135,10 @@ async function runLocale(locale, outputDirectory) {
       assert.equal(failedSimulation.signal, null, `${locale} failed-recovery timed out`);
       assert.notEqual(failedSimulation.status, 0,
         `${locale} failure injection unexpectedly succeeded`);
-      assert.equal(await fs.pathExists(
-        path.join(project, 'contexa', 'simulation', 'manifest.json')), false);
+      const rolledBackSimulationManifest = JSON.parse(await fs.readFile(
+        path.join(project, 'contexa', 'simulation', 'manifest.json'), 'utf8'));
+      assert.equal(rolledBackSimulationManifest.transaction.status, 'ROLLED_BACK');
+      assert.deepEqual(rolledBackSimulationManifest.files, []);
       assert.equal(await fs.pathExists(path.join(project, 'contexa', 'manifest.json')), true);
       assert.deepEqual(await fs.readFile(buildPath), userModifiedBytes);
       await capture('failed-simulation-rollback', failedSimulation);
