@@ -326,7 +326,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: contexa-security/install-ctxa
-          ref: aafb24afdd8a759c4af803e57e39edaccd631a81
+          ref: 9fefa8fd8162024649aed2132b2770240fba2bc9
           path: installer-contract
           token: ${{ secrets.INSTALLER_ACCEPTANCE_TOKEN || github.token }}
 
