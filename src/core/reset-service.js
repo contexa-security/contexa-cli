@@ -367,7 +367,6 @@ async function restoreEntry(projectDir, mode, entry) {
 async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
   const manifest = await loadManifest(projectDir, mode);
   const audit = emptyAudit();
-  const remaining = [];
   const entries = [...manifest.files].sort((left, right) => right.relativePath.length - left.relativePath.length);
   for (const entry of entries) {
     try {
@@ -385,28 +384,27 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
             detail: 'canonical dependency provenance no longer matches the current build file',
           };
           record(audit, outcome.status, entry.relativePath, outcome.detail);
-          remaining.push(entry);
           continue;
         }
       }
       const outcome = await restoreEntry(projectDir, mode, entry);
       record(audit, outcome.status, entry.relativePath, outcome.detail);
-      if (outcome.status === 'conflict') remaining.push(entry);
-      else {
-        await removeTrackedSnapshots(projectDir, mode, entry);
+      if (outcome.status !== 'conflict') {
+        manifest.files = manifest.files.filter(
+          tracked => tracked.relativePath !== entry.relativePath);
         if (moduleProvenance.length > 0) {
           const moduleName = moduleNameForBuildEntry(entry);
           manifest.metadata.dependencyProvenance =
             manifest.metadata.dependencyProvenance.filter(
               coordinate => coordinate.targetModule !== moduleName);
         }
+        await saveManifest(projectDir, manifest, mode);
+        await removeTrackedSnapshots(projectDir, mode, entry);
       }
     } catch (error) {
       record(audit, 'failed', entry.relativePath, error.message);
-      remaining.push(entry);
     }
   }
-  manifest.files = remaining;
   await saveManifest(projectDir, manifest, mode);
   return { audit, manifest };
 }

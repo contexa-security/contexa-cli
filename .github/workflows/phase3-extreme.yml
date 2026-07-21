@@ -1,0 +1,75 @@
+name: Phase 3 reset extreme acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'codex/extreme-phase3-*'
+
+jobs:
+  reset-acceptance:
+    name: Reset acceptance / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            platform: win32
+            arch: x64
+          - os: ubuntu-latest
+            label: ubuntu-x64
+            platform: linux
+            arch: x64
+          - os: macos-14
+            label: macos-arm64
+            platform: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify runner platform and architecture
+        run: node -e "if(process.platform!==process.argv[1]||process.arch!==process.argv[2])throw new Error('Unexpected runner '+process.platform+'/'+process.arch)" ${{ matrix.platform }} ${{ matrix.arch }}
+
+      - name: Download and verify the release GeoLite2 fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase3-evidence
+          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
+          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
+          curl --fail --location --silent --show-error --retry 2 --max-time 90 \
+            "$geo_url" --output phase3-evidence/GeoLite2-City.mmdb
+          node -e "const c=require('crypto'),f=require('fs');const actual=c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex');if(actual!==process.argv[2])throw new Error('GeoLite2 checksum mismatch')" \
+            phase3-evidence/GeoLite2-City.mmdb "$geo_sha"
+
+      - name: Run Phase 3 reset acceptance
+        shell: bash
+        env:
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase3-evidence/GeoLite2-City.mmdb
+        run: |
+          set -o pipefail
+          node --test test/reset-phase3.test.js test/phase3-reset-acceptance.test.js 2>&1 \
+            | tee phase3-evidence/phase3-reset.tap
+
+      - name: Run reset message contract
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test test/i18n.test.js 2>&1 | tee phase3-evidence/i18n.tap
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase3-reset-acceptance-${{ matrix.label }}
+          path: phase3-evidence/

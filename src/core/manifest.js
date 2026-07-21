@@ -62,7 +62,7 @@ function processIsRunning(pid) {
   }
 }
 
-async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL) {
+async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL, operation = 'init') {
   const normalizedMode = normalizeMode(mode);
   const filePath = installLockPath(projectDir, normalizedMode);
   const token = crypto.randomUUID();
@@ -70,6 +70,7 @@ async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL) {
     pid: process.pid,
     token,
     mode: normalizedMode,
+    operation,
     startedAt: new Date().toISOString(),
   };
   await fs.ensureDir(path.dirname(filePath));
@@ -92,10 +93,10 @@ async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL) {
         if (readError.code === 'ENOENT') continue;
       }
       if (owner && processIsRunning(Number(owner.pid))) {
-        const active = new Error(`Another ${normalizedMode} contexa init is already running for this project (PID ${owner.pid})`);
+        const active = new Error(`Another contexa ${operation} is already running for this project's ${normalizedMode} state (PID ${owner.pid})`);
         active.code = 'INIT_ALREADY_RUNNING';
         active.messageKey = 'init.error.alreadyRunning';
-        active.messageArgs = [normalizedMode, owner.pid];
+        active.messageArgs = [operation, normalizedMode, owner.pid];
         throw active;
       }
 
@@ -108,10 +109,10 @@ async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL) {
       }
     }
   }
-  const unavailable = new Error(`Unable to acquire the ${normalizedMode} contexa init lock for this project`);
+  const unavailable = new Error(`Unable to acquire the contexa ${operation} lock for this project's ${normalizedMode} state`);
   unavailable.code = 'INIT_LOCK_UNAVAILABLE';
   unavailable.messageKey = 'init.error.lockUnavailable';
-  unavailable.messageArgs = [normalizedMode];
+  unavailable.messageArgs = [operation, normalizedMode];
   throw unavailable;
 }
 
@@ -124,7 +125,14 @@ async function releaseInstallLock(lock) {
     if (error.code === 'ENOENT') return;
     throw error;
   }
-  if (owner && owner.token === lock.token) await fs.remove(lock.filePath);
+  if (owner && owner.token === lock.token) {
+    await fs.remove(lock.filePath);
+    const stateDirectory = path.dirname(lock.filePath);
+    if (await fs.pathExists(stateDirectory)
+        && (await fs.readdir(stateDirectory)).length === 0) {
+      await fs.remove(stateDirectory);
+    }
+  }
 }
 function toRelative(projectDir, filePath) {
   return path.relative(projectDir, filePath).split(path.sep).join('/');
