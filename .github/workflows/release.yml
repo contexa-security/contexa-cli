@@ -348,7 +348,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           name: Contexa CLI ${{ github.ref_name }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: true
           body: |
             ## Install
             ```bash

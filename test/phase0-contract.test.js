@@ -310,7 +310,7 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /asset\.sha256 = crypto\.createHash\('sha256'\)/);
   assert.match(workflow, /RELEASE_MANIFEST_SIGNING_KEY: \$\{\{ secrets\.RELEASE_MANIFEST_SIGNING_KEY \}\}/);
   assert.match(workflow, /openssl dgst -sha256 -verify release-signing-public\.pem/);
-  assert.match(workflow, /prerelease: \$\{\{ contains\(github\.ref_name, '-'\) \}\}/);
+  assert.match(workflow, /prerelease: true/);
 });
 
 test('Phase 0 snapshot channel is derived, signed, and published from the release contract', () => {

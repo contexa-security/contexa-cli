@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "channel": "snapshot",
-  "releaseTag": "v0.1.2-phase6.9",
-  "cliVersion": "0.1.2-phase6.9",
+  "releaseTag": "v0.1.2",
+  "cliVersion": "0.1.2",
   "source": {
     "repository": "contexa-security/contexa-cli",
     "commit": "0000000000000000000000000000000000000000"
