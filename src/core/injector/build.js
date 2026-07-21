@@ -27,6 +27,52 @@ const {
   backupFile,
 } = require('./common');
 const { parseMavenModel, parseGradleModel, hasCoordinate } = require('../build-model');
+const CONTEXA_SNAPSHOT_REPOSITORY =
+  'https://central.sonatype.com/repository/maven-snapshots/';
+
+function isSnapshotVersion(version) {
+  return typeof version === 'string' && version.endsWith('-SNAPSHOT');
+}
+
+function hasSnapshotRepository(content) {
+  return content.includes(CONTEXA_SNAPSHOT_REPOSITORY)
+    || content.includes(CONTEXA_SNAPSHOT_REPOSITORY.replace(/\/$/, ''));
+}
+
+function insertMavenSnapshotRepository(pom) {
+  if (hasSnapshotRepository(pom)) return pom;
+  const repository =
+    '        <repository>\n'
+    + '            <id>contexa-snapshots</id>\n'
+    + `            <url>${CONTEXA_SNAPSHOT_REPOSITORY}</url>\n`
+    + '            <releases><enabled>false</enabled></releases>\n'
+    + '            <snapshots><enabled>true</enabled></snapshots>\n'
+    + '        </repository>\n';
+  const repositoriesClose = pom.lastIndexOf('</repositories>');
+  if (repositoriesClose !== -1) {
+    return pom.slice(0, repositoriesClose) + repository + pom.slice(repositoriesClose);
+  }
+  const projectClose = pom.lastIndexOf('</project>');
+  if (projectClose === -1) {
+    throw new Error('Maven injection impossible: pom.xml has no project closing tag.');
+  }
+  const repositories = `    <repositories>\n${repository}    </repositories>\n`;
+  return pom.slice(0, projectClose) + repositories + pom.slice(projectClose);
+}
+
+function insertGradleSnapshotRepository(content, isKotlinDsl) {
+  if (hasSnapshotRepository(content)) return content;
+  const quote = isKotlinDsl ? '"' : "'";
+  const repository = `    maven { url = uri(${quote}${CONTEXA_SNAPSHOT_REPOSITORY}${quote}) }`;
+  const model = parseGradleModel(content);
+  const repositories = model.blocks.find(block => block.name === 'repositories' && !block.parent);
+  if (repositories) {
+    return content.slice(0, repositories.contentStart)
+      + `\n${repository}` + content.slice(repositories.contentStart);
+  }
+  const trimmed = content.replace(/\s+$/, '');
+  return `${trimmed}\n\nrepositories {\n${repository}\n}\n`;
+}
 
 function canonicalDependency(group, artifact, configuration, version, targetModule) {
   return {
@@ -74,35 +120,43 @@ async function injectMavenDep(pomPath, options = {}) {
   if (!await fs.pathExists(pomPath)) return false;
   const pom = await fs.readFile(pomPath, 'utf8');
   const model = parseMavenModel(pom);
-  if (hasCoordinate(model.dependencies, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID)) return false;
+  const existing = model.dependencies.find(dependency =>
+    dependency.group === CONTEXA_GROUP_ID && dependency.artifact === CONTEXA_ARTIFACT_ID);
+  const addDependency = !existing;
+  const addRepository = isSnapshotVersion(CONTEXA_VERSION)
+    && (!existing || isSnapshotVersion(existing.version))
+    && !hasSnapshotRepository(pom);
+  if (!addDependency && !addRepository) return false;
 
-  // Backup
   await backupFile(pomPath, options);
-
-  const dep =
-    `        <dependency>\n` +
-    `            <groupId>${CONTEXA_GROUP_ID}</groupId>\n` +
-    `            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>\n` +
-    `            <version>${CONTEXA_VERSION}</version>\n` +
-    `        </dependency>\n    `;
-  const target = model.dependenciesCloseIndex;
-  let updated;
-  if (target !== -1) {
-    updated = pom.slice(0, target) + dep + pom.slice(target);
-  } else {
-    const projectClose = pom.lastIndexOf('</project>');
-    if (projectClose === -1) {
-      throw new Error('Maven injection impossible: pom.xml has no project closing tag.');
+  let updated = pom;
+  if (addDependency) {
+    const dep =
+      `        <dependency>\n` +
+      `            <groupId>${CONTEXA_GROUP_ID}</groupId>\n` +
+      `            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>\n` +
+      `            <version>${CONTEXA_VERSION}</version>\n` +
+      `        </dependency>\n    `;
+    const target = model.dependenciesCloseIndex;
+    if (target !== -1) {
+      updated = updated.slice(0, target) + dep + updated.slice(target);
+    } else {
+      const projectClose = updated.lastIndexOf('</project>');
+      if (projectClose === -1) {
+        throw new Error('Maven injection impossible: pom.xml has no project closing tag.');
+      }
+      const dependencies = `    <dependencies>\n${dep}</dependencies>\n`;
+      updated = updated.slice(0, projectClose) + dependencies + updated.slice(projectClose);
     }
-    const dependencies = `    <dependencies>\n${dep}</dependencies>\n`;
-    updated = pom.slice(0, projectClose) + dependencies + pom.slice(projectClose);
   }
+  if (addRepository) updated = insertMavenSnapshotRepository(updated);
   await fs.writeFile(pomPath, updated);
-  captureAddedDependencies(options, [canonicalDependency(
-    CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, 'compile', CONTEXA_VERSION, options.targetModule)]);
+  if (addDependency) {
+    captureAddedDependencies(options, [canonicalDependency(
+      CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, 'compile', CONTEXA_VERSION, options.targetModule)]);
+  }
   return true;
 }
-
 function hasMavenDependency(pom, groupId, artifactId) {
   return hasCoordinate(parseMavenModel(pom).dependencies, groupId, artifactId);
 }
@@ -172,25 +226,31 @@ function insertIntoTopLevelDependencies(content, lines) {
 async function injectGradleDep(gradlePath, options = {}) {
   if (!await fs.pathExists(gradlePath)) return false;
   let gradle = await fs.readFile(gradlePath, 'utf8');
-  if (hasGradleDependency(gradle, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID)) return false;
+  const model = parseGradleModel(gradle);
+  const existing = model.dependencies.find(dependency =>
+    dependency.group === CONTEXA_GROUP_ID && dependency.artifact === CONTEXA_ARTIFACT_ID);
+  const addDependency = !existing;
+  const addRepository = isSnapshotVersion(CONTEXA_VERSION)
+    && (!existing || isSnapshotVersion(existing.version))
+    && !hasSnapshotRepository(gradle);
+  if (!addDependency && !addRepository) return false;
 
-  // Backup
   await backupFile(gradlePath, options);
-
-  // Kotlin DSL uses double-quoted, parenthesized form: implementation("group:artifact:version")
-  // Groovy DSL uses single-quoted form: implementation 'group:artifact:version'
   const isKotlinDsl = gradlePath.endsWith('.kts');
-  const depLine = isKotlinDsl
-    ? `    implementation("${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}")`
-    : `    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`;
-
-  gradle = insertIntoTopLevelDependencies(gradle, [depLine]);
+  if (addDependency) {
+    const depLine = isKotlinDsl
+      ? `    implementation("${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}")`
+      : `    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`;
+    gradle = insertIntoTopLevelDependencies(gradle, [depLine]);
+  }
+  if (addRepository) gradle = insertGradleSnapshotRepository(gradle, isKotlinDsl);
   await fs.writeFile(gradlePath, gradle);
-  captureAddedDependencies(options, [canonicalDependency(
-    CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, 'implementation', CONTEXA_VERSION, options.targetModule)]);
+  if (addDependency) {
+    captureAddedDependencies(options, [canonicalDependency(
+      CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID, 'implementation', CONTEXA_VERSION, options.targetModule)]);
+  }
   return true;
 }
-
 // Inject Redis/Kafka client dependencies for the distributed PoC profile.
 // Idempotent ??silently does nothing if any of the markers already exist.
 //

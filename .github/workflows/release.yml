@@ -53,7 +53,7 @@ jobs:
       - name: Validate release contract
         shell: bash
         run: |
-          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!m.starter.version.endsWith('-SNAPSHOT')) throw new Error('snapshot channel requires SNAPSHOT starter'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
+          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(m.starter.version)) throw new Error('invalid starter version'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
 
       - name: Run Phase 5 focused regression tests
         if: contains(github.ref_name, '-phase5.')
@@ -64,7 +64,6 @@ jobs:
         run: node --test --test-name-pattern="S3:" test/sideeffect-zero.test.js
 
       - name: Download the Phase 6 verified GeoLite2 fixture
-        if: contains(github.ref_name, '-phase6.')
         shell: bash
         run: |
           set -euo pipefail
@@ -77,7 +76,6 @@ jobs:
             phase6-evidence/GeoLite2-City.mmdb "$geo_sha"
 
       - name: Run Phase 6 state-transition acceptance
-        if: contains(github.ref_name, '-phase6.')
         shell: bash
         env:
           CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
@@ -87,13 +85,13 @@ jobs:
           node --test test/phase6-state-transitions.test.js 2>&1 | tee phase6-evidence/state-transitions.tap
 
       - name: Publish Phase 6 failure detail
-        if: failure() && contains(github.ref_name, '-phase6.')
+        if: failure()
         shell: bash
         run: |
           node -e "const f=require('fs');const p='phase6-evidence/state-transitions.tap';const s=f.existsSync(p)?f.readFileSync(p,'utf8').slice(-12000):'TAP output is missing';const e=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error file=test/phase6-state-transitions.test.js,line=1,title=Phase 6 state transition failure::'+e)"
 
       - uses: actions/upload-artifact@v4
-        if: always() && contains(github.ref_name, '-phase6.')
+        if: always()
         with:
           name: phase6-state-transition-evidence-${{ matrix.label }}
           path: phase6-evidence/
@@ -184,7 +182,7 @@ jobs:
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 
       - name: Run Phase 6 exact commands against the built binary
-        if: runner.os == 'Linux' && contains(github.ref_name, '-phase6.')
+        if: runner.os == 'Linux'
         shell: bash
         env:
           CONTEXA_CLI_EXECUTABLE: ${{ github.workspace }}/dist/${{ matrix.output }}
@@ -327,7 +325,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: contexa-security/install-ctxa
-          ref: 9fefa8fd8162024649aed2132b2770240fba2bc9
+          ref: f4e49bc79e740f0e136e5838a4053df5f8808d5c
           path: installer-contract
           token: ${{ secrets.INSTALLER_ACCEPTANCE_TOKEN || github.token }}
 

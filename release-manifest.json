@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "channel": "snapshot",
-  "releaseTag": "v0.1.3",
-  "cliVersion": "0.1.3",
+  "releaseTag": "v0.1.4",
+  "cliVersion": "0.1.4",
   "source": {
     "repository": "contexa-security/contexa-cli",
     "commit": "0000000000000000000000000000000000000000"
@@ -10,7 +10,7 @@
   "starter": {
     "groupId": "ai.ctxa",
     "artifactId": "spring-boot-starter-contexa",
-    "version": "0.1.0-SNAPSHOT"
+    "version": "0.1.0"
   },
   "dependencyVersions": {
     "springAiBom": "1.1.2",

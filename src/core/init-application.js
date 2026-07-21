@@ -127,6 +127,25 @@ async function recoverInterruptedDockerMutation(dockerMutation) {
   });
 }
 
+async function refreshExistingInstallationMetadata(projectDir, project) {
+  if (project.contextaVersion !== releaseManifest.starter.version) return false;
+  if (!await fs.pathExists(manifestPath(projectDir, INSTALL_MODES.NORMAL))) return false;
+
+  let lock = null;
+  try {
+    lock = await acquireInstallLock(projectDir, INSTALL_MODES.NORMAL);
+    const current = await loadManifest(projectDir, INSTALL_MODES.NORMAL);
+    if (current.metadata.cliVersion === releaseManifest.cliVersion
+        && current.metadata.starterVersion === releaseManifest.starter.version) {
+      return false;
+    }
+    await recordInstallMetadata(projectDir, {}, INSTALL_MODES.NORMAL);
+    return true;
+  } finally {
+    await releaseInstallLock(lock);
+  }
+}
+
 async function executeInit(opts) {
       const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
       let installLock = null;
@@ -225,6 +244,7 @@ async function executeInit(opts) {
       // prerequisite, not a reason to return from this command.
       if (project.hasContexta && !opts.simulate) {
         if (!opts.force && !opts.yes) {
+          await refreshExistingInstallationMetadata(opts.dir, project);
           console.log(chalk.yellow('  ' + t('init.alreadyDetected')));
           console.log(chalk.gray('    ' + t('init.alreadyDetected.hint') + '\n'));
           return;

@@ -55,3 +55,72 @@ jobs:
         with:
           name: phase6-100-cycles-${{ matrix.label }}
           path: phase6-evidence/
+  exact-command-docker:
+    name: Exact commands / linux-x64 / Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - run: npm ci
+
+      - name: Download the verified GeoLite2 fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-evidence
+          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
+          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
+          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
+            "$geo_url" --output phase6-evidence/GeoLite2-City.mmdb
+          echo "$geo_sha  phase6-evidence/GeoLite2-City.mmdb" | sha256sum --check
+
+      - name: Build the exact Linux SEA
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx esbuild src/index.js --bundle --platform=node --target=node18 \
+            --outfile=dist/bundle.js --format=cjs
+          node --experimental-sea-config sea-config.json
+          cp "$(command -v node)" dist/contexa-linux-x64
+          npx postject dist/contexa-linux-x64 NODE_SEA_BLOB dist/sea-prep.blob \
+            --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
+          chmod +x dist/contexa-linux-x64
+
+      - name: Run the four exact commands through a pseudo-terminal and real Docker
+        shell: bash
+        env:
+          CONTEXA_CLI_EXECUTABLE: ${{ github.workspace }}/dist/contexa-linux-x64
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
+          CONTEXA_TRANSCRIPT_DIR: ${{ github.workspace }}/phase6-evidence/interactive
+          CONTEXA_PHASE6_ACTUAL_DOCKER: '1'
+        run: >-
+          node test/interactive-defaults.cjs 2>&1 |
+          tee phase6-evidence/interactive-acceptance.log
+
+      - name: Verify zero owned Docker residue
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          containers="$(docker ps -aq --filter label=io.ctxa.owner=contexa-cli)"
+          volumes="$(docker volume ls -q --filter label=io.ctxa.owner=contexa-cli)"
+          test -z "$containers"
+          test -z "$volumes"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase6-exact-command-docker-linux-x64
+          path: phase6-evidence/

@@ -10,11 +10,14 @@ const { spawn } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
 const cliPath = path.join(root, 'src', 'index.js');
+const releaseManifest = require('../release-manifest.json');
 const {
   INSTALL_MODES,
   acquireInstallLock,
+  calculateResourceDigest,
   installLockPath,
   loadManifest,
+  manifestPath,
   releaseInstallLock,
 } = require('../src/core/manifest');
 const { collectInitAnswers } = require('../src/core/init-input');
@@ -119,6 +122,59 @@ function awaitClose(child) {
 function starterCount(buildText) {
   return (buildText.match(/ai\.ctxa:spring-boot-starter-contexa/g) || []).length;
 }
+function runInitWithoutFlags(project) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, 'init'], {
+      cwd: project,
+      env: { ...process.env, CONTEXA_LANG: 'en' },
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => child.kill(), 20000);
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal, stdout, stderr });
+    });
+  });
+}
+
+test('Phase 2 no-op init refreshes release provenance without changing customer files', async t => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-provenance-'));
+  t.after(() => fs.remove(parent));
+  const project = await createProject(parent, 'provenance-refresh');
+  const initial = await runInit(project);
+  assert.equal(initial.code, 0, initial.stderr + initial.stdout);
+
+  const customerFiles = [
+    path.join(project, 'build.gradle'),
+    path.join(project, 'src', 'main', 'resources', 'application.yml'),
+    path.join(project, 'src', 'main', 'java', 'example', 'SampleApplication.java'),
+  ];
+  const before = new Map();
+  for (const file of customerFiles) before.set(file, sha256(await fs.readFile(file)));
+
+  const current = await loadManifest(project, INSTALL_MODES.NORMAL);
+  current.metadata.cliVersion = '0.0.0';
+  current.metadata.starterVersion = '0.0.0-SNAPSHOT';
+  current.metadata.resourceDigest = calculateResourceDigest(current);
+  await fs.writeJson(manifestPath(project, INSTALL_MODES.NORMAL), current, { spaces: 2 });
+
+  const repeated = await runInitWithoutFlags(project);
+  assert.equal(repeated.code, 0, repeated.stderr + repeated.stdout);
+  for (const file of customerFiles) {
+    assert.equal(sha256(await fs.readFile(file)), before.get(file), file);
+  }
+  const refreshed = await loadManifest(project, INSTALL_MODES.NORMAL);
+  assert.equal(refreshed.metadata.cliVersion, releaseManifest.cliVersion);
+  assert.equal(refreshed.metadata.starterVersion, releaseManifest.starter.version);
+});
 
 test('Phase 2 existing infra-dir option selects PostgreSQL-only infrastructure without changing quick init', async () => {
   const answers = await collectInitAnswers(

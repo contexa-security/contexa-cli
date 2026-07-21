@@ -87,7 +87,7 @@ test('Phase 0 release and primary-command contract has one canonical source', ()
   assert.equal(releaseManifest.cliVersion, packageJson.version);
   assert.equal(releaseManifest.releaseTag, 'v' + releaseManifest.cliVersion);
   assert.equal(releaseManifest.channel, 'snapshot');
-  assert.match(releaseManifest.starter.version, /-SNAPSHOT$/);
+  assert.match(releaseManifest.starter.version, /^\d+\.\d+\.\d+$/);
   assert.deepEqual(releaseManifest.primaryCommands, [
     'contexa init',
     'contexa reset',
@@ -312,6 +312,17 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /RELEASE_MANIFEST_SIGNING_KEY: \$\{\{ secrets\.RELEASE_MANIFEST_SIGNING_KEY \}\}/);
   assert.match(workflow, /openssl dgst -sha256 -verify release-signing-public\.pem/);
   assert.match(workflow, /prerelease: true/);
+  assert.match(workflow,
+    /- name: Run Phase 6 exact commands against the built binary\s+if: runner\.os == 'Linux'/);
+  assert.doesNotMatch(workflow,
+    /Run Phase 6 exact commands against the built binary\s+if:.*-phase6\./);
+  assert.match(workflow, /ref: f4e49bc79e740f0e136e5838a4053df5f8808d5c/);
+  const phase6Workflow = fs.readFileSync(
+    path.join(root, '.github/workflows/phase6-extreme.yml'), 'utf8');
+  assert.match(phase6Workflow, /^  exact-command-docker:/m);
+  assert.match(phase6Workflow, /CONTEXA_PHASE6_ACTUAL_DOCKER: '1'/);
+  assert.match(phase6Workflow, /node test\/interactive-defaults\.cjs/);
+  assert.match(phase6Workflow, /Verify zero owned Docker residue/);
 });
 
 test('Phase 0 snapshot channel is derived, signed, and published from the release contract', () => {
@@ -1050,7 +1061,13 @@ test('actual starter-only init is idempotent and reset preserves the host projec
     const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
     assert.equal(manifest.transaction.status, 'COMMITTED');
     assert.equal(manifest.metadata.mode, INSTALL_MODES.NORMAL);
-    assert.match(await fs.readFile(build, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa:0\.1\.0-SNAPSHOT/);
+    const installedBuild = await fs.readFile(build, 'utf8');
+    const starterCoordinate = [
+      releaseManifest.starter.groupId,
+      releaseManifest.starter.artifactId,
+      releaseManifest.starter.version,
+    ].join(':');
+    assert.ok(installedBuild.includes(starterCoordinate));
     assert.ok(manifest.files.every(entry => entry.installationId === manifest.metadata.installationId));
     assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
     assert.deepEqual(await fs.readFile(source), Buffer.from(originalSource, 'utf8'));

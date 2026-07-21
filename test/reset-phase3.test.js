@@ -96,8 +96,12 @@ test('reset keeps the build file and ownership metadata when canonical provenanc
     await recordInstallMetadata(project, { dependencyProvenance: addedDependencies });
     await commitInstallTransaction(project, transactionId);
 
+    const injectedVersion = addedDependencies.find(dependency =>
+      dependency.group === 'ai.ctxa'
+        && dependency.artifact === 'spring-boot-starter-contexa')?.version;
+    assert.ok(injectedVersion);
     const changed = (await fs.readFile(build, 'utf8'))
-      .replace('0.1.0-SNAPSHOT', 'customer-version');
+      .replace(injectedVersion, 'customer-version');
     await fs.writeFile(build, changed, 'utf8');
     const restored = await restoreProjectFiles(project);
     assert.equal(restored.audit.conflict.length, 1);
@@ -754,16 +758,23 @@ test('simulation reset leaves the normal ownership manifest byte-for-byte unchan
       files: [],
       transaction: null,
     }, INSTALL_MODES.NORMAL);
-    await saveManifest(project, {
-      metadata: {
-        ...common,
-        mode: 'simulation',
-        installationId: 'simulation-installation',
-        dockerLifecycleManaged: false,
-      },
-      files: [],
-      transaction: null,
-    }, INSTALL_MODES.SIMULATION);
+    const infraDir = path.join(project, 'simulation-infra');
+    const composePath = path.join(infraDir, 'docker-compose.yml');
+    const transactionId = await beginInstallTransaction(project, {
+      ...common,
+      mode: 'simulation',
+      installationId: 'simulation-installation',
+      infra: 'standalone',
+      infraDir,
+      dockerLifecycleManaged: false,
+    }, INSTALL_MODES.SIMULATION, []);
+    await prepareExternalFileChange(
+      project, transactionId, composePath, infraDir, INSTALL_MODES.SIMULATION);
+    await fs.ensureDir(infraDir);
+    await fs.writeFile(composePath, 'services: {}\n');
+    await recordExternalFileChange(
+      project, transactionId, composePath, INSTALL_MODES.SIMULATION);
+    await commitInstallTransaction(project, transactionId, INSTALL_MODES.SIMULATION);
     const normalPath = manifestPath(project, INSTALL_MODES.NORMAL);
     const before = await fs.readFile(normalPath);
 
@@ -772,6 +783,7 @@ test('simulation reset leaves the normal ownership manifest byte-for-byte unchan
 
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), false);
+    assert.equal(await fs.pathExists(composePath), false);
     assert.deepEqual(await fs.readFile(normalPath), before);
   } finally {
     await fs.remove(project);

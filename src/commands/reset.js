@@ -220,7 +220,7 @@ module.exports = function (program) {
 
       const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
       if (installMode === INSTALL_MODES.SIMULATION
-          && (!ownsManifestInfrastructure || !dockerLifecycleManaged)) {
+          && !ownsManifestInfrastructure) {
         targets.simulate = false;
         infraCompleted = true;
       }
