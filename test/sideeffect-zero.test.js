@@ -145,7 +145,7 @@ test('normal explicit activation writes only the Contexa-owned overlay', async (
     assert.equal(await fs.pathExists(overlay), true);
     for (const [file] of hostFiles) assert.deepEqual(await fs.readFile(file), before.get(file));
     const parsed = yaml.load(await fs.readFile(overlay, 'utf8'));
-    assert.equal(parsed.server.port, '${CONTEXA_SERVER_PORT:9080}');
+    assert.equal(parsed.server, undefined);
     assert.equal(parsed.contexa.security.zerotrust.mode, 'ENFORCE');
     assert.equal(parsed.contexa.llm.selection.chat.priority, 'ollama');
   } finally {

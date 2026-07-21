@@ -46,6 +46,7 @@ const {
 const { t, formatError } = require('./i18n');
 const {
   INSTALL_MODES,
+  acquireInstallLock,
   beginInstallTransaction,
   commitInstallTransaction,
   loadManifest,
@@ -57,6 +58,7 @@ const {
   recordChange,
   recordInstallMetadata,
   rollbackInstallTransaction,
+  releaseInstallLock,
   sha256FileSync,
 } = require('./manifest');
 const { buildDockerResourceContract, performOwnedDockerCleanup } = require('./reset-service');
@@ -77,6 +79,22 @@ function initError(code, key, ...args) {
   error.code = code;
   error.messageKey = key;
   error.messageArgs = args;
+  return error;
+}
+
+function normalizeInitInputError(error) {
+  const message = error && error.message ? error.message : '';
+  if (/^(?:Gradle script|Maven XML) is malformed:/.test(message)) {
+    return initError('INVALID_BUILD_FILE', 'init.error.malformedBuild', message);
+  }
+  const overlayPrefix = 'Contexa overlay path is already user-owned: ';
+  if (message.startsWith(overlayPrefix)) {
+    return initError('CONTEXA_OVERLAY_USER_OWNED',
+      'init.error.overlayUserOwned', message.slice(overlayPrefix.length));
+  }
+  if (error && error.name === 'YAMLException') {
+    return initError('INVALID_CONTEXA_YAML', 'init.error.malformedYaml', message);
+  }
   return error;
 }
 
@@ -111,6 +129,7 @@ async function recoverInterruptedDockerMutation(dockerMutation) {
 
 async function executeInit(opts) {
       const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
+      let installLock = null;
       let installTransactionId = null;
       let transactionManifestExisted = false;
       try {
@@ -145,9 +164,15 @@ async function executeInit(opts) {
 
       // 1. Detect project
       const spinner = ora(t('init.detecting')).start();
-      const project = await detectSpringProject(opts.dir, {
-        probeDocker: !!(opts.distributed || opts.simulate),
-      });
+      let project;
+      try {
+        project = await detectSpringProject(opts.dir, {
+          probeDocker: !!(opts.distributed || opts.simulate || opts.infraDir),
+        });
+      } catch (error) {
+        spinner.stop();
+        throw normalizeInitInputError(error);
+      }
       spinner.stop();
 
       if (!project.isSpring) {
@@ -163,7 +188,7 @@ async function executeInit(opts) {
       console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || t('common.unknown')}`));
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
-      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate)
+      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate || opts.infraDir)
         ? (project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing')))
         : t('common.notRequested')}`));
 
@@ -174,10 +199,10 @@ async function executeInit(opts) {
         process.env.CONTEXA_PROJECT = cliProjectName;
       }
 
-      // Docker is only consulted when the user explicitly opted into infra
-      // provisioning via --distributed. Without --distributed, init does not
-      // touch infrastructure regardless of whether Docker is installed.
-      const wantsContainers = opts.distributed && opts.docker !== false;
+      // Docker is consulted only when the user explicitly selected distributed
+      // infrastructure or supplied the existing --infra-dir option for the
+      // PostgreSQL-only path. Plain init never probes or mutates Docker.
+      const wantsContainers = (opts.distributed || opts.infraDir) && opts.docker !== false;
       if (!project.hasDocker && wantsContainers) {
         console.log('');
         console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
@@ -248,7 +273,7 @@ async function executeInit(opts) {
         : normalOverlayPath(projectOwnerDir);
       const plannedSimulationConfigPath = opts.simulate ? simulationConfigurationPath(project) : null;
       const shouldWriteOverlay = answers.integrationMode === 'merge'
-        && (answers.enableAiSecurity || answers.infra !== 'skip' || answers.simulate);
+        && (answers.enableAiSecurity || answers.infra === 'distributed' || answers.simulate);
       const plannedBuildPath = project.buildFilePath
         || (project.buildTool === 'maven' ? path.join(projectOwnerDir, 'pom.xml') : path.join(projectOwnerDir, 'build.gradle'));
       const plannedGeoIpPath = (answers.enableAiSecurity || answers.simulate)
@@ -356,6 +381,7 @@ async function executeInit(opts) {
         }
       }
 
+      installLock = await acquireInstallLock(opts.dir, installMode);
       transactionManifestExisted = await fs.pathExists(manifestPath(opts.dir, installMode));
       installTransactionId = await beginInstallTransaction(opts.dir, {
         projectName: cliProjectName,
@@ -484,6 +510,7 @@ async function executeInit(opts) {
               const applied = await injectYml(ymlPath, {
                 ...answers,
                 managedPaths: ymlState.entry && ymlState.entry.managedPaths,
+                removeLegacyNormalServerPort: !!(ymlState.entry && ymlState.entry.generated),
               });
               await recordChange(opts.dir, ymlPath, {
                 kind: opts.simulate ? 'simulation-overlay' : 'contexa-overlay',
@@ -495,6 +522,7 @@ async function executeInit(opts) {
               s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
             }
           } catch (err) {
+            err = normalizeInitInputError(err);
             s1.fail(t('step.ymlUpdated'));
             console.log('');
             console.log(chalk.red(`  x ${t('init.error.ymlUpdate')}`));
@@ -777,7 +805,7 @@ async function executeInit(opts) {
               throw e;
             }
           }
-          if (opts.simulate) {
+          if (opts.simulate && answers.startDocker) {
             const simulationEvidence = await waitForSimulationInfrastructure(installationId,
               !!(answers.llmProviders && answers.llmProviders.includes('ollama')));
             await recordInstallMetadata(opts.dir, {
@@ -852,6 +880,8 @@ async function executeInit(opts) {
           throw new Error(`${error.message}; automatic rollback failed: ${infrastructureRollbackErrors.join('; ')}`);
         }
         throw error;
+      } finally {
+        await releaseInstallLock(installLock);
       }
 }
 

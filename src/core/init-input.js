@@ -38,7 +38,7 @@ function buildInitDefaults(opts) {
       enableAiSecurity: explicitAiSecurity && providerFromFlags.length > 0,
       autoAnnotate: !!opts.autoAnnotate,
       llmProviders: explicitAiSecurity ? providerFromFlags : [],
-      infra: opts.distributed ? 'distributed' : 'skip',
+      infra: opts.distributed ? 'distributed' : opts.infraDir ? 'standalone' : 'skip',
       injectDep: true,
       startDocker: opts.docker !== false,
     },
@@ -180,7 +180,9 @@ async function collectInitAnswers(opts, project, cliProjectName) {
   }
   answers.securityMode = opts.securityMode || answers.securityMode || 'sandbox';
   answers.mode = answers.mode || 'shadow';
-  answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
+  answers.infra = opts.distributed ? 'distributed'
+    : opts.infraDir ? 'standalone'
+    : (answers.infra || 'skip');
   answers.startDocker = opts.docker !== false && answers.startDocker !== false;
 
   if (promptProvider) {

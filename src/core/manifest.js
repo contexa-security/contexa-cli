@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const fs = require('fs-extra');
+const fsPromises = require('node:fs/promises');
 const path = require('path');
 const releaseManifest = require('../../release-manifest.json');
 const { canonicalBoundaryPath, pathsEqual } = require('./project');
@@ -47,6 +48,84 @@ function transactionBackupRoot(projectDir, transactionId, mode = INSTALL_MODES.N
   return path.join(backupRoot(projectDir, mode), '__transactions__', transactionId);
 }
 
+function installLockPath(projectDir, mode = INSTALL_MODES.NORMAL) {
+  return path.join(stateRoot(projectDir, mode), '.init.lock');
+}
+
+function processIsRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === 'EPERM';
+  }
+}
+
+async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL) {
+  const normalizedMode = normalizeMode(mode);
+  const filePath = installLockPath(projectDir, normalizedMode);
+  const token = crypto.randomUUID();
+  const state = {
+    pid: process.pid,
+    token,
+    mode: normalizedMode,
+    startedAt: new Date().toISOString(),
+  };
+  await fs.ensureDir(path.dirname(filePath));
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let handle;
+    try {
+      handle = await fsPromises.open(filePath, 'wx');
+      await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+      await handle.close();
+      return { filePath, token };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      if (!error || error.code !== 'EEXIST') throw error;
+
+      let owner = null;
+      try {
+        owner = await fs.readJson(filePath);
+      } catch (readError) {
+        if (readError.code === 'ENOENT') continue;
+      }
+      if (owner && processIsRunning(Number(owner.pid))) {
+        const active = new Error(`Another ${normalizedMode} contexa init is already running for this project (PID ${owner.pid})`);
+        active.code = 'INIT_ALREADY_RUNNING';
+        active.messageKey = 'init.error.alreadyRunning';
+        active.messageArgs = [normalizedMode, owner.pid];
+        throw active;
+      }
+
+      const stalePath = `${filePath}.stale-${token}`;
+      try {
+        await fs.rename(filePath, stalePath);
+        await fs.remove(stalePath);
+      } catch (replaceError) {
+        if (replaceError.code !== 'ENOENT') throw replaceError;
+      }
+    }
+  }
+  const unavailable = new Error(`Unable to acquire the ${normalizedMode} contexa init lock for this project`);
+  unavailable.code = 'INIT_LOCK_UNAVAILABLE';
+  unavailable.messageKey = 'init.error.lockUnavailable';
+  unavailable.messageArgs = [normalizedMode];
+  throw unavailable;
+}
+
+async function releaseInstallLock(lock) {
+  if (!lock || !lock.filePath || !lock.token) return;
+  let owner;
+  try {
+    owner = await fs.readJson(lock.filePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (owner && owner.token === lock.token) await fs.remove(lock.filePath);
+}
 function toRelative(projectDir, filePath) {
   return path.relative(projectDir, filePath).split(path.sep).join('/');
 }
@@ -1396,10 +1475,13 @@ module.exports = {
   normalizeMode,
   stateRoot,
   manifestPath,
+  installLockPath,
   backupRoot,
   appliedRoot,
   loadManifest,
   saveManifest,
+  acquireInstallLock,
+  releaseInstallLock,
   beginInstallTransaction,
   commitInstallTransaction,
   rollbackInstallTransaction,

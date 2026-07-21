@@ -63,11 +63,13 @@ function buildCliContexaTree(opts = {}) {
   }
 
   const isSimulate = !!simulate;
-  const tree = {
-    security: {
+  const tree = {};
+
+  if (enableAiSecurity || isSimulate) {
+    tree.security = {
       zerotrust: { mode: (isSimulate || mode === 'enforce') ? 'ENFORCE' : 'SHADOW' },
-    },
-  };
+    };
+  }
 
   if (isSimulate) {
     tree.iam = { websocket: { enabled: false } };
@@ -163,6 +165,22 @@ function setPath(obj, pathArr, value) {
   cur[pathArr[pathArr.length - 1]] = value;
 }
 
+function deletePath(obj, pathArr, index = 0) {
+  if (!obj || typeof obj !== 'object') return false;
+  const key = pathArr[index];
+  if (index === pathArr.length - 1) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) return false;
+    delete obj[key];
+    return true;
+  }
+  if (!deletePath(obj[key], pathArr, index + 1)) return false;
+  if (obj[key] && typeof obj[key] === 'object'
+      && !Array.isArray(obj[key]) && Object.keys(obj[key]).length === 0) {
+    delete obj[key];
+  }
+  return true;
+}
+
 // Apply the CLI tree onto the host application's parsed yml object.
 // Policy:
 //   - User-set values are always preserved.
@@ -174,6 +192,13 @@ function applyCliContexaTree(rootObj, cliTree, opts) {
     rootObj.contexa = {};
   }
   const managedPaths = new Set(Array.isArray(opts.managedPaths) ? opts.managedPaths : []);
+  const desiredPaths = new Set(leafEntries(cliTree).map(([pathKey]) => pathKey));
+  for (const pathKey of [...managedPaths]) {
+    if (!desiredPaths.has(pathKey)) {
+      deletePath(rootObj.contexa, pathKey.split('.'));
+      managedPaths.delete(pathKey);
+    }
+  }
   const addedPaths = fillOnly(rootObj.contexa, cliTree);
   for (const [pathKey, value] of leafEntries(cliTree)) {
     if (managedPaths.has(pathKey)) setPath(rootObj.contexa, pathKey.split('.'), value);
@@ -294,12 +319,12 @@ async function injectYml(ymlPath, opts = {}) {
     rootObj.spring.kafka = rootObj.spring.kafka && typeof rootObj.spring.kafka === 'object'
       ? rootObj.spring.kafka : {};
     rootObj.spring.kafka['bootstrap-servers'] = '${KAFKA_BOOTSTRAP_SERVERS}';
-  } else {
-    rootObj.server = rootObj.server && typeof rootObj.server === 'object'
-      ? rootObj.server : {};
-    if (rootObj.server.port === undefined) {
-      rootObj.server.port = '${CONTEXA_SERVER_PORT:9080}';
-    }
+  }
+
+  if (opts.removeLegacyNormalServerPort && rootObj.server
+      && rootObj.server.port === '${CONTEXA_SERVER_PORT:9080}') {
+    delete rootObj.server.port;
+    if (Object.keys(rootObj.server).length === 0) delete rootObj.server;
   }
 
   const application = applyCliContexaTree(rootObj, cliTree, opts);
