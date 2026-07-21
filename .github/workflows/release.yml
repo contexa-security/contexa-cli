@@ -93,9 +93,7 @@ jobs:
           CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
           CONTEXA_TRANSCRIPT_DIR: ${{ github.workspace }}/phase6-evidence/interactive
           CONTEXA_PHASE6_ACTUAL_DOCKER: '1'
-        run: |
-          set -o pipefail
-          node test/interactive-defaults.cjs 2>&1 | tee phase6-evidence/interactive-acceptance.log
+        run: node test/interactive-defaults.cjs
 
       - name: Publish Phase 6 failure detail
         if: failure() && contains(github.ref_name, '-phase6.')
@@ -326,7 +324,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: contexa-security/install-ctxa
-          ref: aafb24afdd8a759c4af803e57e39edaccd631a81
+          ref: 073f031d79e3ca1e1687ea3a63288c1751e83457
           path: installer-contract
           token: ${{ secrets.INSTALLER_ACCEPTANCE_TOKEN || github.token }}
 

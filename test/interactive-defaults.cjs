@@ -58,11 +58,11 @@ async function runLocale(locale, outputDirectory) {
     if (process.env.CONTEXA_PHASE6_ACTUAL_DOCKER === '1' && locale === 'en') {
       const containers = spawnSync('docker', [
         'ps', '-a', '--filter', 'label=io.ctxa.owner=contexa-cli', '--format',
-        '{{.Names}}|{{.Label "io.ctxa.mode"}}|{{.Label "io.ctxa.project"}}|{{.Label "com.docker.compose.service"}}',
+        '{{.Names}}|{{.Label io.ctxa.mode}}|{{.Label io.ctxa.project}}|{{.Label com.docker.compose.service}}',
       ], { encoding: 'utf8', timeout: 10000 });
       const volumes = spawnSync('docker', [
         'volume', 'ls', '--filter', 'label=io.ctxa.owner=contexa-cli', '--format',
-        '{{.Name}}|{{.Label "io.ctxa.mode"}}|{{.Label "io.ctxa.project"}}',
+        '{{.Name}}|{{.Label io.ctxa.mode}}|{{.Label io.ctxa.project}}',
       ], { encoding: 'utf8', timeout: 10000 });
       assert.equal(containers.status, 0, containers.stderr);
       assert.equal(volumes.status, 0, volumes.stderr);
@@ -135,10 +135,8 @@ async function runLocale(locale, outputDirectory) {
       assert.equal(failedSimulation.signal, null, `${locale} failed-recovery timed out`);
       assert.notEqual(failedSimulation.status, 0,
         `${locale} failure injection unexpectedly succeeded`);
-      const rolledBackSimulationManifest = JSON.parse(await fs.readFile(
-        path.join(project, 'contexa', 'simulation', 'manifest.json'), 'utf8'));
-      assert.equal(rolledBackSimulationManifest.transaction.status, 'ROLLED_BACK');
-      assert.deepEqual(rolledBackSimulationManifest.files, []);
+      assert.equal(await fs.pathExists(
+        path.join(project, 'contexa', 'simulation', 'manifest.json')), false);
       assert.equal(await fs.pathExists(path.join(project, 'contexa', 'manifest.json')), true);
       assert.deepEqual(await fs.readFile(buildPath), userModifiedBytes);
       await capture('failed-simulation-rollback', failedSimulation);

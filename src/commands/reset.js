@@ -69,14 +69,7 @@ function simulateComposeEnv(installationId) {
 }
 
 function mergeAudit(target, source) {
-  for (const status of Object.keys(target)) {
-    const resources = new Set(target[status].map(item => item.resource));
-    for (const item of source[status] || []) {
-      if (resources.has(item.resource)) continue;
-      target[status].push(item);
-      resources.add(item.resource);
-    }
-  }
+  for (const status of Object.keys(target)) target[status].push(...(source[status] || []));
 }
 
 function printAudit(audit) {
@@ -186,9 +179,7 @@ module.exports = function (program) {
       try {
         resetManifest = await loadManifest(projectDir, installMode);
       } catch (error) {
-        const formattedError = formatError(error);
-        console.error(chalk.red('  x ' + formattedError));
-        resetAudit.conflict.push({ resource: resetManifestPath, detail: formattedError });
+    resetAudit.conflict.push({ resource: resetManifestPath, detail: formatError(error) });
         printAudit(resetAudit);
         printResetResult(RESET_RESULTS.CONFLICT, installMode, resetAudit, dockerCalls);
         process.exitCode = 1;
