@@ -253,7 +253,10 @@ test('plain init uses the starter-only plan and is idempotent without hidden fla
       env: { ...process.env, PATH: path.dirname(process.execPath) },
     });
     assert.equal(repeated.status, 0, repeated.stderr + repeated.stdout);
-    assert.match(repeated.stdout, /already/i);
+    assert.match(repeated.stdout, /already installed/i);
+    assert.match(repeated.stdout, /No project file was changed/);
+    assert.match(repeated.stdout, /contexa init --simulate/);
+    assert.doesNotMatch(repeated.stdout, /--force|--yes/);
     assert.deepEqual(await snapshotDirectory(fixture.project), committed);
 
     const reset = spawnSync(process.execPath, [cliPath, 'reset'], {
