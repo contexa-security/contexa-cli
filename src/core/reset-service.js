@@ -376,7 +376,10 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
       if (moduleProvenance.length > 0) {
         const target = validatedRelativePath(projectDir, entry.relativePath);
         const current = await fs.pathExists(target) ? await fs.readFile(target, 'utf8') : '';
-        if (!dependencyProvenanceMatches(target, current, moduleProvenance)) {
+        const currentChecksum = fileChecksum(target);
+        const originalChecksum = entry.originalChecksum || null;
+        if (currentChecksum !== originalChecksum
+            && !dependencyProvenanceMatches(target, current, moduleProvenance)) {
           const outcome = {
             status: 'conflict',
             detail: 'canonical dependency provenance no longer matches the current build file',

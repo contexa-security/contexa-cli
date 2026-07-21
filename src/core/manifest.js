@@ -1159,14 +1159,15 @@ async function restoreExternalResources(
       await fs.copy(backupPath, entry.filePath, { overwrite: true });
       audit.restored.push({ resource: entry.filePath, detail: 'original external file restored' });
     } else {
-      if (await fs.pathExists(entry.filePath)) {
+      const externalFileExists = await fs.pathExists(entry.filePath);
+      if (externalFileExists) {
         const currentChecksum = await sha256File(entry.filePath);
         if (entry.appliedChecksum && currentChecksum !== entry.appliedChecksum) {
           throw new Error(`External resource changed after installation; preserved: ${entry.filePath}`);
         }
         await fs.remove(entry.filePath);
+        audit.removed.push({ resource: entry.filePath, detail: 'CLI-created external file removed' });
       }
-      audit.removed.push({ resource: entry.filePath, detail: 'CLI-created external file removed' });
     }
     if (!entry.rootExisted && await fs.pathExists(entry.rootPath)
         && (await fs.readdir(entry.rootPath)).length === 0) {

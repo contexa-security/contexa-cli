@@ -212,7 +212,6 @@ test('init prints the complete plan before the first filesystem mutation', async
         'contexa',
         'init',
         '--yes',
-        '--quick',
         '--dir',
         fixture.project,
       ]),
@@ -540,6 +539,36 @@ test('transaction journal persists every lifecycle state and retains an external
     });
     assert.deepEqual(await fs.readFile(compose), originalCompose);
     assert.deepEqual((await loadManifest(project)).metadata.externalResources, []);
+
+    const generatedPath = path.join(infra, 'generated.yml');
+    const generatedBytes = Buffer.from('generated\n');
+    await fs.writeFile(generatedPath, generatedBytes);
+    const generatedManifest = await loadManifest(project);
+    generatedManifest.metadata.externalResources = [{
+      rootPath: infra,
+      rootExisted: true,
+      filePath: generatedPath,
+      originalExisted: false,
+      appliedChecksum: crypto.createHash('sha256').update(generatedBytes).digest('hex'),
+    }];
+    await saveManifest(project, generatedManifest, INSTALL_MODES.NORMAL);
+    const generatedAudit = await restoreExternalResources(
+      project, generatedManifest, INSTALL_MODES.NORMAL);
+    assert.deepEqual(generatedAudit.removed.map(item => item.resource), [generatedPath]);
+
+    const missingPath = path.join(infra, 'already-removed.yml');
+    const missingManifest = await loadManifest(project);
+    missingManifest.metadata.externalResources = [{
+      rootPath: infra,
+      rootExisted: true,
+      filePath: missingPath,
+      originalExisted: false,
+      appliedChecksum: crypto.createHash('sha256').update('not-written').digest('hex'),
+    }];
+    await saveManifest(project, missingManifest, INSTALL_MODES.NORMAL);
+    const missingAudit = await restoreExternalResources(
+      project, missingManifest, INSTALL_MODES.NORMAL);
+    assert.equal(missingAudit.removed.length, 0);
   } finally {
     await fs.remove(project);
   }
@@ -1121,11 +1150,13 @@ test('reset retry accepts a file already restored before a previous partial fail
   }
 });
 
-test('actual init failure rolls back host files and records ROLLED_BACK', async () => {
-  const { project, build, yml, originalBuild } = await createSpringFixture('ctxa-phase0-command-failure-');
-  const infra = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-command-failure-infra-'));
+test('actual overlay init failure rolls back host files and records ROLLED_BACK', async () => {
+  const { project, build, yml, originalBuild, originalYml } =
+    await createSpringFixture('ctxa-phase0-command-failure-');
+  const infra = path.join(project, '.contexa-test-infra');
+  const overlay = path.join(project, 'src/main/resources/application-contexa.yml');
   const invalidYml = Buffer.from('spring: [unterminated\r\n', 'utf8');
-  await fs.writeFile(yml, invalidYml);
+  await fs.writeFile(overlay, invalidYml);
   try {
     const args = [
       cliPath, 'init', '--yes', '--distributed', '--no-docker',
@@ -1135,13 +1166,14 @@ test('actual init failure rolls back host files and records ROLLED_BACK', async 
     assert.notEqual(init.status, 0, init.stdout);
     assert.doesNotMatch(init.stdout, /Contexa initialization completed successfully/i);
     assert.deepEqual(await fs.readFile(build), Buffer.from(originalBuild, 'utf8'));
-    assert.deepEqual(await fs.readFile(yml), invalidYml);
+    assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
+    assert.deepEqual(await fs.readFile(overlay), invalidYml);
     assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), false);
     const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
     assert.equal(manifest.transaction.status, 'ROLLED_BACK');
     assert.equal(manifest.files.length, 0);
 
-    await fs.writeFile(yml, 'server:\n  port: 9080\n', 'utf8');
+    await fs.remove(overlay);
     const retry = spawnSync(process.execPath, args, { encoding: 'utf8' });
     assert.equal(retry.status, 0, retry.stderr + retry.stdout);
     assert.equal(await fs.pathExists(path.join(infra, 'docker-compose.yml')), true);
