@@ -171,7 +171,8 @@ test('init rejects an infra path outside owned roots with zero project and infra
       env: { ...process.env, PATH: path.dirname(process.execPath) },
     });
     assert.notEqual(result.status, 0, result.stderr + result.stdout);
-    assert.match(result.stderr + result.stdout, /outside Contexa-owned roots/);
+    assert.match(result.stderr + result.stdout, /UNSAFE_INFRA_PATH/);
+    assert.doesNotMatch(result.stderr + result.stdout, /outside Contexa-owned roots/);
     assert.deepEqual(await snapshotDirectory(fixture.project), projectBefore);
     assert.deepEqual(await snapshotDirectory(outsideInfra), infraBefore);
   } finally {
