@@ -1133,9 +1133,14 @@ test('init provenance distinguishes user starter and preserves post-init user ch
     assert.equal(mergedBuild.includes('// customer change after init'), true);
     assert.equal(await fs.pathExists(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL)), false);
 
+    const userStarterCoordinate = [
+      releaseManifest.starter.groupId,
+      releaseManifest.starter.artifactId,
+      releaseManifest.starter.version,
+    ].join(':');
     const preinstalled = userOwned.originalBuild.replace(
       `implementation 'org.springframework.boot:spring-boot-starter-web'`,
-      `implementation 'org.springframework.boot:spring-boot-starter-web'\n  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'`
+      `implementation 'org.springframework.boot:spring-boot-starter-web'\n  implementation '${userStarterCoordinate}'`
     );
     await fs.writeFile(userOwned.build, preinstalled, 'utf8');
     const initUserOwned = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
@@ -1145,9 +1150,12 @@ test('init provenance distinguishes user starter and preserves post-init user ch
     assert.equal(userEntry.ownership, 'USER_OWNED');
     assert.equal(userEntry.cliApplied, false);
     assert.equal(userEntry.lastCliChecksum, null);
+    const userOwnedAfterInit = preinstalled + '// customer change after init\n';
+    await fs.writeFile(userOwned.build, userOwnedAfterInit, 'utf8');
     const resetUserOwned = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
     assert.equal(resetUserOwned.status, 0, resetUserOwned.stderr + resetUserOwned.stdout);
-    assert.equal(await fs.readFile(userOwned.build, 'utf8'), preinstalled);
+    assert.equal(await fs.readFile(userOwned.build, 'utf8'), userOwnedAfterInit);
+    assert.equal(await fs.pathExists(manifestPath(userOwned.project, INSTALL_MODES.NORMAL)), false);
   } finally {
     await fs.remove(cliOwned.project);
     await fs.remove(userOwned.project);
