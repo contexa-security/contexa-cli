@@ -88,6 +88,14 @@ function pathsEqual(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
+function unsafeInfraPathError(message) {
+  const error = new Error(message);
+  error.code = 'UNSAFE_INFRA_PATH';
+  error.messageKey = 'init.error.unsafeInfraPath';
+  error.messageArgs = [];
+  return error;
+}
+
 async function canonicalBoundaryPath(inputPath) {
   const resolved = path.resolve(inputPath);
   let existing = resolved;
@@ -98,7 +106,8 @@ async function canonicalBoundaryPath(inputPath) {
     suffix.unshift(path.basename(existing));
     existing = parent;
   }
-  const canonicalExisting = await fs.realpath(existing);
+  const realpath = fs.realpathSync.native || fs.realpathSync;
+  const canonicalExisting = realpath(existing);
   return path.resolve(canonicalExisting, ...suffix);
 }
 
@@ -106,13 +115,13 @@ async function assertSafeInfraDir(projectDir, infraDir, requestedPath = null) {
   if (!infraDir) return null;
   const raw = requestedPath === null || requestedPath === undefined ? '' : String(requestedPath).trim();
   if (raw && raw.replace(/\\/g, '/').split('/').includes('..')) {
-    throw new Error(`Infrastructure path must not contain parent traversal: ${raw}`);
+    throw unsafeInfraPathError(`Infrastructure path must not contain parent traversal: ${raw}`);
   }
   const resolvedCandidate = path.resolve(infraDir);
   const allowedVolumeRoots = new Set([projectDir, osContexaHome()]
     .map(value => path.parse(path.resolve(value)).root.toLowerCase()));
   if (!allowedVolumeRoots.has(path.parse(resolvedCandidate).root.toLowerCase())) {
-    throw new Error(`Infrastructure path changes drive or UNC root: ${resolvedCandidate}`);
+    throw unsafeInfraPathError(`Infrastructure path changes drive or UNC root: ${resolvedCandidate}`);
   }
   const [canonicalProjectRoot, canonicalContexaHome, canonicalCandidate] = await Promise.all([
     canonicalBoundaryPath(projectDir),
@@ -123,11 +132,11 @@ async function assertSafeInfraDir(projectDir, infraDir, requestedPath = null) {
   if (pathsEqual(canonicalCandidate, volumeRoot)
       || pathsEqual(canonicalCandidate, canonicalProjectRoot)
       || pathsEqual(canonicalCandidate, canonicalContexaHome)) {
-    throw new Error(`Infrastructure path must be a dedicated child directory: ${canonicalCandidate}`);
+    throw unsafeInfraPathError(`Infrastructure path must be a dedicated child directory: ${canonicalCandidate}`);
   }
   if (!pathWithinRoot(canonicalProjectRoot, canonicalCandidate)
       && !pathWithinRoot(canonicalContexaHome, canonicalCandidate)) {
-    throw new Error([
+    throw unsafeInfraPathError([
       `Infrastructure path is outside Contexa-owned roots: ${path.resolve(infraDir)}`,
       `Allowed project root: ${canonicalProjectRoot}`,
       `Allowed Contexa home: ${canonicalContexaHome}`,

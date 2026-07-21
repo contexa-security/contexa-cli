@@ -53,6 +53,7 @@
   "init.simulation.manage": "시뮬레이션 스택만 관리: contexa simulate up | down | reset",
   "init.error.simulationStarterRequired": "시뮬레이션에는 일반 Contexa starter 의존성이 필요합니다. 프로젝트 파일은 변경하지 않았습니다. 먼저 contexa init을 실행한 뒤 contexa init --simulate를 다시 실행하십시오.",
   "init.error.preflight": "프로젝트 파일 변경 전에 인프라 사전 검사가 실패했습니다.",
+  "init.error.unsafeInfraPath": "인프라 디렉터리는 프로젝트 또는 Contexa 홈 아래의 전용 하위 디렉터리여야 합니다.",
   "init.error.geoIpContractMissing": "릴리스 manifest에 GeoIP 아티팩트 계약이 없습니다.",
   "init.error.standaloneWrite": "독립 구성 아티팩트를 기록할 수 없습니다.",
   "init.error.ymlUpdate": "application.yml을 갱신할 수 없습니다.",
