@@ -1,0 +1,57 @@
+name: Phase 6 one hundred lifecycle cycles
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'codex/extreme-phase6-*'
+
+jobs:
+  lifecycle-cycles:
+    name: 100 lifecycle cycles / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            platform: win32
+            arch: x64
+          - os: ubuntu-latest
+            label: ubuntu-x64
+            platform: linux
+            arch: x64
+          - os: macos-14
+            label: macos-arm64
+            platform: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify runner platform and architecture
+        run: node -e "if(process.platform!==process.argv[1]||process.arch!==process.argv[2])throw new Error('Unexpected runner '+process.platform+'/'+process.arch)" ${{ matrix.platform }} ${{ matrix.arch }}
+
+      - name: Run 100 complete init and reset lifecycle cycles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-evidence
+          node test/phase6-long-cycle.cjs --cycles 100 \
+            --evidence phase6-evidence/${{ matrix.label }}-100-cycles.json 2>&1 \
+            | tee phase6-evidence/${{ matrix.label }}-100-cycles.log
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase6-100-cycles-${{ matrix.label }}
+          path: phase6-evidence/
