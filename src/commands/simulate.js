@@ -35,6 +35,13 @@ function simulationError(code, key, ...args) {
   return error;
 }
 
+function normalizeInfrastructureError(error) {
+  if (error && error.code && error.messageKey) return error;
+  const cause = error && error.message ? error.message : 'unknown cause';
+  return simulationError('SIMULATION_INFRASTRUCTURE_UNHEALTHY',
+    'simulate.error.infrastructureUnhealthy', cause);
+}
+
 function dockerCompose(args, context, stdio = 'inherit', execute = dockerComposeExec) {
   const result = execute(args, {
     cwd: context.infraDir,
@@ -296,7 +303,11 @@ module.exports = function registerSimulationCommands(program) {
       await withSimulationMutation(opts, async context => {
         await markDockerLifecycleManaged(context);
         dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
-        await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        try {
+          await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        } catch (error) {
+          throw normalizeInfrastructureError(error);
+        }
         console.log(chalk.green(`  v ${t('simulate.up.success')}`));
       });
     });
@@ -314,7 +325,11 @@ module.exports = function registerSimulationCommands(program) {
         await markDockerLifecycleManaged(context);
         dockerCompose(['-p', SIMULATION_PROJECT, 'down', '-v', '--timeout', '0'], context);
         dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
-        await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        try {
+          await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        } catch (error) {
+          throw normalizeInfrastructureError(error);
+        }
       });
     });
 
@@ -342,7 +357,11 @@ module.exports = function registerSimulationCommands(program) {
       if (!project.isSpring || !project.hasContexta) {
         throw simulationError('SIMULATION_PROJECT_INVALID', 'simulate.error.project');
       }
-      verifySimulationInfrastructure(context.installationId, context.includeOllama);
+      try {
+        verifySimulationInfrastructure(context.installationId, context.includeOllama);
+      } catch (error) {
+        throw normalizeInfrastructureError(error);
+      }
       await executeBuild(project,
         simulationEnvironment(context.env, context.installationId, true));
     });
@@ -354,3 +373,4 @@ module.exports.buildLaunchSpec = buildLaunchSpec;
 module.exports.executeBuild = executeBuild;
 module.exports.stopOwnedChild = stopOwnedChild;
 module.exports.markDockerLifecycleManaged = markDockerLifecycleManaged;
+module.exports.normalizeInfrastructureError = normalizeInfrastructureError;

@@ -18,7 +18,7 @@ const {
 } = require('../src/core/infrastructure');
 const { INSTALLATION_STATES, inspectInstallationState } = require('../src/core/installation-state');
 const { TIMEOUTS } = require('../src/core/timeouts');
-const { executeCompose } = require('../src/commands/simulate');
+const { executeCompose, normalizeInfrastructureError } = require('../src/commands/simulate');
 const { formatError, setLocale } = require('../src/core/i18n');
 const {
   DEPENDENCY_VERSION_DEFAULTS,
@@ -167,6 +167,21 @@ test('simulate compose propagates child process errors and non-zero status', () 
   );
   const success = { status: 0 };
   assert.equal(executeCompose(['ps'], context, 'pipe', () => success), success);
+});
+
+test('simulation infrastructure errors preserve the cause and an actionable recovery command', () => {
+  const normalized = normalizeInfrastructureError(new Error(
+    'Simulation service contract failed for ctxa-sim-postgres: exited|unhealthy'));
+  assert.equal(normalized.code, 'SIMULATION_INFRASTRUCTURE_UNHEALTHY');
+
+  setLocale('en');
+  assert.match(formatError(normalized), /ctxa-sim-postgres/);
+  assert.match(formatError(normalized), /contexa simulate up --dir <project>/);
+
+  setLocale('ko');
+  assert.match(formatError(normalized), /ctxa-sim-postgres/);
+  assert.match(formatError(normalized), /contexa simulate up --dir <project>/);
+  setLocale('en');
 });
 
 test('Korean starter-only init and reset expose no raw key and preserve host configuration', async () => {

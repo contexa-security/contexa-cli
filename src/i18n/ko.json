@@ -367,6 +367,7 @@
   "simulate.logs.description": "시뮬레이션 로그를 실시간으로 표시합니다",
   "simulate.run.description": "시뮬레이션 프로필만 사용해 호스트 애플리케이션을 실행합니다",
   "simulate.error.docker": "docker compose {0} 명령이 상태 {1}로 종료됐습니다",
+  "simulate.error.infrastructureUnhealthy": "시뮬레이션 인프라 검증에 실패했습니다: {0}. contexa simulate up --dir <project>로 격리 스택을 복구한 뒤 다시 실행하십시오.",
   "simulate.error.notInitialized": "시뮬레이션이 준비되지 않았습니다. contexa init --simulate --dir {0}을 실행하세요.",
   "simulate.error.identity": "시뮬레이션 manifest 식별자가 누락됐거나 일치하지 않습니다. 자원을 변경하지 않았습니다.",
   "simulate.error.ports": "시뮬레이션 port 계약이 현재 CLI 릴리스와 다릅니다. 자원을 변경하지 않았습니다.",

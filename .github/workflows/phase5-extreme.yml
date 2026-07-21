@@ -1,0 +1,57 @@
+name: Phase 5 infrastructure failure acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'codex/extreme-phase5-*'
+
+jobs:
+  infrastructure-failure-acceptance:
+    name: Infrastructure failure acceptance / ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x64
+            platform: win32
+            arch: x64
+          - os: ubuntu-latest
+            label: ubuntu-x64
+            platform: linux
+            arch: x64
+          - os: macos-14
+            label: macos-arm64
+            platform: darwin
+            arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify runner platform and architecture
+        run: node -e "if(process.platform!==process.argv[1]||process.arch!==process.argv[2])throw new Error('Unexpected runner '+process.platform+'/'+process.arch)" ${{ matrix.platform }} ${{ matrix.arch }}
+
+      - name: Run Phase 5 infrastructure failure contracts
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p phase5-evidence
+          node --test test/phase5-contract.test.js test/i18n.test.js \
+            test/preflight.test.js test/ollama.test.js 2>&1 \
+            | tee phase5-evidence/phase5-infrastructure.tap
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase5-infrastructure-failure-${{ matrix.label }}
+          path: phase5-evidence/

@@ -367,6 +367,7 @@
   "simulate.logs.description": "Stream simulation logs",
   "simulate.run.description": "Run the host application with only the simulation profile",
   "simulate.error.docker": "docker compose {0} exited with status {1}",
+  "simulate.error.infrastructureUnhealthy": "Simulation infrastructure verification failed: {0}. Run contexa simulate up --dir <project> to restore the isolated stack, then retry.",
   "simulate.error.notInitialized": "Simulation is not initialized. Run contexa init --simulate --dir {0}.",
   "simulate.error.identity": "Simulation manifest identity is incomplete or inconsistent. No resource was changed.",
   "simulate.error.ports": "Simulation port contract does not match this CLI release. No resource was changed.",
