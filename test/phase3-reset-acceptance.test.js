@@ -226,6 +226,7 @@ test('Phase 3 INF01-INF08 reset restores project files and owned infra artifacts
         assert.deepEqual(await fs.readFile(ymlPath), originalYml);
         assert.equal(await fs.pathExists(path.join(project, 'contexa/manifest.json')), false);
         if (profile.init) {
+          assert.match(output(reset), /"dockerCalls":0/);
           assert.equal(await fs.pathExists(path.join(project, 'infra/docker-compose.yml')), false);
         }
       });

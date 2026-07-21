@@ -270,27 +270,32 @@ module.exports = function (program) {
         resetLock = await acquireInstallLock(projectDir, installMode, 'reset');
 
         if (targets.simulate || targets.infra) {
-          const spinner = ora(t('reset.stoppingContainers')).start();
+          const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
+          const spinner = ora(t(dockerLifecycleManaged
+            ? 'reset.stoppingContainers'
+            : 'reset.restoringFiles')).start();
           const ownedInfraDir = planSimInfraDir || planInfraDir;
           try {
-            dockerCalls += 1;
-            const dockerAudit = await performOwnedDockerCleanup({
-              contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
-              mode: installMode,
-              installationId: resetManifest.metadata.installationId,
-              projectName,
-              infraDir: ownedInfraDir,
-              composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
-              env: installMode === INSTALL_MODES.SIMULATION
-                ? simulateComposeEnv(resetManifest.metadata.installationId)
-                : composeEnv(projectName),
-            }, {
-              isCliInstalled: isDockerCliInstalled,
-              isDaemonRunning: isDockerDaemonRunning,
-              inspectLabels: inspectDockerLabels,
-              composeDown: dockerComposeDown,
-            });
-            mergeAudit(resetAudit, dockerAudit);
+            if (dockerLifecycleManaged) {
+              dockerCalls += 1;
+              const dockerAudit = await performOwnedDockerCleanup({
+                contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
+                mode: installMode,
+                installationId: resetManifest.metadata.installationId,
+                projectName,
+                infraDir: ownedInfraDir,
+                composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
+                env: installMode === INSTALL_MODES.SIMULATION
+                  ? simulateComposeEnv(resetManifest.metadata.installationId)
+                  : composeEnv(projectName),
+              }, {
+                isCliInstalled: isDockerCliInstalled,
+                isDaemonRunning: isDockerDaemonRunning,
+                inspectLabels: inspectDockerLabels,
+                composeDown: dockerComposeDown,
+              });
+              mergeAudit(resetAudit, dockerAudit);
+            }
             const externalAudit = await restoreExternalResources(
               projectDir,
               resetManifest,
@@ -300,16 +305,24 @@ module.exports = function (program) {
                   infra: 'skip',
                   dockerResources: null,
                   composeChecksum: null,
+                  dockerLifecycleManaged: false,
                 },
               }
             );
             mergeAudit(resetAudit, externalAudit);
             infraCompleted = true;
-            spinner.succeed(t('reset.dockerRemoved'));
+            spinner.succeed(t(dockerLifecycleManaged
+              ? 'reset.dockerRemoved'
+              : 'reset.filesRestored'));
           } catch (error) {
             resetHadIssues = true;
-          resetAudit.failed.push({ resource: 'docker', detail: formatError(error) });
-          spinner.fail(t('reset.error.dockerCleanup', formatError(error)));
+            resetAudit.failed.push({
+              resource: dockerLifecycleManaged ? 'docker' : 'infrastructure files',
+              detail: formatError(error),
+            });
+            spinner.fail(t(dockerLifecycleManaged
+              ? 'reset.error.dockerCleanup'
+              : 'reset.error.restore', formatError(error)));
           }
         }
 
@@ -349,6 +362,7 @@ module.exports = function (program) {
           finalManifest.metadata.infra = 'skip';
           finalManifest.metadata.dockerResources = null;
           finalManifest.metadata.composeChecksum = null;
+          finalManifest.metadata.dockerLifecycleManaged = false;
         }
         const safeAudit = sanitizeAudit(resetAudit);
         finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
