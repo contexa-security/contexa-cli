@@ -242,7 +242,10 @@ async function executeInit(opts) {
 
       // Simulation has its own ownership state. An existing starter is its
       // prerequisite, not a reason to return from this command.
-      if (project.hasContexta && !opts.simulate) {
+      const normalOwnershipManifestExists = !opts.simulate
+        && await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL));
+      if (project.hasContexta && !opts.simulate
+          && (project.hasEnableAiSecurity || normalOwnershipManifestExists)) {
         if (!opts.force && !opts.yes) {
           await refreshExistingInstallationMetadata(opts.dir, project);
           console.log(chalk.yellow('  ' + t('init.alreadyDetected')));

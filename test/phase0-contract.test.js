@@ -1143,7 +1143,10 @@ test('init provenance distinguishes user starter and preserves post-init user ch
       `implementation 'org.springframework.boot:spring-boot-starter-web'\n  implementation '${userStarterCoordinate}'`
     );
     await fs.writeFile(userOwned.build, preinstalled, 'utf8');
-    const initUserOwned = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
+    const initUserOwned = spawnSync(process.execPath, [cliPath, 'init', '--dir', userOwned.project], {
+      encoding: 'utf8', input: '\n', timeout: 10000,
+      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    });
     assert.equal(initUserOwned.status, 0, initUserOwned.stderr + initUserOwned.stdout);
     const userManifest = await loadManifest(userOwned.project, INSTALL_MODES.NORMAL);
     const userEntry = userManifest.files.find(entry => entry.relativePath === 'build.gradle');
