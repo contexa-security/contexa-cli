@@ -43,6 +43,7 @@ const {
   isDockerCliInstalled,
   isDockerDaemonRunning,
 } = require('../src/core/docker');
+const { canonicalBoundaryPath } = require('../src/core/project');
 
 async function createSpringFixture(prefix) {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -365,10 +366,11 @@ test('normal and simulation manifests, backups, and installation IDs are isolate
     assert.notEqual(backupRoot(project, INSTALL_MODES.NORMAL), backupRoot(project, INSTALL_MODES.SIMULATION));
     const normal = await loadManifest(project, INSTALL_MODES.NORMAL);
     const simulation = await loadManifest(project, INSTALL_MODES.SIMULATION);
+    const canonicalProjectPath = await canonicalBoundaryPath(project);
     assert.equal(normal.metadata.mode, INSTALL_MODES.NORMAL);
     assert.equal(simulation.metadata.mode, INSTALL_MODES.SIMULATION);
-    assert.equal(normal.metadata.canonicalProjectPath, path.resolve(project));
-    assert.equal(simulation.metadata.canonicalProjectPath, path.resolve(project));
+    assert.equal(normal.metadata.canonicalProjectPath, canonicalProjectPath);
+    assert.equal(simulation.metadata.canonicalProjectPath, canonicalProjectPath);
     assert.notEqual(path.resolve(normal.metadata.infraDir), path.resolve(simulation.metadata.infraDir));
     assert.notEqual(normal.metadata.installationId, simulation.metadata.installationId);
     assert.ok(normal.files.every(entry => entry.mode === INSTALL_MODES.NORMAL

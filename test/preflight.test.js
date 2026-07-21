@@ -180,7 +180,12 @@ test('host-level probes require Redis version and Kafka cluster identity', async
   });
 });
 
-test('actual CLI rejects a PostgreSQL HTTP decoy before project or Docker mutation', async () => {
+test('actual CLI rejects a PostgreSQL HTTP decoy before project or Docker mutation', async t => {
+  const docker = spawnSync('docker', ['info'], { encoding: 'utf8', timeout: 3000 });
+  if (docker.error || docker.status !== 0) {
+    t.skip('requires a reachable Docker daemon for actual distributed preflight');
+    return;
+  }
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase7-decoy-'));
   const build = path.join(project, 'build.gradle');
   const yml = path.join(project, 'src/main/resources/application.yml');

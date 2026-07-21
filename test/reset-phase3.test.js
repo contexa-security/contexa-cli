@@ -235,7 +235,7 @@ test('infra boundary rejects parent traversal, outside roots, symlink escape, an
   const outside = await tempProject();
   try {
     const allowed = path.join(project, 'contexa', 'infra');
-    assert.equal(await assertSafeInfraDir(project, allowed), path.resolve(allowed));
+    assert.equal(await assertSafeInfraDir(project, allowed), await canonicalBoundaryPath(allowed));
 
     const traversalTarget = path.join(project, 'escaped');
     await assert.rejects(
