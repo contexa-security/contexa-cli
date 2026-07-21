@@ -10,6 +10,7 @@ const { spawn } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
 const cliPath = path.join(root, 'src', 'index.js');
+const releaseManifest = require('../release-manifest.json');
 const geoSource = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
 const {
   INSTALL_MODES,
@@ -36,7 +37,7 @@ async function createProject(parent, name, applicationYml = 'server:\n  port: 90
     'repositories { mavenCentral() }',
     'dependencies {',
     "  implementation 'org.springframework.boot:spring-boot-starter-web'",
-    "  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'",
+    `  implementation 'ai.ctxa:spring-boot-starter-contexa:${releaseManifest.starter.version}'`,
     '}',
     '',
   ].join('\n'), 'utf8');
