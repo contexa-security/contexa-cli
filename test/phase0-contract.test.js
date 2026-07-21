@@ -321,6 +321,8 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /name: signed-release-gate-\$\{\{ github\.sha \}\}/);
   assert.equal((workflow.match(/if: startsWith\(github\.ref, 'refs\/tags\/'\)/g) || []).length, 2);
   assert.equal((workflow.match(/^\s*run: npm test\s*$/gm) || []).length, 1);
+  assert.match(workflow,
+    /Run final full source regression once[\s\S]*CONTEXA_TEST_GEOLITE2_SOURCE_PATH:[^\n]*phase6-evidence\/GeoLite2-City\.mmdb[\s\S]*run: npm test/);
   const phase6Workflow = fs.readFileSync(
     path.join(root, '.github/workflows/phase6-extreme.yml'), 'utf8');
   assert.match(phase6Workflow, /^  exact-command-docker:/m);

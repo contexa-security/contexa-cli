@@ -153,6 +153,8 @@ jobs:
 
       - name: Run final full source regression once
         if: runner.os == 'Linux'
+        env:
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
         run: npm test
 
       - name: Bundle
