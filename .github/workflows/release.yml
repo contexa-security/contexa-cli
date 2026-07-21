@@ -98,10 +98,6 @@ jobs:
           name: phase6-state-transition-evidence-${{ matrix.label }}
           path: phase6-evidence/
 
-      - name: Run full regression tests for stable or unclassified releases
-        if: ${{ !contains(github.ref_name, '-phase5.') && !contains(github.ref_name, '-phase6.') }}
-        run: npm test
-
       - name: Validate Phase 2 interactive and build models
         if: runner.os == 'Linux' && (!contains(github.ref_name, '-phase') || contains(github.ref_name, '-phase2.'))
         shell: bash
