@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - 'codex/extreme-phase6-*'
 
 jobs:
   build:
@@ -53,7 +55,7 @@ jobs:
       - name: Validate release contract
         shell: bash
         run: |
-          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(m.starter.version)) throw new Error('invalid starter version'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
+          node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (process.env.GITHUB_REF_TYPE === 'tag' && m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(m.starter.version)) throw new Error('invalid starter version'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
 
       - name: Run Phase 5 focused regression tests
         if: contains(github.ref_name, '-phase5.')
@@ -343,7 +345,19 @@ jobs:
           node --test --test-name-pattern=CLI.release.bundle
           installer-contract/test/installer-runtime.test.js
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-gate-${{ github.sha }}
+          path: |
+            release-manifest.json
+            release-manifest.json.sig
+            channel-manifest.json
+            channel-manifest.json.sig
+            release-signing-public.pem
+            dist/
+
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: Contexa CLI ${{ github.ref_name }}
           prerelease: true
@@ -367,6 +381,7 @@ jobs:
             dist/contexa-win-x64.exe/contexa-win-x64.exe.sha256
 
       - name: Publish signed snapshot channel
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           set -euo pipefail

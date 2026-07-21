@@ -317,6 +317,9 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.doesNotMatch(workflow,
     /Run Phase 6 exact commands against the built binary\s+if:.*-phase6\./);
   assert.match(workflow, /ref: f4e49bc79e740f0e136e5838a4053df5f8808d5c/);
+  assert.match(workflow, /branches:\s+- 'codex\/extreme-phase6-\*'/);
+  assert.match(workflow, /name: signed-release-gate-\$\{\{ github\.sha \}\}/);
+  assert.equal((workflow.match(/if: startsWith\(github\.ref, 'refs\/tags\/'\)/g) || []).length, 2);
   const phase6Workflow = fs.readFileSync(
     path.join(root, '.github/workflows/phase6-extreme.yml'), 'utf8');
   assert.match(phase6Workflow, /^  exact-command-docker:/m);
