@@ -107,7 +107,9 @@ function printPlannedChanges(answers, project, paths) {
   } else {
     items.push(t('planned.aiDisabled'));
   }
-  if (answers.infra !== 'skip') {
+  if (paths.preserveManagedDocker) {
+    items.push(t('planned.managedDockerPreserved'));
+  } else if (answers.infra !== 'skip') {
     items.push(t('planned.pathAction', paths.composeExists ? 'MODIFY' : 'CREATE',
       t('planned.createInfra'), paths.composePath));
     items.push(answers.startDocker ? t('planned.dockerStart') : t('planned.dockerSkip'));

@@ -304,9 +304,14 @@ async function executeInit(opts) {
             ? simulationGeoIpPath(opts.dir)
             : path.join(opts.dir, 'contexa', 'data', 'GeoLite2-City.mmdb'))
         : null;
-      const plannedInfraDir = answers.infra !== 'skip'
-        ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride })
-        : null;
+      const preflightManifest = await loadManifest(opts.dir, installMode);
+      const preserveManagedDocker = preflightManifest.metadata.dockerLifecycleManaged === true
+        && !answers.startDocker;
+      const plannedInfraDir = preserveManagedDocker
+        ? preflightManifest.metadata.infraDir
+        : answers.infra !== 'skip'
+          ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride })
+          : null;
       if (plannedInfraDir) {
         await assertSafeInfraDir(opts.dir, plannedInfraDir, requestedInfraDir);
       }
@@ -363,6 +368,7 @@ async function executeInit(opts) {
             standaloneDir,
             composePath: plannedComposePath,
             composeExists: plannedComposeExists,
+            preserveManagedDocker,
             geoIpPath: plannedGeoIpPath,
             geoIpExists: plannedGeoIpExists,
             geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
@@ -378,14 +384,18 @@ async function executeInit(opts) {
             starterPresent: !!project.hasContexta,
             composePath: plannedComposePath,
             composeExists: plannedComposeExists,
+            preserveManagedDocker,
             geoIpPath: plannedGeoIpPath,
             geoIpExists: plannedGeoIpExists,
             geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
           });
 
-      const preflightManifest = await loadManifest(opts.dir, installMode);
+      const transactionInfra = preserveManagedDocker
+        ? preflightManifest.metadata.infra : answers.infra;
+      const transactionInfraDir = preserveManagedDocker
+        ? preflightManifest.metadata.infraDir : plannedInfraDir;
       let plannedInfraIssues = [];
-      if (answers.infra !== 'skip') {
+      if (answers.infra !== 'skip' && !preserveManagedDocker) {
         plannedInfraIssues = await inspectInfra({
           infra: answers.infra,
           startDocker: answers.startDocker,
@@ -410,10 +420,11 @@ async function executeInit(opts) {
       installTransactionId = await beginInstallTransaction(opts.dir, {
         projectName: cliProjectName,
         integrationMode: answers.integrationMode,
-        infra: answers.infra,
-        infraDir: plannedInfraDir,
+        infra: transactionInfra,
+        infraDir: transactionInfraDir,
         simInfraDir: opts.simulate ? resolveInfraDir('ctxa-sim', { infraDir: infraDirOverride }) : null,
-        dockerLifecycleManaged: answers.infra !== 'skip' && Boolean(answers.startDocker),
+        dockerLifecycleManaged: preserveManagedDocker
+          || (answers.infra !== 'skip' && Boolean(answers.startDocker)),
         aiSecurityRequested: !!answers.enableAiSecurity,
         aiSecurityEnabled: false,
       }, installMode, plannedFiles, {
@@ -699,8 +710,10 @@ async function executeInit(opts) {
       // customer project's existing docker-compose.yml (if any) is therefore
       // never touched. Default location is OS-specific contexa home; users
       // can override via --infra-dir.
-      let infraDir = null;
-      if (answers.infra !== 'skip') {
+      let infraDir = preserveManagedDocker ? preflightManifest.metadata.infraDir : null;
+      if (preserveManagedDocker) {
+        console.log(chalk.green(`  v ${t('init.infrastructure.managedDockerPreserved')}`));
+      } else if (answers.infra !== 'skip') {
         const includesOllama = !!(answers.llmProviders && answers.llmProviders.includes('ollama'));
         if (answers.infra === 'distributed') {
           console.log(chalk.cyan(`\n  ${t('init.infrastructure.distributed',
@@ -877,6 +890,7 @@ async function executeInit(opts) {
         aiAnnotationApplied,
         aiDependenciesProcessed,
         starterDependencyChanged,
+        preserveManagedDocker,
       });
 
       } catch (error) {

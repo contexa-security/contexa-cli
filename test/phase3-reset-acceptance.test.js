@@ -10,7 +10,13 @@ const { spawn } = require('node:child_process');
 
 const root = path.join(__dirname, '..');
 const cliPath = path.join(root, 'src', 'index.js');
-const { INSTALL_MODES, acquireInstallLock, releaseInstallLock } = require('../src/core/manifest');
+const {
+  INSTALL_MODES,
+  acquireInstallLock,
+  releaseInstallLock,
+  loadManifest,
+  saveManifest,
+} = require('../src/core/manifest');
 
 async function createProject(parent, name) {
   const project = path.join(parent, name);
@@ -182,6 +188,40 @@ test('Phase 3 same-project ten-way reset rejects a live operation and retry succ
   }
 });
 
+test('Phase 3 no-docker re-init preserves existing Docker reset ownership', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase3-docker-ownership-'));
+  const project = await createProject(parent, 'docker-ownership');
+  const environment = {
+    CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+  };
+  try {
+    assertSuccess(await runCli(project, 'init', [], environment), 'initial no-docker init');
+    const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
+    const originalInfraDir = manifest.metadata.infraDir;
+    const originalContract = structuredClone(manifest.metadata.dockerResources);
+    const originalComposeChecksum = manifest.metadata.composeChecksum;
+    const composePath = path.join(originalInfraDir, 'docker-compose.yml');
+    const originalCompose = await fs.readFile(composePath);
+
+    manifest.metadata.dockerLifecycleManaged = true;
+    await saveManifest(project, manifest, INSTALL_MODES.NORMAL);
+
+    const repeated = await runCli(project, 'init', [], environment);
+    assertSuccess(repeated, 'no-docker re-init');
+    const updated = await loadManifest(project, INSTALL_MODES.NORMAL);
+    assert.equal(updated.metadata.dockerLifecycleManaged, true);
+    assert.equal(updated.metadata.infraDir, originalInfraDir);
+    assert.deepEqual(updated.metadata.dockerResources, originalContract);
+    assert.equal(updated.metadata.composeChecksum, originalComposeChecksum);
+    assert.deepEqual(await fs.readFile(composePath), originalCompose);
+    assert.match(output(repeated), /Existing Contexa infrastructure remains owned/);
+  } finally {
+    await fs.remove(parent);
+  }
+});
 test('Phase 3 reset remains a stable no-op across 100 sequential runs', { timeout: 120000 }, async () => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase3-repeat-'));
   const project = await createProject(parent, 'repeat-reset');

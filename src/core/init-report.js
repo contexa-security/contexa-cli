@@ -17,6 +17,7 @@ function printInitCompletion(context) {
     aiAnnotationApplied,
     aiDependenciesProcessed,
     starterDependencyChanged,
+    preserveManagedDocker,
   } = context;
 
   console.log(chalk.cyan('\n  ============================================================'));
@@ -36,7 +37,9 @@ function printInitCompletion(context) {
       ? 'init.report.starterAdded' : 'init.report.starterPresent')}`));
   }
 
-  if (answers.infra !== 'skip') {
+  if (preserveManagedDocker) {
+    console.log(chalk.gray(`    v ${t('init.report.infrastructurePreserved')}`));
+  } else if (answers.infra !== 'skip') {
     console.log(chalk.gray(`    v ${t('init.report.infrastructureProcessed')}`));
   }
 
