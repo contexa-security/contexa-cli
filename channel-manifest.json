@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "channel": "snapshot",
+  "releaseTag": "v0.1.5",
+  "cliVersion": "0.1.5",
+  "starterVersion": "0.1.0",
+  "sourceCommit": "591ad0a897d896e95f55709abf5f18023f045d85",
+  "releaseManifestSha256": "03847f374264e67dce3dd55c0a7929e0aa25cf76548579566752e73ae1a50103"
+}
