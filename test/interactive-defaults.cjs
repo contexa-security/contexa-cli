@@ -96,6 +96,7 @@ function sha256(value) {
 
 async function runLocale(locale, outputDirectory) {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), `ctxa-interactive-${locale}-`));
+  const actualDocker = process.env.CONTEXA_PHASE6_ACTUAL_DOCKER === '1' && locale === 'en';
   const rawTranscript = path.join(outputDirectory, `${locale}-raw.txt`);
   const buildPath = path.join(project, 'build.gradle');
   const ymlPath = path.join(project, 'src/main/resources/application.yml');
@@ -112,7 +113,7 @@ async function runLocale(locale, outputDirectory) {
   const records = [];
   async function capture(name, result) {
     const dockerState = { containers: [], volumes: [] };
-    if (process.env.CONTEXA_PHASE6_ACTUAL_DOCKER === '1' && locale === 'en') {
+    if (actualDocker) {
       const containers = spawnSync('docker', [
         'ps', '-a', '--filter', 'label=io.ctxa.owner=contexa-cli', '--format',
         '{{.Names}}|{{.Label "io.ctxa.mode"}}|{{.Label "io.ctxa.project"}}|{{.Label "com.docker.compose.service"}}',
@@ -146,8 +147,11 @@ async function runLocale(locale, outputDirectory) {
       await fs.outputFile(configPath, content, 'utf8');
     }
     await fs.outputFile(sourcePath, originalSource, 'utf8');
+    const initArgs = ['init'];
+    if (!actualDocker) initArgs.push('--no-docker');
+    initArgs.push('--dir', project);
     const result = await runPromptedPseudoTerminal(
-      ['init', '--dir', project], ['\n', '\n', '\n'], rawTranscript, 120000, {
+      initArgs, ['\n', '\n', '\n'], rawTranscript, actualDocker ? 120000 : 20000, {
         CONTEXA_LANG: locale,
         CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
       });
@@ -159,10 +163,16 @@ async function runLocale(locale, outputDirectory) {
     await fs.writeFile(path.join(outputDirectory, `${locale}-대화형-기본값.txt`), transcript, 'utf8');
     assert.match(transcript, /SETUP: QUICK/);
     assert.match(transcript, /INTEGRATION: MERGE/);
-    assert.match(transcript, /Apply explicit Contexa settings/);
-    assert.match(transcript, /DOCKER: START/);
-    assert.match(transcript, /GeoLite2-City\.mmdb/);
     assert.doesNotMatch(transcript, /INTEGRATION: STANDALONE/);
+    const installedManifest = await fs.readJson(path.join(project, 'contexa', 'manifest.json'));
+    assert.equal(installedManifest.metadata.infra, 'standalone');
+    assert.equal(installedManifest.metadata.dockerLifecycleManaged, actualDocker);
+    assert.equal(await fs.pathExists(
+      path.join(installedManifest.metadata.infraDir, 'docker-compose.yml')), true);
+    assert.equal(await fs.pathExists(path.join(project,
+      'src', 'main', 'resources', 'application-contexa.yml')), true);
+    assert.equal(await fs.pathExists(path.join(project,
+      'contexa', 'data', 'GeoLite2-City.mmdb')), true);
     for (const [configPath, content] of configFiles) {
       assert.deepEqual(await fs.readFile(configPath), Buffer.from(content, 'utf8'));
     }
@@ -184,7 +194,7 @@ async function runLocale(locale, outputDirectory) {
     }
     await capture('user-modified-init-rerun', rerun);
 
-    if (process.env.CONTEXA_PHASE6_ACTUAL_DOCKER === '1' && locale === 'en') {
+    if (actualDocker) {
       const failedTranscript = path.join(outputDirectory, `${locale}-failed-recovery-raw.txt`);
       const missingGeoIp = path.join(project, 'missing-phase6-geoip.mmdb');
       const failedSimulation = runPseudoTerminal(
