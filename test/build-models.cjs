@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('node:url');
 const { injectMavenDep, injectGradleDep } = require('../src/core/injector/build');
+const releaseManifest = require('../release-manifest.json');
 
 function run(command, args, cwd, timeout = 120000) {
   const shell = process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command);
@@ -65,13 +66,24 @@ async function verifyMavenFixtures(root, evidence, repositoryRoot) {
 }
 
 async function createDummyStarter(root) {
-  const artifact = path.join(root, 'repo', 'ai', 'ctxa', 'spring-boot-starter-contexa', '0.1.0-SNAPSHOT');
+  const starterVersion = releaseManifest.starter.version;
+  const artifact = path.join(
+    root, 'repo', 'ai', 'ctxa', 'spring-boot-starter-contexa', starterVersion);
   const empty = path.join(root, 'empty-jar');
   await fs.ensureDir(empty);
   await fs.ensureDir(artifact);
-  run('jar', ['--create', '--file', path.join(artifact, 'spring-boot-starter-contexa-0.1.0-SNAPSHOT.jar'), '-C', empty, '.'], root);
-  await fs.writeFile(path.join(artifact, 'spring-boot-starter-contexa-0.1.0-SNAPSHOT.pom'),
-    '<project><modelVersion>4.0.0</modelVersion><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId><version>0.1.0-SNAPSHOT</version></project>\n', 'utf8');
+  const artifactName = `spring-boot-starter-contexa-${starterVersion}`;
+  run('jar', [
+    '--create', '--file', path.join(artifact, `${artifactName}.jar`), '-C', empty, '.',
+  ], root);
+  const pom = `<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>ai.ctxa</groupId>
+  <artifactId>spring-boot-starter-contexa</artifactId>
+  <version>${starterVersion}</version>
+</project>
+`;
+  await fs.writeFile(path.join(artifact, `${artifactName}.pom`), pom, 'utf8');
   return path.join(root, 'repo');
 }
 
