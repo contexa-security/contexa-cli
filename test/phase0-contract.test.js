@@ -331,13 +331,14 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
     /- name: Run Phase 6 exact commands against the built binary\s+if: runner\.os == 'Linux'/);
   assert.doesNotMatch(workflow,
     /Run Phase 6 exact commands against the built binary\s+if:.*-phase6\./);
-  assert.match(workflow, /ref: f4e49bc79e740f0e136e5838a4053df5f8808d5c/);
+  assert.match(workflow, /ref: 0af591c80b4fbe7e1e623886ed10e277c07d2291/);
   assert.doesNotMatch(workflow, /codex\/extreme-phase6-/);
   assert.match(workflow, /name: signed-release-gate-\$\{\{ github\.sha \}\}/);
   assert.equal((workflow.match(/if: startsWith\(github\.ref, 'refs\/tags\/'\)/g) || []).length, 3);
-  assert.equal((workflow.match(/^\s*run: npm test\s*$/gm) || []).length, 1);
+  assert.equal((workflow.match(/^\s*run: npm test\s*$/gm) || []).length, 0);
   assert.match(workflow,
-    /Run final full source regression once[\s\S]*CONTEXA_TEST_GEOLITE2_SOURCE_PATH:[^\n]*phase6-evidence\/GeoLite2-City\.mmdb[\s\S]*run: npm test/);
+    /Run Phase 5 focused regression tests\s+if: runner\.os == 'Linux'/);
+  assert.doesNotMatch(workflow, /contains\(github\.ref_name, '-phase/);
   assert.equal(fs.existsSync(path.join(root, '.github/workflows/phase6-extreme.yml')), false);
 });
 
