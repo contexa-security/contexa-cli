@@ -180,7 +180,61 @@ test('host-level probes require Redis version and Kafka cluster identity', async
   });
 });
 
-test('actual CLI rejects a PostgreSQL HTTP decoy before project or Docker mutation', async () => {
+test('host-level probes reject PostgreSQL and Redis authentication challenges', async () => {
+  await withTcpFixture(socket => {
+    socket.once('data', () => {
+      const authentication = Buffer.alloc(9);
+      authentication[0] = 0x52;
+      authentication.writeInt32BE(8, 1);
+      authentication.writeInt32BE(3, 5);
+      socket.end(authentication);
+    });
+  }, async port => {
+    const result = await probeHostServiceIdentity('postgres', '127.0.0.1', port, {
+      databaseName: 'expected_db',
+      databaseUser: 'expected_user',
+      timeoutMs: 100,
+    });
+    assert.deepEqual(result, {
+      protocol: 'postgres',
+      verified: false,
+      identity: 'postgres:authentication-required',
+    });
+  });
+
+  await withTcpFixture(() => {}, async port => {
+    const result = await probeHostServiceIdentity('postgres', '127.0.0.1', port, {
+      timeoutMs: 60,
+    });
+    assert.equal(result.protocol, 'silent');
+    assert.equal(result.verified, false);
+  });
+
+  const dnsFailure = await probeHostServiceIdentity(
+    'postgres', 'phase5-does-not-exist.invalid', 5432, { timeoutMs: 100 });
+  assert.equal(dnsFailure.verified, false);
+  assert.equal(dnsFailure.protocol, 'unknown');
+
+  await withTcpFixture(socket => {
+    socket.once('data', () => socket.end('-NOAUTH Authentication required.\\r\\n'));
+  }, async port => {
+    const result = await probeHostServiceIdentity('redis', '127.0.0.1', port, {
+      timeoutMs: 100,
+    });
+    assert.deepEqual(result, {
+      protocol: 'redis',
+      verified: false,
+      identity: 'redis:authentication-required',
+    });
+  });
+});
+
+test('actual CLI rejects a PostgreSQL HTTP decoy before project or Docker mutation', async t => {
+  const docker = spawnSync('docker', ['info'], { encoding: 'utf8', timeout: 3000 });
+  if (docker.error || docker.status !== 0) {
+    t.skip('requires a reachable Docker daemon for actual distributed preflight');
+    return;
+  }
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase7-decoy-'));
   const build = path.join(project, 'build.gradle');
   const yml = path.join(project, 'src/main/resources/application.yml');

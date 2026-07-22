@@ -324,6 +324,9 @@ async function removeTrackedSnapshots(projectDir, mode, entry) {
 async function restoreEntry(projectDir, mode, entry) {
   const target = validatedRelativePath(projectDir, entry.relativePath);
   const currentChecksum = fileChecksum(target);
+  if (entry.ownership === 'USER_OWNED' && entry.cliApplied === false) {
+    return { status: 'preserved', detail: 'user-owned file was not changed by CLI' };
+  }
   const originalChecksum = entry.originalChecksum || null;
   const appliedChecksum = entry.appliedChecksum || entry.lastCliChecksum || entry.currentChecksum || null;
   if (currentChecksum === originalChecksum) return { status: 'restored', detail: 'already at original state' };
@@ -367,13 +370,12 @@ async function restoreEntry(projectDir, mode, entry) {
 async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
   const manifest = await loadManifest(projectDir, mode);
   const audit = emptyAudit();
-  const remaining = [];
   const entries = [...manifest.files].sort((left, right) => right.relativePath.length - left.relativePath.length);
   for (const entry of entries) {
     try {
       const moduleProvenance = dependencyProvenanceForEntry(
         manifest.metadata.dependencyProvenance, entry);
-      if (moduleProvenance.length > 0) {
+      if (moduleProvenance.length > 0 && entry.cliApplied !== false) {
         const target = validatedRelativePath(projectDir, entry.relativePath);
         const current = await fs.pathExists(target) ? await fs.readFile(target, 'utf8') : '';
         const currentChecksum = fileChecksum(target);
@@ -385,28 +387,27 @@ async function restoreProjectFiles(projectDir, mode = INSTALL_MODES.NORMAL) {
             detail: 'canonical dependency provenance no longer matches the current build file',
           };
           record(audit, outcome.status, entry.relativePath, outcome.detail);
-          remaining.push(entry);
           continue;
         }
       }
       const outcome = await restoreEntry(projectDir, mode, entry);
       record(audit, outcome.status, entry.relativePath, outcome.detail);
-      if (outcome.status === 'conflict') remaining.push(entry);
-      else {
-        await removeTrackedSnapshots(projectDir, mode, entry);
+      if (outcome.status !== 'conflict') {
+        manifest.files = manifest.files.filter(
+          tracked => tracked.relativePath !== entry.relativePath);
         if (moduleProvenance.length > 0) {
           const moduleName = moduleNameForBuildEntry(entry);
           manifest.metadata.dependencyProvenance =
             manifest.metadata.dependencyProvenance.filter(
               coordinate => coordinate.targetModule !== moduleName);
         }
+        await saveManifest(projectDir, manifest, mode);
+        await removeTrackedSnapshots(projectDir, mode, entry);
       }
     } catch (error) {
       record(audit, 'failed', entry.relativePath, error.message);
-      remaining.push(entry);
     }
   }
-  manifest.files = remaining;
   await saveManifest(projectDir, manifest, mode);
   return { audit, manifest };
 }

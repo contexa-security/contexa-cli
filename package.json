@@ -1,6 +1,6 @@
 {
   "name": "contexa-cli",
-  "version": "0.1.2-phase6.9",
+  "version": "0.1.4",
   "description": "Contexa CLI - AI-Native Zero Trust Security for Spring Boot",
   "main": "src/index.js",
   "bin": {
@@ -46,10 +46,11 @@
     "commander": "^11.0.0",
     "fs-extra": "^11.1.1",
     "inquirer": "^8.2.6",
-    "js-yaml": "^4.1.1",
+    "js-yaml": "^4.3.0",
     "ora": "^5.4.1"
   },
   "devDependencies": {
-    "esbuild": "^0.20.0"
+    "esbuild": "^0.28.1",
+    "postject": "1.0.0-alpha.6"
   }
 }

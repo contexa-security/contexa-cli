@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const fs = require('fs-extra');
+const fsPromises = require('node:fs/promises');
 const path = require('path');
 const releaseManifest = require('../../release-manifest.json');
 const { canonicalBoundaryPath, pathsEqual } = require('./project');
@@ -11,6 +12,7 @@ const MANIFEST_VERSION = 4;
 const RESOURCE_DIGEST_VERSION = 1;
 const TRANSACTION_JOURNAL_DIGEST_VERSION = 1;
 const INSTALL_MODES = Object.freeze({ NORMAL: 'normal', SIMULATION: 'simulation' });
+const BACKUP_LAYOUTS = Object.freeze({ LEGACY: 'legacy-v1', ISOLATED: 'isolated-v1' });
 const JOURNAL_STATES = Object.freeze({
   PLANNED: 'PLANNED',
   PREPARED: 'PREPARED',
@@ -35,8 +37,24 @@ function manifestPath(projectDir, mode = INSTALL_MODES.NORMAL) {
   return path.join(stateRoot(projectDir, mode), 'manifest.json');
 }
 
+function backupLayout(projectDir, mode = INSTALL_MODES.NORMAL) {
+  const p = manifestPath(projectDir, mode);
+  if (!fs.existsSync(p)) return BACKUP_LAYOUTS.ISOLATED;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return parsed.metadata && parsed.metadata.backupLayout === BACKUP_LAYOUTS.ISOLATED
+      ? BACKUP_LAYOUTS.ISOLATED : BACKUP_LAYOUTS.LEGACY;
+  } catch {
+    // loadManifest reports malformed manifests. Keep legacy resolution here so
+    // backupRoot never redirects recovery data before that validation occurs.
+    return BACKUP_LAYOUTS.LEGACY;
+  }
+}
+
 function backupRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
-  return path.join(stateRoot(projectDir, mode), 'bak');
+  const root = stateRoot(projectDir, mode);
+  return backupLayout(projectDir, mode) === BACKUP_LAYOUTS.ISOLATED
+    ? path.join(root, '.cli', 'bak') : path.join(root, 'bak');
 }
 
 function appliedRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
@@ -47,6 +65,92 @@ function transactionBackupRoot(projectDir, transactionId, mode = INSTALL_MODES.N
   return path.join(backupRoot(projectDir, mode), '__transactions__', transactionId);
 }
 
+function installLockPath(projectDir, mode = INSTALL_MODES.NORMAL) {
+  return path.join(stateRoot(projectDir, mode), '.init.lock');
+}
+
+function processIsRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code === 'EPERM';
+  }
+}
+
+async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL, operation = 'init') {
+  const normalizedMode = normalizeMode(mode);
+  const filePath = installLockPath(projectDir, normalizedMode);
+  const token = crypto.randomUUID();
+  const state = {
+    pid: process.pid,
+    token,
+    mode: normalizedMode,
+    operation,
+    startedAt: new Date().toISOString(),
+  };
+  await fs.ensureDir(path.dirname(filePath));
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let handle;
+    try {
+      handle = await fsPromises.open(filePath, 'wx');
+      await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, 'utf8');
+      await handle.close();
+      return { filePath, token };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => {});
+      if (!error || error.code !== 'EEXIST') throw error;
+
+      let owner = null;
+      try {
+        owner = await fs.readJson(filePath);
+      } catch (readError) {
+        if (readError.code === 'ENOENT') continue;
+      }
+      if (owner && processIsRunning(Number(owner.pid))) {
+        const active = new Error(`Another contexa ${operation} is already running for this project's ${normalizedMode} state (PID ${owner.pid})`);
+        active.code = 'INIT_ALREADY_RUNNING';
+        active.messageKey = 'init.error.alreadyRunning';
+        active.messageArgs = [operation, normalizedMode, owner.pid];
+        throw active;
+      }
+
+      const stalePath = `${filePath}.stale-${token}`;
+      try {
+        await fs.rename(filePath, stalePath);
+        await fs.remove(stalePath);
+      } catch (replaceError) {
+        if (replaceError.code !== 'ENOENT') throw replaceError;
+      }
+    }
+  }
+  const unavailable = new Error(`Unable to acquire the contexa ${operation} lock for this project's ${normalizedMode} state`);
+  unavailable.code = 'INIT_LOCK_UNAVAILABLE';
+  unavailable.messageKey = 'init.error.lockUnavailable';
+  unavailable.messageArgs = [operation, normalizedMode];
+  throw unavailable;
+}
+
+async function releaseInstallLock(lock) {
+  if (!lock || !lock.filePath || !lock.token) return;
+  let owner;
+  try {
+    owner = await fs.readJson(lock.filePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (owner && owner.token === lock.token) {
+    await fs.remove(lock.filePath);
+    const stateDirectory = path.dirname(lock.filePath);
+    if (await fs.pathExists(stateDirectory)
+        && (await fs.readdir(stateDirectory)).length === 0) {
+      await fs.remove(stateDirectory);
+    }
+  }
+}
 function toRelative(projectDir, filePath) {
   return path.relative(projectDir, filePath).split(path.sep).join('/');
 }
@@ -227,6 +331,7 @@ function installMetadata(projectDir, currentMetadata, metadata, mode) {
     ...current,
     ...(metadata || {}),
     mode,
+    backupLayout: current.backupLayout || backupLayout(projectDir, mode),
     installationId: current.installationId || crypto.randomUUID(),
     canonicalProjectPath: canonicalProjectPathSync(projectDir),
     cliVersion: releaseManifest.cliVersion,
@@ -250,7 +355,11 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
   const normalizedMode = normalizeMode(mode);
   const p = manifestPath(projectDir, normalizedMode);
   if (!await fs.pathExists(p)) {
-    return { version: MANIFEST_VERSION, metadata: { mode: normalizedMode }, files: [] };
+    return {
+      version: MANIFEST_VERSION,
+      metadata: { mode: normalizedMode, backupLayout: BACKUP_LAYOUTS.ISOLATED },
+      files: [],
+    };
   }
   let parsed;
   try {
@@ -263,6 +372,7 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
     version: parsed.version,
     metadata: {
       mode: normalizedMode,
+      backupLayout: backupLayout(projectDir, normalizedMode),
       ...(parsed.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {}),
     },
     files: Array.isArray(parsed.files) ? parsed.files : [],
@@ -509,6 +619,8 @@ async function saveManifest(projectDir, manifest, mode = INSTALL_MODES.NORMAL) {
     metadata: {
       ...suppliedMetadata,
       mode: normalizedMode,
+      backupLayout: suppliedMetadata.backupLayout
+        || backupLayout(projectDir, normalizedMode),
       installationId: suppliedMetadata.installationId || crypto.randomUUID(),
       canonicalProjectPath: canonicalProjectPathSync(projectDir),
       cliVersion: suppliedMetadata.cliVersion || releaseManifest.cliVersion,
@@ -1396,10 +1508,13 @@ module.exports = {
   normalizeMode,
   stateRoot,
   manifestPath,
+  installLockPath,
   backupRoot,
   appliedRoot,
   loadManifest,
   saveManifest,
+  acquireInstallLock,
+  releaseInstallLock,
   beginInstallTransaction,
   commitInstallTransaction,
   rollbackInstallTransaction,

@@ -11,6 +11,7 @@ const { spawnSync } = require('node:child_process');
 const { inspectInstallationState, INSTALLATION_STATES } = require('../src/core/installation-state');
 
 const cliPath = path.resolve(__dirname, '../src/index.js');
+const releaseManifest = require('../release-manifest.json');
 const geoSource = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
 const evidenceDir = process.env.CONTEXA_PHASE6_EVIDENCE_DIR
   ? path.resolve(process.env.CONTEXA_PHASE6_EVIDENCE_DIR) : null;
@@ -25,7 +26,7 @@ async function createFixture({ starterManagedByHost = false, malformedYml = fals
   const overlay = path.join(project, 'src/main/resources/application-contexa.yml');
   const dependencies = ["  implementation 'org.springframework.boot:spring-boot-starter-web'"];
   if (starterManagedByHost) {
-    dependencies.push("  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'");
+    dependencies.push(`  implementation 'ai.ctxa:spring-boot-starter-contexa:${releaseManifest.starter.version}'`);
   }
   await fs.outputFile(build, [
     "plugins { id 'org.springframework.boot' version '3.3.0' }",

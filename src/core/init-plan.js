@@ -69,7 +69,8 @@ function trackedFileState(manifest, projectDir, filePath) {
 
 function printPlannedChanges(answers, project, paths) {
   console.log(chalk.cyan(`\n  ${t('planned.title')}`));
-  const items = [t('planned.setupQuick')];
+  const items = [t(answers.setupMode === 'advanced'
+    ? 'planned.setupCustom' : 'planned.setupQuick')];
   if (answers.integrationMode === 'standalone') {
     items.push(t('planned.integrationStandalone'));
     items.push(t('planned.pathAction', 'CREATE', t('planned.createStandalone'), paths.standaloneDir));

@@ -5,6 +5,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('node:url');
 const { injectMavenDep, injectGradleDep } = require('../src/core/injector/build');
 
 function run(command, args, cwd, timeout = 120000) {
@@ -21,23 +22,25 @@ function starterCount(content) {
   return (content.match(/spring-boot-starter-contexa/g) || []).length;
 }
 
-function mavenPom(body) {
+function mavenPom(body, repositoryUrl) {
   return `<project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.4</version><relativePath/></parent>
   <groupId>example</groupId><artifactId>fixture</artifactId><version>1.0.0</version>
+  <repositories><repository><id>contexa-test-fixture</id><url>${repositoryUrl}</url></repository></repositories>
 ${body}
 </project>
 `;
 }
 
-async function verifyMavenFixtures(root, evidence) {
+async function verifyMavenFixtures(root, evidence, repositoryRoot) {
+  const repositoryUrl = pathToFileURL(repositoryRoot).href;
   const fixtures = {
-    dependencies: mavenPom('  <dependencies>\n  </dependencies>'),
-    absent: mavenPom(''),
+    dependencies: mavenPom('  <dependencies>\n  </dependencies>', repositoryUrl),
+    absent: mavenPom('', repositoryUrl),
     dependencyManagement: mavenPom(`  <dependencyManagement><dependencies>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-dependencies</artifactId><version>3.5.4</version><type>pom</type><scope>import</scope></dependency>
-  </dependencies></dependencyManagement>`),
+  </dependencies></dependencyManagement>`, repositoryUrl),
   };
   for (const [name, pom] of Object.entries(fixtures)) {
     const directory = path.join(root, `maven-${name}`);
@@ -69,7 +72,7 @@ async function createDummyStarter(root) {
   run('jar', ['--create', '--file', path.join(artifact, 'spring-boot-starter-contexa-0.1.0-SNAPSHOT.jar'), '-C', empty, '.'], root);
   await fs.writeFile(path.join(artifact, 'spring-boot-starter-contexa-0.1.0-SNAPSHOT.pom'),
     '<project><modelVersion>4.0.0</modelVersion><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId><version>0.1.0-SNAPSHOT</version></project>\n', 'utf8');
-  return path.join(root, 'repo').split(path.sep).join('/');
+  return path.join(root, 'repo');
 }
 
 async function writeJavaSource(directory) {
@@ -91,8 +94,8 @@ async function verifyGradleFixture(root, evidence, name, fileName, content) {
   await fs.writeFile(path.join(evidence, `gradle-${name}.log`), log, 'utf8');
 }
 
-async function verifyGradleFixtures(root, evidence) {
-  const repository = await createDummyStarter(root);
+async function verifyGradleFixtures(root, evidence, repositoryRoot) {
+  const repository = repositoryRoot.split(path.sep).join('/');
   await verifyGradleFixture(root, evidence, 'groovy', 'build.gradle', `plugins { id 'java' }
 repositories { maven { url = uri('${repository}') } }
 dependencies { }
@@ -130,8 +133,9 @@ dependencies { }
     : path.join(root, 'evidence');
   await fs.ensureDir(evidence);
   try {
-    await verifyMavenFixtures(root, evidence);
-    await verifyGradleFixtures(root, evidence);
+    const repositoryRoot = await createDummyStarter(root);
+    await verifyMavenFixtures(root, evidence, repositoryRoot);
+    await verifyGradleFixtures(root, evidence, repositoryRoot);
     console.log(`Maven and Gradle build models passed. Evidence: ${evidence}`);
   } finally {
     const evidenceRelativeToFixture = path.relative(root, evidence);

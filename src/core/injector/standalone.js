@@ -30,8 +30,44 @@ const {
   CONTEXA_ARTIFACT_ID,
   CONTEXA_VERSION,
   resolveDependencyVersions,
+  springAiProviderArtifacts,
 } = require('./common');
 const { buildCliContexaTree, applyCliContexaTree } = require('./yml');
+async function containsOnlyPreparedEntries(rootDir, preparedPaths = []) {
+  const root = path.resolve(rootDir);
+  const allowedFiles = new Set();
+  const allowedDirectories = new Set();
+  for (const preparedPath of preparedPaths) {
+    const target = path.resolve(preparedPath);
+    const relative = path.relative(root, target);
+    if (!relative || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) continue;
+    allowedFiles.add(target);
+    let parent = path.dirname(target);
+    while (parent !== root) {
+      allowedDirectories.add(parent);
+      const next = path.dirname(parent);
+      if (next === parent) break;
+      parent = next;
+    }
+  }
+
+  async function inspect(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const absolute = path.resolve(directory, entry.name);
+      const relative = path.relative(root, absolute);
+      if (entry.isSymbolicLink()) return false;
+      if (relative === 'manifest.json'
+          || relative === '.cli' || relative.startsWith('.cli' + path.sep)) continue;
+      if (entry.isDirectory()) {
+        if (!allowedDirectories.has(absolute) || !await inspect(absolute)) return false;
+      } else if (!entry.isFile() || !allowedFiles.has(absolute)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return inspect(root);
+}
 
 // Returns { ymlPath, buildFragmentPath, importHints }. The caller is responsible
 // for surfacing importHints to the operator. This function never throws on
@@ -39,18 +75,17 @@ const { buildCliContexaTree, applyCliContexaTree } = require('./yml');
 async function injectStandalone(standaloneDir, project, opts = {}) {
   const { infra = 'standalone', force = false } = opts;
   const includeDistributed = infra === 'distributed';
-  const { redisson: redissonVersion } =
+  const { redisson: redissonVersion, springAiBom } =
     resolveDependencyVersions(opts.dependencyVersions);
+  const providerArtifacts = springAiProviderArtifacts(opts.llmProviders || []);
+  const includeAi = !!opts.enableAiSecurity && providerArtifacts.length > 0;
   const isMaven = project.buildTool === 'maven';
   const isKotlinDsl = !isMaven && project.buildFilePath && project.buildFilePath.endsWith('.kts');
 
-  // contexa-cli writes ONE dependency line: spring-boot-starter-contexa.
-  // Spring AI provider starters (spring-ai-starter-model-*) and the pgvector
-  // vector-store starter are intentionally NOT generated here. They belong to
-  // the customer's dependency surface - they are only needed when the customer
-  // declares @EnableAISecurity, and forcing them on every customer triggers
-  // PgVector / ChatModel bean instantiation errors at startup for customers
-  // who use spring-boot-starter-contexa without that annotation.
+  // Standalone mode never edits the host build. Its fragment contains exactly
+  // the dependencies selected by the operator: the Contexa starter always,
+  // Spring AI/provider/vector-store dependencies only with AI security, and
+  // Kafka/Redisson only for distributed infrastructure.
 
   // Collision check: if `standaloneDir` already exists as a FILE (not a
   // directory), abort with an actionable message instead of letting fs-extra
@@ -72,7 +107,8 @@ async function injectStandalone(standaloneDir, project, opts = {}) {
     const entries = await fs.readdir(standaloneDir);
     const ours = entries.includes('application.yml')
               || entries.includes('contexa.gradle')
-              || entries.includes('pom-fragment.xml');
+              || entries.includes('pom-fragment.xml')
+              || await containsOnlyPreparedEntries(standaloneDir, opts.preparedPaths);
     if (entries.length > 0 && !ours && !force) {
       throw new Error(
         `Standalone target "${standaloneDir}" already exists, is non-empty, and does ` +
@@ -135,6 +171,20 @@ async function injectStandalone(standaloneDir, project, opts = {}) {
     lines.push(`        <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>`);
     lines.push(`        <version>${CONTEXA_VERSION}</version>`);
     lines.push('    </dependency>');
+    if (includeAi) {
+      for (const artifact of providerArtifacts) {
+        lines.push('    <dependency>');
+        lines.push('        <groupId>org.springframework.ai</groupId>');
+        lines.push(`        <artifactId>${artifact}</artifactId>`);
+        lines.push(`        <version>${springAiBom}</version>`);
+        lines.push('    </dependency>');
+      }
+      lines.push('    <dependency>');
+      lines.push('        <groupId>org.springframework.ai</groupId>');
+      lines.push('        <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>');
+      lines.push(`        <version>${springAiBom}</version>`);
+      lines.push('    </dependency>');
+    }
     if (includeDistributed) {
       lines.push('    <dependency>');
       lines.push('        <groupId>org.springframework.kafka</groupId>');
@@ -162,6 +212,13 @@ async function injectStandalone(standaloneDir, project, opts = {}) {
     lines.push('');
     lines.push('dependencies {');
     lines.push(`    implementation '${CONTEXA_GROUP_ID}:${CONTEXA_ARTIFACT_ID}:${CONTEXA_VERSION}'`);
+    if (includeAi) {
+      lines.push(`    implementation platform('org.springframework.ai:spring-ai-bom:${springAiBom}')`);
+      for (const artifact of providerArtifacts) {
+        lines.push(`    implementation 'org.springframework.ai:${artifact}'`);
+      }
+      lines.push(`    implementation 'org.springframework.ai:spring-ai-starter-vector-store-pgvector'`);
+    }
     if (includeDistributed) {
       lines.push(`    implementation 'org.springframework.kafka:spring-kafka'`);
       lines.push(`    implementation 'org.redisson:redisson:${redissonVersion}'`);

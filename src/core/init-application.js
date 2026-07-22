@@ -46,6 +46,7 @@ const {
 const { t, formatError } = require('./i18n');
 const {
   INSTALL_MODES,
+  acquireInstallLock,
   beginInstallTransaction,
   commitInstallTransaction,
   loadManifest,
@@ -56,6 +57,7 @@ const {
   recordExternalFileChange,
   recordChange,
   recordInstallMetadata,
+  releaseInstallLock,
   rollbackInstallTransaction,
   sha256FileSync,
 } = require('./manifest');
@@ -77,6 +79,22 @@ function initError(code, key, ...args) {
   error.code = code;
   error.messageKey = key;
   error.messageArgs = args;
+  return error;
+}
+
+function normalizeInitInputError(error) {
+  const message = error && error.message ? error.message : '';
+  if (/^(?:Gradle script|Maven XML) is malformed:/.test(message)) {
+    return initError('INVALID_BUILD_FILE', 'init.error.malformedBuild', message);
+  }
+  const overlayPrefix = 'Contexa overlay path is already user-owned: ';
+  if (message.startsWith(overlayPrefix)) {
+    return initError('CONTEXA_OVERLAY_USER_OWNED',
+      'init.error.overlayUserOwned', message.slice(overlayPrefix.length));
+  }
+  if (error && error.name === 'YAMLException') {
+    return initError('INVALID_CONTEXA_YAML', 'init.error.malformedYaml', message);
+  }
   return error;
 }
 
@@ -109,8 +127,28 @@ async function recoverInterruptedDockerMutation(dockerMutation) {
   });
 }
 
+async function refreshExistingInstallationMetadata(projectDir, project) {
+  if (project.contextaVersion !== releaseManifest.starter.version) return false;
+  if (!await fs.pathExists(manifestPath(projectDir, INSTALL_MODES.NORMAL))) return false;
+
+  let lock = null;
+  try {
+    lock = await acquireInstallLock(projectDir, INSTALL_MODES.NORMAL);
+    const current = await loadManifest(projectDir, INSTALL_MODES.NORMAL);
+    if (current.metadata.cliVersion === releaseManifest.cliVersion
+        && current.metadata.starterVersion === releaseManifest.starter.version) {
+      return false;
+    }
+    await recordInstallMetadata(projectDir, {}, INSTALL_MODES.NORMAL);
+    return true;
+  } finally {
+    await releaseInstallLock(lock);
+  }
+}
+
 async function executeInit(opts) {
       const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
+      let installLock = null;
       let installTransactionId = null;
       let transactionManifestExisted = false;
       try {
@@ -145,9 +183,17 @@ async function executeInit(opts) {
 
       // 1. Detect project
       const spinner = ora(t('init.detecting')).start();
-      const project = await detectSpringProject(opts.dir, {
-        probeDocker: !!(opts.distributed || opts.simulate),
-      });
+      let project;
+      try {
+        project = await detectSpringProject(opts.dir, {
+          // Quick and Custom can both provision infrastructure. Detect Docker
+          // before prompting so the selected startDocker contract is honoured.
+          probeDocker: true,
+        });
+      } catch (error) {
+        spinner.stop();
+        throw normalizeInitInputError(error);
+      }
       spinner.stop();
 
       if (!project.isSpring) {
@@ -163,32 +209,15 @@ async function executeInit(opts) {
       console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || t('common.unknown')}`));
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
-      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate)
-        ? (project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing')))
-        : t('common.notRequested')}`));
+      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker
+        ? chalk.green(t('init.docker.installed'))
+        : chalk.yellow(t('init.docker.missing'))}`));
 
       const cliProjectName = opts.simulate
         ? SIMULATION_PROJECT
         : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
       if (!process.env.CONTEXA_PROJECT) {
         process.env.CONTEXA_PROJECT = cliProjectName;
-      }
-
-      // Docker is only consulted when the user explicitly opted into infra
-      // provisioning via --distributed. Without --distributed, init does not
-      // touch infrastructure regardless of whether Docker is installed.
-      const wantsContainers = opts.distributed && opts.docker !== false;
-      if (!project.hasDocker && wantsContainers) {
-        console.log('');
-        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
-        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
-        console.log(chalk.gray(`    ${t('init.docker.install')}`));
-        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
-        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
-        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
-        console.log('');
-        // Auto-flip to "files only" mode so we never try to call docker compose.
-        opts.docker = false;
       }
 
       // Warn when both application.properties and application.yml exist - one shadows the other.
@@ -198,8 +227,12 @@ async function executeInit(opts) {
 
       // Simulation has its own ownership state. An existing starter is its
       // prerequisite, not a reason to return from this command.
-      if (project.hasContexta && !opts.simulate) {
+      const normalOwnershipManifestExists = !opts.simulate
+        && await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL));
+      if (project.hasContexta && !opts.simulate
+          && (project.hasEnableAiSecurity || normalOwnershipManifestExists)) {
         if (!opts.force && !opts.yes) {
+          await refreshExistingInstallationMetadata(opts.dir, project);
           console.log(chalk.yellow('  ' + t('init.alreadyDetected')));
           console.log(chalk.gray('    ' + t('init.alreadyDetected.hint') + '\n'));
           return;
@@ -226,6 +259,20 @@ async function executeInit(opts) {
       // override, so an Enter-only install does not spend a question on locale.
 
       const answers = await collectInitAnswers(opts, project, cliProjectName);
+
+      if (!project.hasDocker && answers.infra !== 'skip' && answers.startDocker) {
+        console.log('');
+        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
+        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
+        console.log(chalk.gray(`    ${t('init.docker.install')}`));
+        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
+        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
+        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
+        console.log('');
+        // Preserve the selected infrastructure files, but do not claim that
+        // containers were started when Docker is unavailable.
+        answers.startDocker = false;
+      }
 
 
 
@@ -356,6 +403,7 @@ async function executeInit(opts) {
         }
       }
 
+      installLock = await acquireInstallLock(opts.dir, installMode, 'init');
       transactionManifestExisted = await fs.pathExists(manifestPath(opts.dir, installMode));
       installTransactionId = await beginInstallTransaction(opts.dir, {
         projectName: cliProjectName,
@@ -441,7 +489,9 @@ async function executeInit(opts) {
           // non-empty folder. Without --force, a non-empty folder that does
           // not look like a previous contexa-cli output is rejected up-front.
           standaloneResult = await injectStandalone(standaloneDir, project, {
-            ...answers, force: !!opts.force,
+            ...answers,
+            force: !!opts.force,
+            preparedPaths: plannedGeoIpPath ? [plannedGeoIpPath] : [],
           });
           await recordChange(opts.dir, standaloneResult.ymlPath, {
             kind: 'standalone-config', generated: plannedFiles[0].generated,
@@ -471,8 +521,8 @@ async function executeInit(opts) {
         const ymlExistedBefore = await fs.pathExists(ymlPath);
 
         if (shouldWriteOverlay) {
-          // Explicit activation/infrastructure writes only the Contexa-owned
-          // overlay. Starter-only init writes no configuration.
+          // Selected activation/infrastructure settings are written only to
+          // the Contexa-owned overlay; the host application.yml stays intact.
           const startYml = process.hrtime.bigint();
           const s1 = ora(t('step.updatingYml')).start();
           try {
@@ -484,6 +534,7 @@ async function executeInit(opts) {
               const applied = await injectYml(ymlPath, {
                 ...answers,
                 managedPaths: ymlState.entry && ymlState.entry.managedPaths,
+                removeLegacyNormalServerPort: !!(ymlState.entry && ymlState.entry.generated),
               });
               await recordChange(opts.dir, ymlPath, {
                 kind: opts.simulate ? 'simulation-overlay' : 'contexa-overlay',
@@ -495,6 +546,7 @@ async function executeInit(opts) {
               s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
             }
           } catch (err) {
+            err = normalizeInitInputError(err);
             s1.fail(t('step.ymlUpdated'));
             console.log('');
             console.log(chalk.red(`  x ${t('init.error.ymlUpdate')}`));
@@ -777,7 +829,7 @@ async function executeInit(opts) {
               throw e;
             }
           }
-          if (opts.simulate) {
+          if (opts.simulate && answers.startDocker) {
             const simulationEvidence = await waitForSimulationInfrastructure(installationId,
               !!(answers.llmProviders && answers.llmProviders.includes('ollama')));
             await recordInstallMetadata(opts.dir, {
@@ -852,6 +904,8 @@ async function executeInit(opts) {
           throw new Error(`${error.message}; automatic rollback failed: ${infrastructureRollbackErrors.join('; ')}`);
         }
         throw error;
+      } finally {
+        await releaseInstallLock(installLock);
       }
 }
 

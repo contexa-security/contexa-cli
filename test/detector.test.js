@@ -72,7 +72,7 @@ test('detector: Maven detects Spring Security and Contexa starter', async () => 
   <artifactId>x</artifactId>
   <dependencies>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security</artifactId></dependency>
-    <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId></dependency>
+    <dependency><groupId>ai.ctxa</groupId><artifactId>spring-boot-starter-contexa</artifactId><version>0.1.0</version></dependency>
   </dependencies>
 </project>`,
   });
@@ -80,6 +80,7 @@ test('detector: Maven detects Spring Security and Contexa starter', async () => 
     const r = await detectSpringProject(dir);
     assert.equal(r.hasSpringSecurityCore, true);
     assert.equal(r.hasContexta, true);
+    assert.equal(r.contextaVersion, '0.1.0');
   } finally {
     await fs.remove(dir);
   }
@@ -89,6 +90,7 @@ test('detector: Gradle Groovy DSL is detected', async () => {
   const dir = await makeTempProject({
     'build.gradle': `dependencies {
   implementation 'org.springframework.boot:spring-boot-starter'
+  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0'
 }`,
   });
   try {
@@ -96,6 +98,7 @@ test('detector: Gradle Groovy DSL is detected', async () => {
     assert.equal(r.isSpring, true);
     assert.equal(r.buildTool, 'gradle');
     assert.equal(r.buildFilePath.endsWith('build.gradle'), true);
+    assert.equal(r.contextaVersion, '0.1.0');
   } finally {
     await fs.remove(dir);
   }

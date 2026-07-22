@@ -27,6 +27,7 @@ function normalizeProviders(providerOption, options = {}) {
     error.messageArgs = [invalid.join(', '), SUPPORTED_PROVIDERS.join(', ')];
     throw error;
   }
+  if (includeOllama && !values.includes('ollama')) values.push('ollama');
   return [...new Set(values)];
 }
 

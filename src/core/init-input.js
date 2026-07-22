@@ -23,22 +23,19 @@ function buildInitDefaults(opts) {
   const providerFromFlags = normalizeProviders(opts.provider, {
     includeOllama: opts.includeOllama,
   });
-  const explicitAiSecurity = !!(
-    opts.enableAiSecurity || opts.autoAnnotate || opts.provider
-    || opts.includeOllama || opts.simulate
-  );
+  const quickProviders = providerFromFlags.length > 0 ? providerFromFlags : ['ollama'];
   return {
     explicitIntegrationMode,
     providerFromFlags,
     defaults: {
       setupMode: 'quick',
       integrationMode: explicitIntegrationMode || 'merge',
-      securityMode: opts.securityMode || 'sandbox',
+      securityMode: opts.securityMode || 'full',
       mode: 'shadow',
-      enableAiSecurity: explicitAiSecurity && providerFromFlags.length > 0,
-      autoAnnotate: !!opts.autoAnnotate,
-      llmProviders: explicitAiSecurity ? providerFromFlags : [],
-      infra: opts.distributed ? 'distributed' : 'skip',
+      enableAiSecurity: true,
+      autoAnnotate: !opts.simulate && explicitIntegrationMode !== 'standalone',
+      llmProviders: quickProviders,
+      infra: opts.distributed ? 'distributed' : 'standalone',
       injectDep: true,
       startDocker: opts.docker !== false,
     },
@@ -55,31 +52,27 @@ async function collectInitAnswers(opts, project, cliProjectName) {
 
   const answers = opts.yes ? defaults : await inquirer.prompt([
     {
-      type: 'confirm', name: 'enableAiSecurity',
-      message: '\n' + t('prompt.enableAiSecurity'),
-      default: false,
-      when: () => !opts.simulate && !opts.enableAiSecurity && !opts.provider && !opts.autoAnnotate,
+      type: 'rawlist', name: 'setupMode',
+      message: '\n' + t('prompt.setupMode'),
+      default: 'quick',
+      choices: [
+        { name: t('prompt.setupMode.quick'), value: 'quick' },
+        { name: t('prompt.setupMode.advanced'), value: 'advanced' },
+      ],
+      when: () => !opts.simulate && !opts.quick,
     },
     {
       type: 'rawlist', name: 'providerQuick',
       message: '\n' + t('prompt.provider'),
-      default: 'openai',
+      default: 'ollama',
       choices: [
         { name: t('prompt.provider.openai'), value: 'openai' },
         { name: t('prompt.provider.anthropic'), value: 'anthropic' },
         { name: t('prompt.provider.ollama'), value: 'ollama' },
-        { name: t('prompt.provider.none'), value: 'none' },
+
       ],
       when: answer => answer.setupMode !== 'advanced'
-        && (opts.enableAiSecurity || opts.autoAnnotate || answer.enableAiSecurity === true)
-        && !opts.provider,
-    },
-    {
-      type: 'confirm', name: 'autoAnnotate',
-      message: '\n' + t('prompt.autoAnnotate'),
-      default: false,
-      when: answer => (opts.enableAiSecurity || opts.provider || answer.enableAiSecurity === true)
-        && !opts.autoAnnotate,
+        && !opts.simulate && !opts.provider && !opts.includeOllama,
     },
     {
       type: 'rawlist', name: 'integrationMode',
@@ -102,15 +95,25 @@ async function collectInitAnswers(opts, project, cliProjectName) {
       },
     },
     {
+      type: 'confirm', name: 'autoAnnotate',
+      message: '\n' + t('prompt.autoAnnotate'),
+      default: true,
+      when: answer => {
+        if (opts.simulate || opts.autoAnnotate) return false;
+        const integration = explicitIntegrationMode
+          || (answer.setupMode === 'advanced' ? answer.integrationMode : 'merge');
+        return integration !== 'standalone';
+      },
+    },
+    {
       type: 'rawlist', name: 'securityMode',
       message: '\n' + t('prompt.securityMode'),
-      default: 'sandbox',
+      default: 'full',
       choices: [
         { name: t('prompt.securityMode.full'), value: 'full' },
         { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
       ],
-      when: answer => answer.setupMode === 'advanced'
-        && (opts.enableAiSecurity || opts.provider || answer.enableAiSecurity === true),
+      when: answer => answer.setupMode === 'advanced' && !opts.securityMode,
     },
     {
       type: 'rawlist', name: 'mode',
@@ -120,8 +123,7 @@ async function collectInitAnswers(opts, project, cliProjectName) {
         { name: t('prompt.mode.shadow'), value: 'shadow' },
         { name: t('prompt.mode.enforce'), value: 'enforce' },
       ],
-      when: answer => answer.setupMode === 'advanced'
-        && (opts.enableAiSecurity || opts.provider || answer.enableAiSecurity === true),
+      when: answer => answer.setupMode === 'advanced',
     },
     {
       type: 'checkbox', name: 'llmProviders',
@@ -132,17 +134,16 @@ async function collectInitAnswers(opts, project, cliProjectName) {
         { name: t('prompt.llm.ollama'), value: 'ollama', checked: !!opts.includeOllama },
       ],
       validate: answer => answer.length > 0 ? true : t('prompt.llm.atLeastOne'),
-      when: answer => answer.setupMode === 'advanced'
-        && (opts.enableAiSecurity || opts.provider || opts.autoAnnotate
-          || answer.enableAiSecurity === true),
+      when: answer => answer.setupMode === 'advanced' && !opts.provider,
     },
     {
       type: 'rawlist', name: 'infra',
       message: '\n' + t('prompt.infra'),
-      default: opts.distributed ? 'distributed' : 'skip',
+      default: opts.distributed ? 'distributed' : 'standalone',
       choices: [
-        { name: t('prompt.infra.skip'), value: 'skip' },
+        { name: t('prompt.infra.standalone'), value: 'standalone' },
         { name: t('prompt.infra.distributed'), value: 'distributed' },
+        { name: t('prompt.infra.skip'), value: 'skip' },
       ],
       when: answer => answer.setupMode === 'advanced' && !opts.distributed,
     },
@@ -169,37 +170,41 @@ async function collectInitAnswers(opts, project, cliProjectName) {
   ]);
 
   const promptProvider = answers.providerQuick || null;
-  const requestedAiSecurity = !!(
-    opts.simulate || opts.enableAiSecurity || opts.autoAnnotate || opts.provider
-    || opts.includeOllama || answers.enableAiSecurity === true
-  );
-
-  answers.integrationMode = explicitIntegrationMode || answers.integrationMode || 'merge';
+  answers.setupMode = answers.setupMode || defaults.setupMode;
+  answers.integrationMode = answers.setupMode === 'quick'
+    ? (explicitIntegrationMode || 'merge')
+    : (explicitIntegrationMode || answers.integrationMode || 'merge');
   if (opts.simulate && answers.integrationMode !== 'merge') {
     throw initInputError('SIMULATION_MERGE_REQUIRED', 'init.error.simulationMergeRequired');
   }
-  answers.securityMode = opts.securityMode || answers.securityMode || 'sandbox';
+  answers.securityMode = opts.securityMode || answers.securityMode
+    || (answers.setupMode === 'quick' ? 'full' : 'sandbox');
   answers.mode = answers.mode || 'shadow';
-  answers.infra = opts.distributed ? 'distributed' : (answers.infra || 'skip');
-  answers.startDocker = opts.docker !== false && answers.startDocker !== false;
+  answers.infra = opts.distributed ? 'distributed'
+    : (answers.infra || (answers.setupMode === 'quick' ? 'standalone' : 'skip'));
+  answers.startDocker = answers.infra !== 'skip'
+    && project.hasDocker === true
+    && opts.docker !== false
+    && answers.startDocker !== false;
 
   if (promptProvider) {
     answers.llmProviders = normalizeProviders(promptProvider);
-  } else if (opts.provider || opts.includeOllama || opts.enableAiSecurity
-      || opts.autoAnnotate || opts.simulate) {
+  } else if (opts.provider || opts.includeOllama) {
     answers.llmProviders = providerFromFlags;
   } else if (!Array.isArray(answers.llmProviders)) {
-    answers.llmProviders = [];
+    answers.llmProviders = answers.setupMode === 'quick' ? ['ollama'] : [];
   }
 
-  answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
-  if (answers.autoAnnotate && !aiProviderSelected(answers)) {
-    throw initInputError('AUTO_ANNOTATE_PROVIDER_REQUIRED', 'init.error.autoAnnotateProviderRequired');
+  if (answers.integrationMode === 'standalone' && opts.autoAnnotate) {
+    throw initInputError('STANDALONE_AUTO_ANNOTATE_CONFLICT',
+      'init.error.standaloneAutoAnnotateConflict');
   }
-  if (requestedAiSecurity && !aiProviderSelected(answers)) {
+  answers.autoAnnotate = !opts.simulate && answers.integrationMode !== 'standalone'
+    && !!(opts.autoAnnotate || answers.autoAnnotate === true);
+  if (!aiProviderSelected(answers)) {
     throw initInputError('AI_SECURITY_PROVIDER_REQUIRED', 'init.error.aiSecurityProviderRequired');
   }
-  answers.enableAiSecurity = !!(requestedAiSecurity && aiProviderSelected(answers));
+  answers.enableAiSecurity = true;
   answers.simulate = !!opts.simulate;
   answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
   answers.hostSecurityFilterChain = !!project.hasHostSecurityFilterChain;
