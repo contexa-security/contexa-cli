@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
@@ -36,6 +36,57 @@ function runPseudoTerminal(args, input, rawTranscript, timeout = 20000, extraEnv
     encoding: 'utf8',
     timeout,
     env: { ...process.env, ...extraEnvironment, TERM: 'xterm-256color' },
+  });
+}
+
+function runPromptedPseudoTerminal(
+    args, answers, rawTranscript, timeout = 20000, extraEnvironment = {}) {
+  const invocation = cliExecutable
+    ? [cliExecutable, ...args]
+    : [process.execPath, cliPath, ...args];
+  const command = invocation.map(commandArgument).join(' ');
+  return new Promise(resolve => {
+    const child = spawn('script', [
+      '--quiet', '--return', '--flush', '--command', command, rawTranscript,
+    ], {
+      env: { ...process.env, ...extraEnvironment, TERM: 'xterm-256color' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let sentAnswers = 0;
+    let settled = false;
+    const timeoutHandle = setTimeout(() => child.kill('SIGTERM'), timeout);
+
+    function sendPendingAnswer() {
+      const transcript = cleanTranscript(stdout);
+      const visiblePrompts = (transcript.match(/Answer:|\([Yy]\/n\)|\(y\/[Nn]\)/g) || []).length;
+      while (sentAnswers < answers.length && sentAnswers < visiblePrompts) {
+        child.stdin.write(answers[sentAnswers]);
+        sentAnswers += 1;
+      }
+      if (sentAnswers === answers.length && !child.stdin.destroyed) child.stdin.end();
+    }
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      sendPendingAnswer();
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      resolve({ error, status: null, signal: null, stdout, stderr });
+    });
+    child.on('close', (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutHandle);
+      resolve({ error: undefined, status, signal, stdout, stderr });
+    });
   });
 }
 
@@ -95,8 +146,11 @@ async function runLocale(locale, outputDirectory) {
       await fs.outputFile(configPath, content, 'utf8');
     }
     await fs.outputFile(sourcePath, originalSource, 'utf8');
-    const result = runPseudoTerminal(
-      ['init', '--dir', project], '\n\n\n', rawTranscript, 20000, { CONTEXA_LANG: locale });
+    const result = await runPromptedPseudoTerminal(
+      ['init', '--dir', project], ['\n', '\n', '\n'], rawTranscript, 120000, {
+        CONTEXA_LANG: locale,
+        CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+      });
     assert.equal(result.error, undefined, result.error && result.error.message);
     assert.equal(result.signal, null, `${locale} pseudo-terminal timed out`);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);

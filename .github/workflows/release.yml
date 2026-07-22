@@ -105,6 +105,7 @@ jobs:
         env:
           CONTEXA_TRANSCRIPT_DIR: phase2-evidence/interactive
           CONTEXA_BUILD_MODEL_DIR: phase2-evidence/build-models
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
         run: |
           set -euo pipefail
           mkdir -p "$CONTEXA_TRANSCRIPT_DIR" "$CONTEXA_BUILD_MODEL_DIR"
