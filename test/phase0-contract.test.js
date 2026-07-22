@@ -323,7 +323,10 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /asset\.sha256 = crypto\.createHash\('sha256'\)/);
   assert.match(workflow, /RELEASE_MANIFEST_SIGNING_KEY: \$\{\{ secrets\.RELEASE_MANIFEST_SIGNING_KEY \}\}/);
   assert.match(workflow, /openssl dgst -sha256 -verify release-signing-public\.pem/);
-  assert.match(workflow, /prerelease: true/);
+  assert.match(workflow, /require\('\.\/release-manifest\.json'\)\.channel/);
+  assert.match(workflow, /prerelease: \$\{\{ steps\.release_metadata\.outputs\.prerelease \}\}/);
+  assert.doesNotMatch(workflow, /prerelease: true/);
+  assert.ok(workflow.includes("- 'v[0-9]+.[0-9]+.[0-9]+'"));
   assert.match(workflow,
     /- name: Run Phase 6 exact commands against the built binary\s+if: runner\.os == 'Linux'/);
   assert.doesNotMatch(workflow,
@@ -331,7 +334,7 @@ test('Phase 1 release assets, compatibility and signed-manifest workflow are con
   assert.match(workflow, /ref: f4e49bc79e740f0e136e5838a4053df5f8808d5c/);
   assert.doesNotMatch(workflow, /codex\/extreme-phase6-/);
   assert.match(workflow, /name: signed-release-gate-\$\{\{ github\.sha \}\}/);
-  assert.equal((workflow.match(/if: startsWith\(github\.ref, 'refs\/tags\/'\)/g) || []).length, 2);
+  assert.equal((workflow.match(/if: startsWith\(github\.ref, 'refs\/tags\/'\)/g) || []).length, 3);
   assert.equal((workflow.match(/^\s*run: npm test\s*$/gm) || []).length, 1);
   assert.match(workflow,
     /Run final full source regression once[\s\S]*CONTEXA_TEST_GEOLITE2_SOURCE_PATH:[^\n]*phase6-evidence\/GeoLite2-City\.mmdb[\s\S]*run: npm test/);
