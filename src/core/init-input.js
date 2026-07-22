@@ -33,7 +33,7 @@ function buildInitDefaults(opts) {
       securityMode: opts.securityMode || 'full',
       mode: 'shadow',
       enableAiSecurity: true,
-      autoAnnotate: true,
+      autoAnnotate: !opts.simulate && explicitIntegrationMode !== 'standalone',
       llmProviders: quickProviders,
       infra: opts.distributed ? 'distributed' : 'standalone',
       injectDep: true,
@@ -100,8 +100,8 @@ async function collectInitAnswers(opts, project, cliProjectName) {
       default: true,
       when: answer => {
         if (opts.simulate || opts.autoAnnotate) return false;
-        const integration = answer.setupMode === 'advanced'
-          ? (explicitIntegrationMode || answer.integrationMode) : 'merge';
+        const integration = explicitIntegrationMode
+          || (answer.setupMode === 'advanced' ? answer.integrationMode : 'merge');
         return integration !== 'standalone';
       },
     },
@@ -113,7 +113,7 @@ async function collectInitAnswers(opts, project, cliProjectName) {
         { name: t('prompt.securityMode.full'), value: 'full' },
         { name: t('prompt.securityMode.sandbox'), value: 'sandbox' },
       ],
-      when: answer => answer.setupMode === 'advanced',
+      when: answer => answer.setupMode === 'advanced' && !opts.securityMode,
     },
     {
       type: 'rawlist', name: 'mode',
@@ -199,7 +199,7 @@ async function collectInitAnswers(opts, project, cliProjectName) {
     throw initInputError('STANDALONE_AUTO_ANNOTATE_CONFLICT',
       'init.error.standaloneAutoAnnotateConflict');
   }
-  answers.autoAnnotate = answers.integrationMode !== 'standalone'
+  answers.autoAnnotate = !opts.simulate && answers.integrationMode !== 'standalone'
     && !!(opts.autoAnnotate || answers.autoAnnotate === true);
   if (!aiProviderSelected(answers)) {
     throw initInputError('AI_SECURITY_PROVIDER_REQUIRED', 'init.error.aiSecurityProviderRequired');

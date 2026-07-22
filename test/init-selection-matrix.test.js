@@ -166,6 +166,58 @@ test('--yes, --distributed, --no-docker and explicit provider remain determinist
   assert.equal(defaults.infra, 'distributed');
   assert.equal(defaults.startDocker, false);
 });
+test('public init selector flags normalize without contradictory prompts or hidden mutations', async () => {
+  const custom = await collect({
+    setupMode: 'advanced', mode: 'enforce', startDocker: true,
+  }, {
+    merge: true,
+    securityMode: 'sandbox',
+    provider: 'openai',
+    distributed: true,
+    infraDir: 'D:/tmp/flag-infra',
+    autoAnnotate: true,
+  });
+  assert.equal(custom.answers.integrationMode, 'merge');
+  assert.equal(custom.answers.securityMode, 'sandbox');
+  assert.equal(custom.answers.mode, 'enforce');
+  assert.deepEqual(custom.answers.llmProviders, ['openai']);
+  assert.equal(custom.answers.infra, 'distributed');
+  assert.equal(custom.answers.startDocker, true);
+  assert.equal(custom.answers.autoAnnotate, true);
+  const customQuestions = activeQuestionNames(custom.questions, {
+    setupMode: 'advanced', mode: 'enforce', startDocker: true,
+  });
+  assert.deepEqual(customQuestions, ['setupMode', 'mode', 'startDocker']);
+
+  const standaloneQuick = await collect({ setupMode: 'quick' }, {
+    quick: true,
+    standalone: true,
+    standaloneDir: 'D:/tmp/flag-standalone',
+    provider: 'anthropic',
+    docker: false,
+  });
+  assert.equal(standaloneQuick.answers.setupMode, 'quick');
+  assert.equal(standaloneQuick.answers.integrationMode, 'standalone');
+  assert.equal(standaloneQuick.answers.autoAnnotate, false);
+  assert.deepEqual(standaloneQuick.answers.llmProviders, ['anthropic']);
+  assert.equal(standaloneQuick.answers.infra, 'standalone');
+  assert.equal(standaloneQuick.answers.startDocker, false);
+  assert.deepEqual(activeQuestionNames(standaloneQuick.questions, { setupMode: 'quick' }), []);
+
+  const simulation = await collect({}, {
+    simulate: true, yes: true, provider: 'openai', docker: false,
+  });
+  assert.equal(simulation.answers.integrationMode, 'merge');
+  assert.equal(simulation.answers.autoAnnotate, false);
+  assert.equal(simulation.answers.injectDep, false);
+  assert.deepEqual(simulation.answers.llmProviders, ['openai']);
+
+  const combinedProviders = await collect({}, {
+    yes: true, provider: 'openai', includeOllama: true, docker: false,
+  });
+  assert.deepEqual(combinedProviders.answers.llmProviders, ['openai', 'ollama']);
+});
+
 function expectedProviderOrder(providers) {
   return providers.includes('ollama')
     ? ['ollama', ...providers.filter(provider => provider !== 'ollama')]
@@ -449,6 +501,66 @@ test('Custom Merge and Standalone execute end to end and reset to exact host sta
     await fs.remove(standalone.project);
   }
 });
+
+test('public Quick standalone flags execute end to end with exact generated artifacts', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
+  const fixture = await createExecutableFixture('ctxa-quick-standalone-flags-');
+  const standaloneDir = path.join(fixture.project, 'contexa');
+  const infraDir = path.join(standaloneDir, 'infra');
+  const cliPath = path.resolve(__dirname, '../src/index.js');
+  const childEnv = {
+    ...process.env,
+    PATH: path.dirname(process.execPath),
+    CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+  };
+  try {
+    const initialized = spawnSync(process.execPath, [
+      cliPath, 'init', '--yes', '--quick', '--standalone',
+      '--standalone-dir', standaloneDir, '--security-mode', 'sandbox',
+      '--provider', 'openai', '--include-ollama', '--no-docker',
+      '--infra-dir', infraDir, '--dir', fixture.project,
+    ], { encoding: 'utf8', env: childEnv, timeout: 10000 });
+    assert.equal(initialized.status, 0, initialized.stderr + initialized.stdout);
+    assert.match(initialized.stdout, /SecurityMode\.SANDBOX/);
+    assert.equal(await fs.readFile(fixture.buildPath, 'utf8'), fixture.build);
+    assert.equal(await fs.readFile(fixture.ymlPath, 'utf8'), fixture.ymlText);
+    assert.equal(await fs.readFile(fixture.sourcePath, 'utf8'), fixture.sourceText);
+
+    const fragment = await fs.readFile(path.join(standaloneDir, 'contexa.gradle'), 'utf8');
+    assert.match(fragment, /spring-ai-starter-model-openai/);
+    assert.match(fragment, /spring-ai-starter-model-ollama/);
+    assert.doesNotMatch(fragment, /spring-ai-starter-model-anthropic/);
+    assert.match(fragment, /spring-ai-starter-vector-store-pgvector/);
+    assert.doesNotMatch(fragment, /spring-kafka|redisson/);
+    const generated = yaml.load(await fs.readFile(
+      path.join(standaloneDir, 'application.yml'), 'utf8'));
+    assert.equal(generated.contexa.llm.selection.chat.priority, 'ollama,openai');
+    const compose = await fs.readFile(path.join(infraDir, 'docker-compose.yml'), 'utf8');
+    assert.match(compose, /^  postgres:/m);
+    assert.match(compose, /^  ollama:/m);
+    assert.doesNotMatch(compose, /^  (?:redis|zookeeper|kafka):/m);
+    const manifest = await loadManifest(fixture.project);
+    assert.equal(manifest.metadata.integrationMode, 'standalone');
+    assert.equal(manifest.metadata.infra, 'standalone');
+    assert.equal(manifest.metadata.dockerLifecycleManaged, false);
+
+    const reset = resetFixture(fixture.project, { env: childEnv });
+    assert.equal(reset.status, 0, reset.stderr + reset.stdout);
+    assert.match(reset.stdout, /"dockerCalls":0/);
+    assert.equal(await fs.readFile(fixture.buildPath, 'utf8'), fixture.build);
+    assert.equal(await fs.readFile(fixture.ymlPath, 'utf8'), fixture.ymlText);
+    assert.equal(await fs.readFile(fixture.sourcePath, 'utf8'), fixture.sourceText);
+    assert.equal(await fs.pathExists(path.join(standaloneDir, 'application.yml')), false);
+    assert.equal(await fs.pathExists(path.join(standaloneDir, 'contexa.gradle')), false);
+    assert.equal(await fs.pathExists(path.join(infraDir, 'docker-compose.yml')), false);
+    assert.equal(await fs.pathExists(manifestPath(fixture.project, INSTALL_MODES.NORMAL)), false);
+  } finally {
+    await fs.remove(fixture.project);
+  }
+});
+
 test('Standalone prepared-directory allowance remains exact and rejects unrelated customer files', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-standalone-boundary-'));
   try {
