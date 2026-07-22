@@ -64,7 +64,7 @@ test('interactive init asks for language first and applies the selected locale',
     process.argv = ['node', 'contexa', 'init'];
     delete process.env.CONTEXA_LANG;
     setLocale('en');
-    assert.equal(await selectInitLocale({}), 'ko');
+    assert.equal(await selectInitLocale({}, true), 'ko');
     assert.equal(getLocale(), 'ko');
     assert.deepEqual(questions.map(question => question.name), ['lang']);
     assert.deepEqual(questions[0].choices.map(choice => choice.value), ['en', 'ko']);
@@ -87,7 +87,7 @@ test('explicit CONTEXA_LANG bypasses the interactive language question', async (
   try {
     process.env.CONTEXA_LANG = 'ko';
     setLocale('ko');
-    assert.equal(await selectInitLocale({}), 'ko');
+    assert.equal(await selectInitLocale({}, true), 'ko');
     assert.equal(prompted, false);
   } finally {
     if (previousLanguage === undefined) delete process.env.CONTEXA_LANG;
@@ -97,6 +97,25 @@ test('explicit CONTEXA_LANG bypasses the interactive language question', async (
   }
 });
 
+test('non-interactive init never waits for a language answer', async () => {
+  const previousLanguage = process.env.CONTEXA_LANG;
+  let prompted = false;
+  inquirer.prompt = async () => {
+    prompted = true;
+    return { lang: 'ko' };
+  };
+  try {
+    delete process.env.CONTEXA_LANG;
+    setLocale('en');
+    assert.equal(await selectInitLocale({}, false), 'en');
+    assert.equal(prompted, false);
+  } finally {
+    if (previousLanguage === undefined) delete process.env.CONTEXA_LANG;
+    else process.env.CONTEXA_LANG = previousLanguage;
+    setLocale('en');
+    inquirer.prompt = originalPrompt;
+  }
+});
 test('simulation completion reports simulation-owned changes without claiming host mutation', () => {
   const originalLog = console.log;
   const output = [];

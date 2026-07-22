@@ -26,8 +26,8 @@ function explicitLanguageSelected(opts = {}) {
   return !!(environmentLanguage && SUPPORTED.includes(environmentLanguage[1]));
 }
 
-async function selectInitLocale(opts = {}) {
-  if (opts.yes || opts.check || explicitLanguageSelected(opts)) return getLocale();
+async function selectInitLocale(opts = {}, interactive = process.stdin.isTTY === true) {
+  if (!interactive || opts.yes || opts.check || explicitLanguageSelected(opts)) return getLocale();
   const answer = await inquirer.prompt([{
     type: 'rawlist',
     name: 'lang',
