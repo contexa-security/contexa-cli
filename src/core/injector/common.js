@@ -85,11 +85,12 @@ async function backupFile(filePath, options = {}) {
   
   // Preserve the initial clean state. If backup already exists, do not overwrite it.
   if (await fs.pathExists(backupDest)) {
-    return;
+    return backupDest;
   }
   
   await fs.ensureDir(path.dirname(backupDest));
   await fs.copy(filePath, backupDest, { overwrite: false });
+  return backupDest;
 }
 
 module.exports = {

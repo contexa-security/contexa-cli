@@ -78,6 +78,20 @@ jobs:
           node -e "const c=require('crypto'),f=require('fs');const actual=c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex');if(actual!==process.argv[2])throw new Error('GeoLite2 checksum mismatch')" \
             phase6-evidence/GeoLite2-City.mmdb "$geo_sha"
 
+      - name: Run restored init and reset lifecycle regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
+          CONTEXA_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
+        run: |
+          set -euo pipefail
+          node --test --test-name-pattern="Custom Merge and Standalone|public Quick standalone|Standalone prepared-directory allowance" test/init-selection-matrix.test.js
+          node --test --test-name-pattern="init provenance distinguishes" test/phase0-contract.test.js
+          node --test --test-name-pattern="Phase 2 actual init process|Phase 2 twenty different projects|Phase 2 INF01-INF08" test/phase2-init-acceptance.test.js
+          node --test --test-name-pattern="Phase 3 reset recovers" test/phase3-reset-acceptance.test.js
+          node --test --test-name-pattern="F1: malformed yml" test/stress.test.js
+
       - name: Run Phase 6 state-transition acceptance
         shell: bash
         env:

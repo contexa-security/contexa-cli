@@ -238,7 +238,7 @@ async function injectYml(ymlPath, opts = {}) {
 
   let rootObj = {};
   if (await fs.pathExists(ymlPath)) {
-    await backupFile(ymlPath, { mode: opts.simulate ? 'simulation' : 'normal' });
+    const backupPath = await backupFile(ymlPath, { mode: opts.simulate ? 'simulation' : 'normal' });
     const content = await fs.readFile(ymlPath, 'utf8');
     const stripped = stripLegacyMarker(content);
     try {
@@ -248,17 +248,17 @@ async function injectYml(ymlPath, opts = {}) {
       }
     } catch (err) {
       // Surface a friendly, actionable message instead of a raw stack trace.
-      // The .bak file is already in place so the user can recover.
+      // The transaction-owned backup is already in place so the user can recover.
       const lineHint = err.mark && typeof err.mark.line === 'number'
         ? ` (around line ${err.mark.line + 1})` : '';
       const guidance = [
         `application.yml is not valid YAML${lineHint}.`,
-        `Backup saved to ${ymlPath}.bak`,
+        `Backup saved to ${backupPath}`,
         `How to fix:`,
         `  1) Open ${ymlPath} and check indentation${lineHint}.`,
         `  2) Tabs are NOT valid in YAML - replace with spaces.`,
         `  3) Run "contexa init" again once the file parses cleanly.`,
-        `  4) If you cannot resolve it, restore from the .bak file.`,
+        `  4) If you cannot resolve it, restore from ${backupPath}.`,
         `Original parser error: ${err.message}`,
       ].join('\n  ');
       throw new Error(guidance);

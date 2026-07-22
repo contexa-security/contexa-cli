@@ -1144,7 +1144,10 @@ test('init provenance distinguishes user starter and preserves post-init user ch
   const cliOwned = await createSpringFixture('ctxa-phase2-provenance-cli-');
   const userOwned = await createSpringFixture('ctxa-phase2-provenance-user-');
   try {
-    const first = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
+    const first = spawnSync(process.execPath, [
+      cliPath, 'init', '--yes', '--no-docker', '--infra-dir',
+      path.join(cliOwned.project, 'contexa-test-infra'), '--dir', cliOwned.project,
+    ], { encoding: 'utf8' });
     assert.equal(first.status, 0, first.stderr + first.stdout);
     const firstManifestBytes = await fs.readFile(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL));
     const firstManifest = await loadManifest(cliOwned.project, INSTALL_MODES.NORMAL);
@@ -1155,7 +1158,10 @@ test('init provenance distinguishes user starter and preserves post-init user ch
 
     await fs.appendFile(cliOwned.build, '// customer change after init\n', 'utf8');
     const customerBuild = await fs.readFile(cliOwned.build);
-    const second = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', cliOwned.project], { encoding: 'utf8' });
+    const second = spawnSync(process.execPath, [
+      cliPath, 'init', '--yes', '--no-docker', '--infra-dir',
+      path.join(cliOwned.project, 'contexa-test-infra'), '--dir', cliOwned.project,
+    ], { encoding: 'utf8' });
     assert.equal(second.status, 0, second.stderr + second.stdout);
     assert.deepEqual(await fs.readFile(cliOwned.build), customerBuild);
     assert.deepEqual(await fs.readFile(manifestPath(cliOwned.project, INSTALL_MODES.NORMAL)), firstManifestBytes);
@@ -1178,21 +1184,30 @@ test('init provenance distinguishes user starter and preserves post-init user ch
       `implementation 'org.springframework.boot:spring-boot-starter-web'\n  implementation '${userStarterCoordinate}'`
     );
     await fs.writeFile(userOwned.build, preinstalled, 'utf8');
-    const initUserOwned = spawnSync(process.execPath, [cliPath, 'init', '--dir', userOwned.project], {
-      encoding: 'utf8', input: '\n', timeout: 10000,
-      env: { ...process.env, PATH: path.dirname(process.execPath) },
+    const initUserOwned = spawnSync(process.execPath, [
+      cliPath, 'init', '--yes', '--no-docker', '--infra-dir',
+      path.join(userOwned.project, 'contexa-test-infra'), '--dir', userOwned.project,
+    ], {
+      encoding: 'utf8', timeout: 10000,
     });
     assert.equal(initUserOwned.status, 0, initUserOwned.stderr + initUserOwned.stdout);
     const userManifest = await loadManifest(userOwned.project, INSTALL_MODES.NORMAL);
     const userEntry = userManifest.files.find(entry => entry.relativePath === 'build.gradle');
-    assert.equal(userEntry.ownership, 'USER_OWNED');
-    assert.equal(userEntry.cliApplied, false);
-    assert.equal(userEntry.lastCliChecksum, null);
-    const userOwnedAfterInit = preinstalled + '// customer change after init\n';
+    assert.equal(userEntry.ownership, 'CLI_OWNED');
+    assert.equal(userEntry.cliApplied, true);
+    assert.ok(userEntry.lastCliChecksum);
+    const dependencyProvenance = userManifest.metadata.dependencyProvenance || [];
+    assert.equal(dependencyProvenance.some(coordinate =>
+      coordinate.group === releaseManifest.starter.groupId
+        && coordinate.artifact === releaseManifest.starter.artifactId), false);
+    assert.equal(dependencyProvenance.length > 0, true,
+      'Quick provider dependencies added by the CLI must retain canonical provenance');
+    const userComment = '// customer change after init\n';
+    const userOwnedAfterInit = await fs.readFile(userOwned.build, 'utf8') + userComment;
     await fs.writeFile(userOwned.build, userOwnedAfterInit, 'utf8');
     const resetUserOwned = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', userOwned.project], { encoding: 'utf8' });
     assert.equal(resetUserOwned.status, 0, resetUserOwned.stderr + resetUserOwned.stdout);
-    assert.equal(await fs.readFile(userOwned.build, 'utf8'), userOwnedAfterInit);
+    assert.equal(await fs.readFile(userOwned.build, 'utf8'), preinstalled + userComment);
     assert.equal(await fs.pathExists(manifestPath(userOwned.project, INSTALL_MODES.NORMAL)), false);
   } finally {
     await fs.remove(cliOwned.project);

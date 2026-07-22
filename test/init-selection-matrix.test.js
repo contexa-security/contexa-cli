@@ -569,6 +569,7 @@ test('Standalone prepared-directory allowance remains exact and rejects unrelate
     await fs.outputFile(geo, 'verified');
     await fs.outputFile(path.join(allowed, '.cli', 'state.json'), '{}');
     await fs.writeFile(path.join(allowed, 'manifest.json'), '{}');
+    await fs.writeFile(path.join(allowed, '.init.lock'), '');
     await injectStandalone(allowed, { buildTool: 'gradle', buildFilePath: 'build.gradle' }, {
       infra: 'skip', enableAiSecurity: true, llmProviders: ['openai'], preparedPaths: [geo],
     });

@@ -480,8 +480,8 @@ test('F1: malformed yml fails with friendly multi-line guidance', async () => {
     catch (err) { caught = err; }
     assert.ok(caught, 'must throw on malformed yml');
     assert.match(caught.message, /How to fix/);
-    assert.match(caught.message, /\.bak/);
-    const backupDest = path.join(dir, 'contexa', 'bak', 'app.yml');
+    assert.match(caught.message, /contexa[\\/]\.cli[\\/]bak/);
+    const backupDest = path.join(dir, 'contexa', '.cli', 'bak', 'app.yml');
     assert.ok(await fs.pathExists(backupDest), 'backup must still be created');
   } finally { await fs.remove(dir); }
 });

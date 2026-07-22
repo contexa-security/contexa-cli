@@ -98,7 +98,7 @@ function runInterruptedReset(project, stage, signalPath) {
     '  const current = await fs.readJson(manifest);',
     "  if (Array.isArray(current.files) && current.files.length === 0) await stopAt('manifest-empty');",
     '};',
-    "process.argv = [process.execPath, cliPath, 'reset', '--yes', '--dir', project, '--code'];",
+    "process.argv = [process.execPath, cliPath, 'reset', '--yes', '--dir', project];",
     'require(cliPath);',
   ].join('\n');
   return spawn(process.execPath, ['-e', script, project, stage, signalPath], {
@@ -153,7 +153,7 @@ test('Phase 3 reset recovers after termination at every durable file stage', {
         await awaitFile(signalPath);
         child.kill('SIGKILL');
         await closed;
-        const retry = await runCli(project, 'reset', ['--code']);
+        const retry = await runCli(project, 'reset');
         assertSuccess(retry, `${stage} retry`);
         assert.deepEqual(await fs.readFile(buildPath), originalBuild);
         assert.deepEqual(await fs.readFile(ymlPath), originalYml);

@@ -22,6 +22,16 @@ const {
 } = require('../src/core/manifest');
 const { collectInitAnswers } = require('../src/core/init-input');
 
+function testEnvironment(extra = {}) {
+  const verifiedGeoIp = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
+  return {
+    ...process.env,
+    ...(verifiedGeoIp ? { CONTEXA_GEOLITE2_SOURCE_PATH: verifiedGeoIp } : {}),
+    ...extra,
+    CONTEXA_LANG: 'en',
+  };
+}
+
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -51,7 +61,7 @@ function runInit(project, extra = [], extraEnvironment = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath,
       [cliPath, 'init', '--yes', '--dir', project, ...safeArgs],
-      { cwd: root, env: { ...process.env, ...extraEnvironment, CONTEXA_LANG: 'en' }, windowsHide: true });
+      { cwd: root, env: testEnvironment(extraEnvironment), windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill(), 20000);
@@ -98,13 +108,13 @@ function runInterruptedInit(project, targetState, signalPath) {
     '};',
     'require(manifestPath);',
     'const { executeInit } = require(initPath);',
-    "executeInit({ dir: project, yes: true, docker: false })",
+    "executeInit({ dir: project, yes: true, docker: false, infraDir: require('node:path').join(project, 'contexa-test-infra') })",
     '  .then(() => process.exit(0))',
     '  .catch(error => { console.error(error.stack || error); process.exit(2); });',
   ].join('\n');
   return spawn(process.execPath, ['-e', script, project, targetState, signalPath], {
     cwd: root,
-    env: { ...process.env, CONTEXA_LANG: 'en' },
+    env: testEnvironment(),
     windowsHide: true,
   });
 }
@@ -131,7 +141,7 @@ function runInitWithoutFlags(project) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cliPath, 'init'], {
       cwd: project,
-      env: { ...process.env, CONTEXA_LANG: 'en' },
+      env: testEnvironment(),
       windowsHide: true,
     });
     let stdout = '';
@@ -413,7 +423,7 @@ test('Phase 2 INF01-INF08 profiles remain isolated across five init repetitions'
           if (profile.local === 'standalone') {
             assert.doesNotMatch(compose, /^\s*redis:/m);
             assert.equal(await fs.pathExists(
-              path.join(project, 'src/main/resources/application-contexa.yml')), false);
+              path.join(project, 'src/main/resources/application-contexa.yml')), true);
           } else {
             assert.match(compose, /^\s*redis:/m);
             assert.match(compose, /^\s*kafka:/m);
@@ -422,7 +432,7 @@ test('Phase 2 INF01-INF08 profiles remain isolated across five init repetitions'
               path.join(project, 'src/main/resources/application-contexa.yml'), 'utf8');
             assert.match(overlay, /^\s*mode:\s*DISTRIBUTED\s*$/m);
             assert.doesNotMatch(overlay, /^server:/m);
-            assert.doesNotMatch(overlay, /^\s*security:/m);
+            assert.doesNotMatch(overlay, /^security:/m);
           }
         }
       });

@@ -56,7 +56,7 @@ async function containsOnlyPreparedEntries(rootDir, preparedPaths = []) {
       const absolute = path.resolve(directory, entry.name);
       const relative = path.relative(root, absolute);
       if (entry.isSymbolicLink()) return false;
-      if (relative === 'manifest.json'
+      if (relative === 'manifest.json' || relative === '.init.lock'
           || relative === '.cli' || relative.startsWith('.cli' + path.sep)) continue;
       if (entry.isDirectory()) {
         if (!allowedDirectories.has(absolute) || !await inspect(absolute)) return false;
