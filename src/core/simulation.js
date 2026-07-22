@@ -13,6 +13,15 @@ const { TIMEOUTS } = require('./timeouts');
 
 const SIMULATION_PROJECT = 'ctxa-sim';
 const SIMULATION_PROFILE = 'contexa-sim';
+
+function simulationError(code, messageKey, ...messageArgs) {
+  const error = new Error(code);
+  error.code = code;
+  error.messageKey = messageKey;
+  error.messageArgs = messageArgs;
+  return error;
+}
+
 function derivedDatabasePassword(installationId) {
   if (typeof installationId !== 'string' || !installationId) {
     throw new Error('Simulation installation ID is required to derive the isolated database credential.');
@@ -72,7 +81,8 @@ function simulationConfigurationPath(project) {
   const candidates = project && project.mainApplicationCandidates;
   if (!Array.isArray(candidates) || candidates.length !== 1) {
     const count = Array.isArray(candidates) ? candidates.length : 0;
-    throw new Error(`Simulation profile configuration requires exactly one main application class; found ${count}.`);
+    throw simulationError('SIMULATION_MAIN_APPLICATION_REQUIRED',
+      'init.error.simulationMainApplicationRequired', count);
   }
   const packageName = readPackageName(candidates[0]);
   const sourceRoot = path.join(project.projectDir, 'src', 'main', 'java');

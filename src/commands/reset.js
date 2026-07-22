@@ -14,7 +14,8 @@ const {
 } = require('../core/docker');
 const { t, formatError } = require('../core/i18n');
 const {
-  INSTALL_MODES, backupRoot, loadManifest, manifestPath, restoreExternalResources, saveManifest,
+  INSTALL_MODES, acquireInstallLock, backupRoot, loadManifest, manifestPath, releaseInstallLock,
+  restoreExternalResources, saveManifest,
 } = require('../core/manifest');
 const {
   auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
@@ -218,7 +219,8 @@ module.exports = function (program) {
       }
 
       const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
-      if (installMode === INSTALL_MODES.SIMULATION && !ownsManifestInfrastructure) {
+      if (installMode === INSTALL_MODES.SIMULATION
+          && !ownsManifestInfrastructure) {
         targets.simulate = false;
         infraCompleted = true;
       }
@@ -263,119 +265,131 @@ module.exports = function (program) {
         return;
       }
 
-      if (targets.simulate || targets.infra) {
-        const spinner = ora(dockerLifecycleManaged
-          ? t('reset.stoppingContainers') : t('reset.restoringFiles')).start();
-        const ownedInfraDir = planSimInfraDir || planInfraDir;
-        try {
-          if (dockerLifecycleManaged) {
-            dockerCalls += 1;
-            const dockerAudit = await performOwnedDockerCleanup({
-              contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
-              mode: installMode,
-              installationId: resetManifest.metadata.installationId,
-              projectName,
-              infraDir: ownedInfraDir,
-              composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
-              env: installMode === INSTALL_MODES.SIMULATION
-                ? simulateComposeEnv(resetManifest.metadata.installationId)
-                : composeEnv(projectName),
-            }, {
-              isCliInstalled: isDockerCliInstalled,
-              isDaemonRunning: isDockerDaemonRunning,
-              inspectLabels: inspectDockerLabels,
-              composeDown: dockerComposeDown,
-            });
-            mergeAudit(resetAudit, dockerAudit);
-          }
-          const externalAudit = await restoreExternalResources(
-            projectDir,
-            resetManifest,
-            installMode,
-            {
-              metadataUpdates: {
-                infra: 'skip',
-                dockerResources: null,
-                composeChecksum: null,
-              },
+      let resetLock = null;
+      try {
+        resetLock = await acquireInstallLock(projectDir, installMode, 'reset');
+
+        if (targets.simulate || targets.infra) {
+          const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
+          const spinner = ora(t(dockerLifecycleManaged
+            ? 'reset.stoppingContainers'
+            : 'reset.restoringFiles')).start();
+          const ownedInfraDir = planSimInfraDir || planInfraDir;
+          try {
+            if (dockerLifecycleManaged) {
+              dockerCalls += 1;
+              const dockerAudit = await performOwnedDockerCleanup({
+                contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
+                mode: installMode,
+                installationId: resetManifest.metadata.installationId,
+                projectName,
+                infraDir: ownedInfraDir,
+                composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
+                env: installMode === INSTALL_MODES.SIMULATION
+                  ? simulateComposeEnv(resetManifest.metadata.installationId)
+                  : composeEnv(projectName),
+              }, {
+                isCliInstalled: isDockerCliInstalled,
+                isDaemonRunning: isDockerDaemonRunning,
+                inspectLabels: inspectDockerLabels,
+                composeDown: dockerComposeDown,
+              });
+              mergeAudit(resetAudit, dockerAudit);
             }
-          );
-          mergeAudit(resetAudit, externalAudit);
-          infraCompleted = true;
-          spinner.succeed(dockerLifecycleManaged
-            ? t('reset.dockerRemoved') : t('reset.filesRestored'));
-        } catch (error) {
-          resetHadIssues = true;
-          resetAudit.failed.push({
-            resource: dockerLifecycleManaged ? 'docker' : 'infrastructure-files',
-            detail: formatError(error),
-          });
-          spinner.fail(dockerLifecycleManaged
-            ? t('reset.error.dockerCleanup', formatError(error))
-            : t('reset.error.restore', formatError(error)));
-        }
-      }
-
-      if ((targets.simulate || targets.infra) && !infraCompleted) {
-        resetAudit.preserved.push({
-          resource: installMode === INSTALL_MODES.SIMULATION
-            ? 'simulation project files and ownership manifest'
-            : 'project files and ownership manifest',
-          detail: 'Docker cleanup did not complete; no project-managed state was changed.',
-        });
-        printAudit(resetAudit);
-        printResetResult(RESET_RESULTS.PARTIAL_FAILURE, installMode, resetAudit, dockerCalls);
-        console.log(chalk.yellow(`\n  ! ${t('reset.safeStop')}\n`));
-        process.exitCode = 1;
-        return;
-      }
-
-      if (targets.code) {
-        const spinner = ora(t('reset.restoringFiles')).start();
-        try {
-          const restoreResult = await restoreProjectFiles(projectDir, installMode);
-          mergeAudit(resetAudit, restoreResult.audit);
-          if (auditIssueCount(restoreResult.audit) > 0) {
+            const externalAudit = await restoreExternalResources(
+              projectDir,
+              resetManifest,
+              installMode,
+              {
+                metadataUpdates: {
+                  infra: 'skip',
+                  dockerResources: null,
+                  composeChecksum: null,
+                  dockerLifecycleManaged: false,
+                },
+              }
+            );
+            mergeAudit(resetAudit, externalAudit);
+            infraCompleted = true;
+            spinner.succeed(t(dockerLifecycleManaged
+              ? 'reset.dockerRemoved'
+              : 'reset.filesRestored'));
+          } catch (error) {
             resetHadIssues = true;
-            spinner.warn(t('reset.restoreIssues', auditIssueCount(restoreResult.audit)));
-          } else {
-            spinner.succeed(t('reset.filesRestored'));
+            resetAudit.failed.push({
+              resource: dockerLifecycleManaged ? 'docker' : 'infrastructure files',
+              detail: formatError(error),
+            });
+            spinner.fail(t(dockerLifecycleManaged
+              ? 'reset.error.dockerCleanup'
+              : 'reset.error.restore', formatError(error)));
           }
-        } catch (error) {
-        spinner.fail(t('reset.error.restore', formatError(error)));
-          throw error;
         }
-      }
 
-      const finalManifest = await loadManifest(projectDir, installMode);
-      if (infraCompleted) {
-        finalManifest.metadata.infra = 'skip';
-        finalManifest.metadata.dockerResources = null;
-        finalManifest.metadata.composeChecksum = null;
-      }
-      const safeAudit = sanitizeAudit(resetAudit);
-      finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
-      const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
-      if (finalManifest.files.length === 0 && !ownsInfrastructure) {
-        const finalManifestPath = manifestPath(projectDir, installMode);
-        if (fs.existsSync(finalManifestPath)) fs.removeSync(finalManifestPath);
-        const backups = backupRoot(projectDir, installMode);
-        if (fs.existsSync(backups)) fs.removeSync(backups);
-        const stateDir = path.dirname(finalManifestPath);
-        if (fs.existsSync(stateDir) && fs.readdirSync(stateDir).length === 0) fs.removeSync(stateDir);
-      } else {
-        await saveManifest(projectDir, finalManifest, installMode);
-      }
+        if ((targets.simulate || targets.infra) && !infraCompleted) {
+          resetAudit.preserved.push({
+            resource: installMode === INSTALL_MODES.SIMULATION
+              ? 'simulation project files and ownership manifest'
+              : 'project files and ownership manifest',
+            detail: 'Docker cleanup did not complete; no project-managed state was changed.',
+          });
+          printAudit(resetAudit);
+          printResetResult(RESET_RESULTS.PARTIAL_FAILURE, installMode, resetAudit, dockerCalls);
+          console.log(chalk.yellow(`\n  ! ${t('reset.safeStop')}\n`));
+          process.exitCode = 1;
+          return;
+        }
 
-      printAudit(resetAudit);
+        if (targets.code) {
+          const spinner = ora(t('reset.restoringFiles')).start();
+          try {
+            const restoreResult = await restoreProjectFiles(projectDir, installMode);
+            mergeAudit(resetAudit, restoreResult.audit);
+            if (auditIssueCount(restoreResult.audit) > 0) {
+              resetHadIssues = true;
+              spinner.warn(t('reset.restoreIssues', auditIssueCount(restoreResult.audit)));
+            } else {
+              spinner.succeed(t('reset.filesRestored'));
+            }
+          } catch (error) {
+          spinner.fail(t('reset.error.restore', formatError(error)));
+            throw error;
+          }
+        }
 
-      if (resetHadIssues) {
-        printResetResult(issueResult(resetAudit), installMode, resetAudit, dockerCalls);
-        console.log(chalk.yellow(`\n  ! ${t('reset.completedWithIssues')}\n`));
-        process.exitCode = 1;
-      } else {
-        printResetResult(RESET_RESULTS.SUCCESS, installMode, resetAudit, dockerCalls);
-        console.log(chalk.green(`\n  v ${t('reset.success')}\n`));
+        const finalManifest = await loadManifest(projectDir, installMode);
+        if (infraCompleted) {
+          finalManifest.metadata.infra = 'skip';
+          finalManifest.metadata.dockerResources = null;
+          finalManifest.metadata.composeChecksum = null;
+          finalManifest.metadata.dockerLifecycleManaged = false;
+        }
+        const safeAudit = sanitizeAudit(resetAudit);
+        finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
+        const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
+        if (finalManifest.files.length === 0 && !ownsInfrastructure) {
+          const finalManifestPath = manifestPath(projectDir, installMode);
+          if (fs.existsSync(finalManifestPath)) fs.removeSync(finalManifestPath);
+          const backups = backupRoot(projectDir, installMode);
+          if (fs.existsSync(backups)) fs.removeSync(backups);
+          const stateDir = path.dirname(finalManifestPath);
+          if (fs.existsSync(stateDir) && fs.readdirSync(stateDir).length === 0) fs.removeSync(stateDir);
+        } else {
+          await saveManifest(projectDir, finalManifest, installMode);
+        }
+
+        printAudit(resetAudit);
+
+        if (resetHadIssues) {
+          printResetResult(issueResult(resetAudit), installMode, resetAudit, dockerCalls);
+          console.log(chalk.yellow(`\n  ! ${t('reset.completedWithIssues')}\n`));
+          process.exitCode = 1;
+        } else {
+          printResetResult(RESET_RESULTS.SUCCESS, installMode, resetAudit, dockerCalls);
+          console.log(chalk.green(`\n  v ${t('reset.success')}\n`));
+        }
+      } finally {
+        await releaseInstallLock(resetLock);
       }
     });
 };

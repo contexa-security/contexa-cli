@@ -38,25 +38,24 @@ async function tempDir(prefix = 'ctxa-claim0-') {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-test('explicit AI activation without a provider fails before any mutation plan is created', async () => {
+test('quick AI activation selects the Ollama default before any mutation plan is created', async () => {
   const project = {
     hasEnableAiSecurity: false,
     hasHostSecurityFilterChain: true,
     hasDocker: false,
   };
-  await assert.rejects(
-    collectInitAnswers({
-      yes: true,
-      enableAiSecurity: true,
-      autoAnnotate: false,
-      includeOllama: false,
-      simulate: false,
-      distributed: false,
-      docker: false,
-      dir: process.cwd(),
-    }, project, 'fail-closed'),
-    error => error && error.code === 'AI_SECURITY_PROVIDER_REQUIRED'
-  );
+  const answers = await collectInitAnswers({
+    yes: true,
+    enableAiSecurity: true,
+    autoAnnotate: false,
+    includeOllama: false,
+    simulate: false,
+    distributed: false,
+    docker: false,
+    dir: process.cwd(),
+  }, project, 'quick-default-provider');
+  assert.deepEqual(answers.llmProviders, ['ollama']);
+  assert.equal(answers.enableAiSecurity, true);
 });
 
 test('explicit AI activation records the selected provider and requested security mode', async () => {
@@ -145,7 +144,7 @@ test('normal explicit activation writes only the Contexa-owned overlay', async (
     assert.equal(await fs.pathExists(overlay), true);
     for (const [file] of hostFiles) assert.deepEqual(await fs.readFile(file), before.get(file));
     const parsed = yaml.load(await fs.readFile(overlay, 'utf8'));
-    assert.equal(parsed.server.port, '${CONTEXA_SERVER_PORT:9080}');
+    assert.equal(parsed.server, undefined);
     assert.equal(parsed.contexa.security.zerotrust.mode, 'ENFORCE');
     assert.equal(parsed.contexa.llm.selection.chat.priority, 'ollama');
   } finally {
@@ -423,16 +422,12 @@ test('Mode 2: distributed infra adds spring-kafka and redisson to the gradle fra
 });
 
 // =====================================================================
-// C1 - contexa-cli must add EXACTLY ONE dependency line:
-// `ai.ctxa:spring-boot-starter-contexa`. Spring AI provider starters and
-// the pgvector vector-store starter are the customer's responsibility,
-// not ours. Adding them automatically breaks customers who depend on
-// spring-boot-starter-contexa without declaring @EnableAISecurity (the
-// PgVector/ChatModel beans try to instantiate against missing
-// infrastructure and the application fails to start).
+// C1 - Standalone integration does not mutate the host build. Its generated
+// fragment must nevertheless contain the Starter, pgvector, and exactly the
+// providers selected by the user so manual wiring reproduces that selection.
 // =====================================================================
 
-test('C1: injectStandalone NEVER adds Spring AI provider starters even when hasEnableAiSecurity=true', async () => {
+test('C1: injectStandalone fragment contains exactly the selected AI providers', async () => {
   const root = await tempDir();
   try {
     const standaloneDir = path.join(root, 'contexa');
@@ -444,15 +439,11 @@ test('C1: injectStandalone NEVER adds Spring AI provider starters even when hasE
       mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama', 'openai'], infra: 'standalone',
     });
     const frag = await fs.readFile(result.buildFragmentPath, 'utf8');
-    assert.equal(frag.includes('spring-ai-starter-model-ollama'), false,
-      'spring-ai-starter-model-ollama must NOT appear in the fragment');
-    assert.equal(frag.includes('spring-ai-starter-model-openai'), false,
-      'spring-ai-starter-model-openai must NOT appear in the fragment');
+    assert.equal(frag.includes('spring-ai-starter-model-ollama'), true);
+    assert.equal(frag.includes('spring-ai-starter-model-openai'), true);
     assert.equal(frag.includes('spring-ai-starter-model-anthropic'), false);
-    assert.equal(frag.includes('spring-ai-starter-vector-store-pgvector'), false,
-      'spring-ai-starter-vector-store-pgvector must NOT appear in the fragment');
-    // The starter line is the only mandatory contexa dependency.
-    assert.ok(frag.includes('ai.ctxa:spring-boot-starter-contexa'));
+    assert.equal(frag.includes('spring-ai-starter-vector-store-pgvector'), true);
+    assert.equal(frag.includes('ai.ctxa:spring-boot-starter-contexa'), true);
   } finally { await fs.remove(root); }
 });
 

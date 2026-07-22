@@ -32,13 +32,56 @@ test('injectYml: normal host overlay never claims datasource ownership', async (
     await injectYml(ymlPath, { mode: 'shadow' });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.datasource, undefined);
-    assert.ok(root.contexa.security);
+    assert.equal(root.contexa.security, undefined);
     assert.equal(root.contexa.llm, undefined);
     assert.equal(root.contexa.hcad, undefined);
     assert.equal(root.spring && root.spring.ai, undefined);
   } finally { await fs.remove(dir); }
 });
 
+test('injectYml: rerun removes only obsolete CLI-owned v0.1.3 overlay values', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application-contexa.yml');
+    await fs.writeFile(ymlPath, [
+      'server:',
+      '  port: ${CONTEXA_SERVER_PORT:9080}',
+      'host-owned:',
+      '  marker: keep',
+      'contexa:',
+      '  security:',
+      '    zerotrust:',
+      '      mode: SHADOW',
+      '  infrastructure:',
+      '    mode: DISTRIBUTED',
+      '',
+    ].join('\n'), 'utf8');
+    const applied = await injectYml(ymlPath, {
+      infra: 'distributed',
+      managedPaths: ['security.zerotrust.mode', 'infrastructure.mode'],
+      removeLegacyNormalServerPort: true,
+    });
+    const root = loadYml(ymlPath);
+    assert.equal(root.server, undefined);
+    assert.equal(root.contexa.security, undefined);
+    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
+    assert.equal(root['host-owned'].marker, 'keep');
+    assert.deepEqual(applied.managedPaths, ['infrastructure.mode']);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectYml: user-owned legacy-shaped values are preserved without manifest ownership', async () => {
+  const dir = await tempDir();
+  try {
+    const ymlPath = path.join(dir, 'application-contexa.yml');
+    await fs.writeFile(ymlPath,
+      'server:\n  port: ${CONTEXA_SERVER_PORT:9080}\ncontexa:\n  security:\n    zerotrust:\n      mode: SHADOW\n', 'utf8');
+    await injectYml(ymlPath, { infra: 'distributed' });
+    const root = loadYml(ymlPath);
+    assert.equal(root.server.port, '${CONTEXA_SERVER_PORT:9080}');
+    assert.equal(root.contexa.security.zerotrust.mode, 'SHADOW');
+  } finally { await fs.remove(dir); }
+});
 test('injectYml: produces a parseable yaml with a single contexa: tree', async () => {
   const dir = await tempDir();
   try {
@@ -59,6 +102,8 @@ test('injectYml: normal explicit activation leaves datasource defaults to platfo
     await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
     const root = loadYml(ymlPath);
     assert.equal(root.contexa.datasource, undefined);
+    assert.ok(root.contexa.security);
+    assert.equal(root.server, undefined);
     assert.doesNotMatch(await fs.readFile(ymlPath, 'utf8'), /contexa1234|contexa-owned-application/);
   } finally { await fs.remove(dir); }
 });

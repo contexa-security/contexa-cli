@@ -17,7 +17,7 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
   const rootDir = path.resolve(dir);
   const result = {
     isSpring: false, buildTool: null, buildFilePath: null, hasSpringBoot: false,
-    hasSpringSecurityCore: false, hasContexta: false, projectName: null,
+    hasSpringSecurityCore: false, hasContexta: false, contextaVersion: null, projectName: null,
     projectDir: rootDir, appYmlPath: null, appPropertiesPath: null,
     applicationConfigPaths: [], mainApplicationCandidates: [], hasDocker: false,
     gradleRootDir: null, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false,
@@ -47,6 +47,7 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
       isSpring: candidate.hasSpringBoot,
       hasSpringSecurityCore: candidate.hasSpringSecurityCore || !!inheritedGradle?.hasSpringSecurityCore,
       hasContexta: candidate.hasContexta || !!inheritedGradle?.hasContexta,
+      contextaVersion: candidate.contextaVersion || inheritedGradle?.contextaVersion || null,
       projectName: candidate.projectName,
       projectDir: candidate.dir,
     });
@@ -75,16 +76,19 @@ async function inheritedGradleMetadata(moduleDir) {
           path.join(parentDir, 'build.gradle'),
           path.join(parentDir, 'build.gradle.kts'),
         ]);
-        if (!buildPath) return { rootDir: parentDir, hasContexta: false, hasSpringSecurityCore: false };
+        if (!buildPath) return { rootDir: parentDir, hasContexta: false, contextaVersion: null, hasSpringSecurityCore: false };
         const build = await fs.readFile(buildPath, 'utf8');
         const model = parseGradleModel(build);
         const inheritedCoordinates = model.dependencyBlocks
           .filter(item => item.coordinates.some(coordinate =>
             coordinate.scope.includes('allprojects') || coordinate.scope.includes('subprojects')))
           .flatMap(item => item.coordinates);
+        const contextaDependency = inheritedCoordinates.find(coordinate =>
+          coordinate.group === CONTEXA_GROUP_ID && coordinate.artifact === CONTEXA_ARTIFACT_ID);
         return {
           rootDir: parentDir,
-          hasContexta: hasCoordinate(inheritedCoordinates, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+          hasContexta: !!contextaDependency,
+          contextaVersion: contextaDependency?.version || null,
           hasSpringSecurityCore: inheritedCoordinates.some(coordinate =>
             (coordinate.group === 'org.springframework.boot'
               && coordinate.artifact === 'spring-boot-starter-security')
@@ -128,6 +132,8 @@ async function readBuildCandidate(dir) {
       && /^spring-boot-starter(?:-.+)?$/.test(coordinate.artifact));
     const hasSpringBoot = !!(bootDependency || bootPlugin
       || (model.packaging !== 'pom' && bootParent));
+    const contextaDependency = model.dependencies.find(coordinate =>
+      coordinate.group === CONTEXA_GROUP_ID && coordinate.artifact === CONTEXA_ARTIFACT_ID);
     return {
       dir, buildTool: 'maven', buildFilePath: pomPath, hasSpringBoot,
       hasSpringSecurityCore: model.dependencies.some(coordinate =>
@@ -135,7 +141,8 @@ async function readBuildCandidate(dir) {
           && coordinate.artifact === 'spring-boot-starter-security')
         || (coordinate.group === 'org.springframework.security'
           && /^spring-security-(?:core|web|config)$/.test(coordinate.artifact))),
-      hasContexta: hasCoordinate(model.dependencies, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+      hasContexta: !!contextaDependency,
+      contextaVersion: contextaDependency?.version || null,
       projectName: model.projectName,
       moduleDirs: model.modules.map(moduleName => path.resolve(dir, moduleName)),
     };
@@ -148,6 +155,8 @@ async function readBuildCandidate(dir) {
   const hasSpringBoot = model.pluginIds.includes('org.springframework.boot')
     || model.dependencies.some(coordinate => coordinate.group === 'org.springframework.boot'
       && /^spring-boot-starter(?:-.+)?$/.test(coordinate.artifact));
+  const contextaDependency = model.dependencies.find(coordinate =>
+    coordinate.group === CONTEXA_GROUP_ID && coordinate.artifact === CONTEXA_ARTIFACT_ID);
   return {
     dir, buildTool: 'gradle', buildFilePath: gradlePath, hasSpringBoot,
     hasSpringSecurityCore: model.dependencies.some(coordinate =>
@@ -155,7 +164,8 @@ async function readBuildCandidate(dir) {
         && coordinate.artifact === 'spring-boot-starter-security')
       || (coordinate.group === 'org.springframework.security'
         && /^spring-security-(?:core|web|config)$/.test(coordinate.artifact))),
-    hasContexta: hasCoordinate(model.dependencies, CONTEXA_GROUP_ID, CONTEXA_ARTIFACT_ID),
+    hasContexta: !!contextaDependency,
+    contextaVersion: contextaDependency?.version || null,
     projectName: await gradleProjectName(dir),
     moduleDirs: await gradleChildModuleDirs(dir),
   };

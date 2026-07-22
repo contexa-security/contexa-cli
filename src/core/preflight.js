@@ -83,9 +83,9 @@ async function inspectInfra(opts = {}) {
   const portCollisions = [];
   const portStates = [];
 
-  // Local TCP port collisions. We bind to 127.0.0.1 to mirror the compose
-  // bind host. A port already bound (EADDRINUSE) signals an existing service
-  // that may belong to another contexa-cli run, a host postgres, etc.
+  // Local TCP port collisions. Probe an existing listener without binding the
+  // port ourselves. Binding here creates a false EADDRINUSE race when several
+  // independent projects run preflight concurrently.
   const defaults = strictIsolation ? SIMULATION_PORTS : DEFAULT_INFRASTRUCTURE_PORTS;
   const postgresPort = configuredPort('CONTEXA_POSTGRES_PORT', defaults.postgres);
   const ollamaPort = configuredPort('CONTEXA_OLLAMA_PORT', defaults.ollama);
@@ -481,13 +481,19 @@ function nonSensitiveFingerprint(serviceKey, identity) {
 
 function isPortBound(port) {
   return new Promise((resolve) => {
-    const tester = net.createServer();
+    const tester = net.createConnection({ host: '127.0.0.1', port });
     let done = false;
-    const finish = (val) => { if (!done) { done = true; resolve(val); } };
-    tester.once('error', () => finish(true));
-    tester.once('listening', () => tester.close(() => finish(false)));
-    tester.listen(port, '127.0.0.1');
-    setTimeout(() => { try { tester.close(); } catch {} finish(false); }, 1500);
+    const finish = (bound) => {
+      if (done) return;
+      done = true;
+      tester.destroy();
+      resolve(bound);
+    };
+    tester.setTimeout(1500);
+    tester.once('connect', () => finish(true));
+    tester.once('timeout', () => finish(false));
+    tester.once('error', error => finish(!['ECONNREFUSED', 'EHOSTUNREACH']
+      .includes(error && error.code)));
   });
 }
 

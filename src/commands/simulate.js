@@ -8,7 +8,15 @@ const { spawn, execFileSync } = require('child_process');
 const { dockerCompose: dockerComposeExec } = require('../core/docker');
 const { detectSpringProject } = require('../core/detector');
 const { t } = require('../core/i18n');
-const { INSTALL_MODES, manifestPath, loadManifest, sha256FileSync } = require('../core/manifest');
+const {
+  INSTALL_MODES,
+  acquireInstallLock,
+  manifestPath,
+  loadManifest,
+  recordInstallMetadata,
+  releaseInstallLock,
+  sha256FileSync,
+} = require('../core/manifest');
 const { TIMEOUTS } = require('../core/timeouts');
 const {
   SIMULATION_PROJECT,
@@ -25,6 +33,13 @@ function simulationError(code, key, ...args) {
   error.messageKey = key;
   error.messageArgs = args;
   return error;
+}
+
+function normalizeInfrastructureError(error) {
+  if (error && error.code && error.messageKey) return error;
+  const cause = error && error.message ? error.message : 'unknown cause';
+  return simulationError('SIMULATION_INFRASTRUCTURE_UNHEALTHY',
+    'simulate.error.infrastructureUnhealthy', cause);
 }
 
 function dockerCompose(args, context, stdio = 'inherit', execute = dockerComposeExec) {
@@ -262,30 +277,60 @@ function addContextOptions(command) {
     .option('--infra-dir <path>', t('simulate.option.infraDir'));
 }
 
+async function withSimulationMutation(opts, mutation) {
+  const projectDir = path.resolve(opts.dir || process.cwd());
+  const lock = await acquireInstallLock(projectDir, INSTALL_MODES.SIMULATION);
+  try {
+    const context = await buildContext({ ...opts, dir: projectDir });
+    return await mutation(context);
+  } finally {
+    await releaseInstallLock(lock);
+  }
+}
+
+async function markDockerLifecycleManaged(context) {
+  await recordInstallMetadata(context.projectDir, {
+    dockerLifecycleManaged: true,
+  }, INSTALL_MODES.SIMULATION);
+}
+
 module.exports = function registerSimulationCommands(program) {
   const sim = program.command('simulate')
     .description(t('simulate.description'));
 
   addContextOptions(sim.command('up').description(t('simulate.up.description')))
     .action(async opts => {
-      const context = await buildContext(opts);
-      dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
-      await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
-      console.log(chalk.green(`  v ${t('simulate.up.success')}`));
+      await withSimulationMutation(opts, async context => {
+        await markDockerLifecycleManaged(context);
+        dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
+        try {
+          await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        } catch (error) {
+          throw normalizeInfrastructureError(error);
+        }
+        console.log(chalk.green(`  v ${t('simulate.up.success')}`));
+      });
     });
 
   addContextOptions(sim.command('down').description(t('simulate.down.description')))
     .action(async opts => {
-      const context = await buildContext(opts);
-      dockerCompose(['-p', SIMULATION_PROJECT, 'down', '--timeout', '0'], context);
+      await withSimulationMutation(opts, async context => {
+        dockerCompose(['-p', SIMULATION_PROJECT, 'down', '--timeout', '0'], context);
+      });
     });
 
   addContextOptions(sim.command('reset').description(t('simulate.reset.description')))
     .action(async opts => {
-      const context = await buildContext(opts);
-      dockerCompose(['-p', SIMULATION_PROJECT, 'down', '-v', '--timeout', '0'], context);
-      dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
-      await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+      await withSimulationMutation(opts, async context => {
+        await markDockerLifecycleManaged(context);
+        dockerCompose(['-p', SIMULATION_PROJECT, 'down', '-v', '--timeout', '0'], context);
+        dockerCompose(['-p', SIMULATION_PROJECT, 'up', '-d'], context);
+        try {
+          await waitForSimulationInfrastructure(context.installationId, context.includeOllama);
+        } catch (error) {
+          throw normalizeInfrastructureError(error);
+        }
+      });
     });
 
   addContextOptions(sim.command('ps').description(t('simulate.ps.description')))
@@ -312,7 +357,11 @@ module.exports = function registerSimulationCommands(program) {
       if (!project.isSpring || !project.hasContexta) {
         throw simulationError('SIMULATION_PROJECT_INVALID', 'simulate.error.project');
       }
-      verifySimulationInfrastructure(context.installationId, context.includeOllama);
+      try {
+        verifySimulationInfrastructure(context.installationId, context.includeOllama);
+      } catch (error) {
+        throw normalizeInfrastructureError(error);
+      }
       await executeBuild(project,
         simulationEnvironment(context.env, context.installationId, true));
     });
@@ -323,3 +372,5 @@ module.exports.executeCompose = dockerCompose;
 module.exports.buildLaunchSpec = buildLaunchSpec;
 module.exports.executeBuild = executeBuild;
 module.exports.stopOwnedChild = stopOwnedChild;
+module.exports.markDockerLifecycleManaged = markDockerLifecycleManaged;
+module.exports.normalizeInfrastructureError = normalizeInfrastructureError;
