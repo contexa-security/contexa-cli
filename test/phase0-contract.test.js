@@ -98,18 +98,18 @@ test('Phase 0 release and primary-command contract has one canonical source', ()
   assert.equal(common.includes("CONTEXA_VERSION = '"), false);
 });
 
-test('interactive init defaults are value-based and resolve to the safe quick starter-only plan', () => {
+test('interactive init defaults are value-based and resolve to the ready-to-run quick installation plan', () => {
   const basic = buildInitDefaults({});
   assert.equal(basic.explicitIntegrationMode, null);
   assert.deepEqual(basic.defaults, {
     setupMode: 'quick',
     integrationMode: 'merge',
-    securityMode: 'sandbox',
+    securityMode: 'full',
     mode: 'shadow',
-    enableAiSecurity: false,
-    autoAnnotate: false,
-    llmProviders: [],
-    infra: 'skip',
+    enableAiSecurity: true,
+    autoAnnotate: true,
+    llmProviders: ['ollama'],
+    infra: 'standalone',
     injectDep: true,
     startDocker: true,
   });

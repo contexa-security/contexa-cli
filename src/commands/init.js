@@ -15,6 +15,7 @@ module.exports = function registerInitCommand(program) {
     .option('--include-ollama', t('init.option.includeOllama'))
     .option('--no-docker', t('init.option.noDocker'))
     .option('--simulate', t('init.option.simulate'))
+    .option('--quick', t('init.option.quick'))
     .option('--enable-ai-security', t('init.option.enableAiSecurity'))
     .option('--provider <name>', t('init.option.provider'))
     .option('--auto-annotate', t('init.option.autoAnnotate'))
