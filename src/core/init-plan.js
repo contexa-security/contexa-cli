@@ -83,7 +83,8 @@ function printPlannedChanges(answers, project, paths) {
       items.push(t('planned.pathAction', paths.simulationConfigExists ? 'KEEP' : 'CREATE',
         t('planned.simulationConfiguration'), paths.simulationConfigPath));
     } else {
-      items.push(t('planned.pathAction', paths.buildExists ? 'MODIFY' : 'CREATE',
+      items.push(t('planned.pathAction', paths.starterPresent ? 'KEEP'
+        : paths.buildExists ? 'MODIFY' : 'CREATE',
         t('planned.addStarter'), paths.buildPath));
     }
     if (paths.writeOverlay) {

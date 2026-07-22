@@ -28,7 +28,7 @@ const {
   trackedFileState,
   activationResult,
 } = require('./init-plan');
-const { collectInitAnswers } = require('./init-input');
+const { collectInitAnswers, selectInitLocale } = require('./init-input');
 const { printInitCompletion } = require('./init-report');
 const { runPreinstallationChecks } = require('./init-diagnostics');
 const { detectSpringProject } = require('./detector');
@@ -152,6 +152,7 @@ async function executeInit(opts) {
       let installTransactionId = null;
       let transactionManifestExisted = false;
       try {
+      await selectInitLocale(opts);
       // --simulate isolates this run from any other contexa stack on the same
       // host: separate compose project name, separate container names, and
       // separate ports. Implemented as preset env vars consumed by both the
@@ -255,8 +256,8 @@ async function executeInit(opts) {
       //   --no-docker                   explicit "do not start containers" intent
       //   --yes                         CI automation: skip every prompt
       //
-      // The detected locale remains the default. --lang is the only language
-      // override, so an Enter-only install does not spend a question on locale.
+      // The language is selected before project detection. --lang, CONTEXA_LANG,
+      // --yes and --check are the explicit non-interactive paths.
 
       const answers = await collectInitAnswers(opts, project, cliProjectName);
 
@@ -374,6 +375,7 @@ async function executeInit(opts) {
             ymlExists: plannedYmlExists,
             writeOverlay: shouldWriteOverlay,
             buildExists: plannedBuildExists,
+            starterPresent: !!project.hasContexta,
             composePath: plannedComposePath,
             composeExists: plannedComposeExists,
             geoIpPath: plannedGeoIpPath,
@@ -479,6 +481,7 @@ async function executeInit(opts) {
       let standaloneResult = null;
       let aiAnnotationApplied = !!project.hasEnableAiSecurity;
       let aiDependenciesProcessed = false;
+      let starterDependencyChanged = false;
       if (answers.integrationMode === 'standalone') {
         console.log(chalk.cyan('\n  ' + t('standalone.intro')));
         console.log(chalk.gray(`  ${t('standalone.location')} ${standaloneDir}`));
@@ -585,39 +588,39 @@ async function executeInit(opts) {
             .split(path.sep).join('/') || '.',
           addedDependencies,
         };
+        // Source activation is independent from build dependency mutation.
+        if (answers.enableAiSecurity && answers.autoAnnotate) {
+          try {
+            const sAnnot = ora(t('step.injectingAnnotation')).start();
+            const sourceState = project.mainApplicationCandidates.length === 1
+              ? trackedFileState(installManifest, opts.dir, project.mainApplicationCandidates[0])
+              : { entry: null, userModified: false };
+            if (sourceState.userModified) {
+              sAnnot.warn('Skipped user-modified main application source.');
+            }
+            const injected = sourceState.userModified ? null : await injectEnableAiSecurity(opts.dir, {
+                mode: installMode,
+                securityMode: answers.securityMode,
+                mainApplicationCandidates: project.mainApplicationCandidates,
+              });
+            if (injected && injected.changed) {
+              sAnnot.succeed(t('step.annotationInjected'));
+              await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' }, installMode);
+              project.hasEnableAiSecurity = true;
+              aiAnnotationApplied = true;
+            } else {
+              aiAnnotationApplied = aiAnnotationApplied || !!project.hasEnableAiSecurity || !!(injected && injected.filePath);
+              sAnnot.info(t('step.annotationPresent'));
+            }
+          } catch (err) {
+            console.log(chalk.red(`  x ${t('init.error.annotation', formatError(err))}`));
+            throw err;
+          }
+        }
+
         if (answers.injectDep) {
           try {
             const buildState = trackedFileState(installManifest, opts.dir, buildPath);
-            // 3.5. Inject @EnableAISecurity only when the user explicitly allowed source annotation.
-            if (answers.enableAiSecurity && answers.autoAnnotate) {
-              try {
-                const sAnnot = ora(t('step.injectingAnnotation')).start();
-                const sourceState = project.mainApplicationCandidates.length === 1
-                  ? trackedFileState(installManifest, opts.dir, project.mainApplicationCandidates[0])
-                  : { entry: null, userModified: false };
-                if (sourceState.userModified) {
-                  sAnnot.warn('Skipped user-modified main application source.');
-                }
-                const injected = sourceState.userModified ? null : await injectEnableAiSecurity(opts.dir, {
-                    mode: installMode,
-                    securityMode: answers.securityMode,
-                    mainApplicationCandidates: project.mainApplicationCandidates,
-                  });
-                if (injected && injected.changed) {
-                  sAnnot.succeed(t('step.annotationInjected'));
-                  await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' }, installMode);
-                  project.hasEnableAiSecurity = true;
-                  aiAnnotationApplied = true;
-                } else {
-                  aiAnnotationApplied = aiAnnotationApplied || !!project.hasEnableAiSecurity || !!(injected && injected.filePath);
-                  sAnnot.info(t('step.annotationPresent'));
-                }
-              } catch (err) {
-                console.log(chalk.red(`  x ${t('init.error.annotation', formatError(err))}`));
-                throw err;
-              }
-            }
-
             if (buildState.userModified) {
               console.log(chalk.yellow(`  ! ${t('init.build.userModified')}`));
             } else {
@@ -627,6 +630,7 @@ async function executeInit(opts) {
               ? await injectMavenDep(buildPath, dependencyOptions)
               : await injectGradleDep(buildPath, dependencyOptions);
             if (ok) {
+              starterDependencyChanged = true;
               await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Contexa starter dependency' }, installMode);
             }
             const elapsed = Number(process.hrtime.bigint() - startDep) / 1e6;
@@ -872,6 +876,7 @@ async function executeInit(opts) {
         projectDir: opts.dir,
         aiAnnotationApplied,
         aiDependenciesProcessed,
+        starterDependencyChanged,
       });
 
       } catch (error) {

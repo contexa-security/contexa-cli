@@ -16,6 +16,7 @@ function printInitCompletion(context) {
     projectDir,
     aiAnnotationApplied,
     aiDependenciesProcessed,
+    starterDependencyChanged,
   } = context;
 
   console.log(chalk.cyan('\n  ============================================================'));
@@ -25,11 +26,14 @@ function printInitCompletion(context) {
   console.log(chalk.green(`  [${t('init.report.automated')}]:`));
   if (answers.integrationMode === 'standalone') {
     console.log(chalk.gray(`    v ${t('init.report.standaloneCreated', standaloneDir)}`));
+  } else if (simulate) {
+    console.log(chalk.gray(`    v ${t('init.report.simulationStateProcessed')}`));
   } else {
     console.log(chalk.gray(shouldWriteOverlay
       ? `    v ${t('init.report.hostConfigMerged')}`
       : `    v ${t('init.report.hostConfigPreserved')}`));
-    console.log(chalk.gray(`    v ${t('init.report.starterAdded')}`));
+    console.log(chalk.gray(`    v ${t(starterDependencyChanged
+      ? 'init.report.starterAdded' : 'init.report.starterPresent')}`));
   }
 
   if (answers.infra !== 'skip') {

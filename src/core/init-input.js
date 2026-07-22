@@ -3,7 +3,7 @@
 const chalk = require('chalk');
 const inquirer = require('inquirer');
 const path = require('path');
-const { t } = require('./i18n');
+const { getLocale, setLocale, t, SUPPORTED } = require('./i18n');
 const { aiProviderSelected } = require('./init-plan');
 const { normalizeProviders } = require('./provider');
 const { resolveInfraDir } = require('./project');
@@ -16,7 +16,35 @@ function initInputError(code, key) {
   return error;
 }
 
+function explicitLanguageSelected(opts = {}) {
+  if (SUPPORTED.includes(String(opts.lang || '').toLowerCase())) return true;
+  if (process.argv.some(argument => argument === '--lang' || argument.startsWith('--lang='))) {
+    return true;
+  }
+  const environmentLanguage = String(process.env.CONTEXA_LANG || '')
+    .toLowerCase().match(/^([a-z]{2})/);
+  return !!(environmentLanguage && SUPPORTED.includes(environmentLanguage[1]));
+}
+
+async function selectInitLocale(opts = {}) {
+  if (opts.yes || opts.check || explicitLanguageSelected(opts)) return getLocale();
+  const answer = await inquirer.prompt([{
+    type: 'rawlist',
+    name: 'lang',
+    message: t('lang.choose') + '\n',
+    default: getLocale(),
+    choices: [
+      { name: t('lang.choice.en'), value: 'en' },
+      { name: t('lang.choice.ko'), value: 'ko' },
+    ],
+  }]);
+  return setLocale(SUPPORTED.includes(answer.lang) ? answer.lang : getLocale());
+}
+
 function buildInitDefaults(opts) {
+  if (opts.merge && opts.standalone) {
+    throw initInputError('INTEGRATION_MODE_CONFLICT', 'init.error.integrationModeConflict');
+  }
   const explicitIntegrationMode = opts.standalone ? 'standalone'
     : opts.merge ? 'merge'
     : null;
@@ -214,4 +242,4 @@ async function collectInitAnswers(opts, project, cliProjectName) {
   return answers;
 }
 
-module.exports = { buildInitDefaults, collectInitAnswers };
+module.exports = { buildInitDefaults, collectInitAnswers, selectInitLocale };

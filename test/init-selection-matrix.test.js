@@ -8,7 +8,9 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const yaml = require('js-yaml');
 const inquirer = require('inquirer');
-const { buildInitDefaults, collectInitAnswers } = require('../src/core/init-input');
+const { buildInitDefaults, collectInitAnswers, selectInitLocale } = require('../src/core/init-input');
+const { getLocale, setLocale } = require('../src/core/i18n');
+const { printInitCompletion } = require('../src/core/init-report');
 const { executeInit } = require('../src/core/init-application');
 const { buildCliContexaTree } = require('../src/core/injector/yml');
 const {
@@ -50,6 +52,79 @@ function activeQuestionNames(questions, selection) {
     .map(question => question.name);
 }
 
+test('interactive init asks for language first and applies the selected locale', async () => {
+  const previousArgv = process.argv;
+  const previousLanguage = process.env.CONTEXA_LANG;
+  let questions;
+  inquirer.prompt = async value => {
+    questions = value;
+    return { lang: 'ko' };
+  };
+  try {
+    process.argv = ['node', 'contexa', 'init'];
+    delete process.env.CONTEXA_LANG;
+    setLocale('en');
+    assert.equal(await selectInitLocale({}), 'ko');
+    assert.equal(getLocale(), 'ko');
+    assert.deepEqual(questions.map(question => question.name), ['lang']);
+    assert.deepEqual(questions[0].choices.map(choice => choice.value), ['en', 'ko']);
+  } finally {
+    process.argv = previousArgv;
+    if (previousLanguage === undefined) delete process.env.CONTEXA_LANG;
+    else process.env.CONTEXA_LANG = previousLanguage;
+    setLocale('en');
+    inquirer.prompt = originalPrompt;
+  }
+});
+
+test('explicit CONTEXA_LANG bypasses the interactive language question', async () => {
+  const previousLanguage = process.env.CONTEXA_LANG;
+  let prompted = false;
+  inquirer.prompt = async () => {
+    prompted = true;
+    return { lang: 'en' };
+  };
+  try {
+    process.env.CONTEXA_LANG = 'ko';
+    setLocale('ko');
+    assert.equal(await selectInitLocale({}), 'ko');
+    assert.equal(prompted, false);
+  } finally {
+    if (previousLanguage === undefined) delete process.env.CONTEXA_LANG;
+    else process.env.CONTEXA_LANG = previousLanguage;
+    setLocale('en');
+    inquirer.prompt = originalPrompt;
+  }
+});
+
+test('simulation completion reports simulation-owned changes without claiming host mutation', () => {
+  const originalLog = console.log;
+  const output = [];
+  console.log = (...values) => output.push(values.join(' '));
+  try {
+    setLocale('en');
+    printInitCompletion({
+      answers: {
+        integrationMode: 'merge', infra: 'distributed', enableAiSecurity: true,
+        mode: 'shadow', llmProviders: ['ollama'], securityMode: 'sandbox',
+      },
+      project: { buildTool: 'gradle' },
+      simulate: true,
+      projectDir: 'C:\\tmp\\host',
+      shouldWriteOverlay: true,
+      aiAnnotationApplied: false,
+      aiDependenciesProcessed: false,
+      starterDependencyChanged: false,
+    });
+  } finally {
+    console.log = originalLog;
+    setLocale('en');
+  }
+  const report = output.join('\n');
+  assert.match(report, /Simulation-owned overlay and profile configuration processed/);
+  assert.doesNotMatch(report, /starter-contexa dependency (?:added|already present)/);
+  assert.doesNotMatch(report, /owned application-contexa\.yml overlay|Host application configuration/);
+});
 test('quick defaults restore ready-to-run Contexa installation', () => {
   const { defaults } = buildInitDefaults({});
   assert.deepEqual(defaults, {
@@ -140,6 +215,13 @@ test('custom selection normalizes every integration, security, mode, provider, i
   assert.equal(combinations, 420);
 });
 
+test('--merge and --standalone fail instead of silently ignoring one selection', () => {
+  assert.throws(
+    () => buildInitDefaults({ merge: true, standalone: true }),
+    error => error.code === 'INTEGRATION_MODE_CONFLICT'
+      && error.messageKey === 'init.error.integrationModeConflict'
+  );
+});
 test('standalone plus explicit auto annotation is rejected instead of silently mutating host code', async () => {
   await assert.rejects(
     collect({
@@ -502,6 +584,70 @@ test('Custom Merge and Standalone execute end to end and reset to exact host sta
   }
 });
 
+test('existing Starter honors automatic annotation yes/no and reset restores the exact host state', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
+  const previousSource = process.env.CONTEXA_GEOLITE2_SOURCE_PATH;
+  process.env.CONTEXA_GEOLITE2_SOURCE_PATH = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
+  const automatic = await createExecutableFixture('ctxa-existing-starter-auto-');
+  const manual = await createExecutableFixture('ctxa-existing-starter-manual-');
+  const addExistingStarter = async fixture => {
+    fixture.build = fixture.build.replace('dependencies {',
+      "dependencies {\n  implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0'");
+    await fs.writeFile(fixture.buildPath, fixture.build);
+  };
+  try {
+    await addExistingStarter(automatic);
+    automatic.sourceText = automatic.sourceText.replace(
+      'import org.springframework.boot.autoconfigure.SpringBootApplication;',
+      'import org.springframework.boot.autoconfigure.SpringBootApplication;\n'
+        + 'import io.contexa.contexacommon.annotation.EnableAISecurity;');
+    await fs.writeFile(automatic.sourcePath, automatic.sourceText);
+    await executeInteractiveSelection(automatic, {
+      setupMode: 'advanced', integrationMode: 'merge', securityMode: 'sandbox',
+      mode: 'shadow', llmProviders: ['openai'], infra: 'skip', startDocker: false,
+      autoAnnotate: true,
+    });
+    const automaticSource = await fs.readFile(automatic.sourcePath, 'utf8');
+    assert.match(automaticSource,
+      /@EnableAISecurity\(mode = SecurityMode\.SANDBOX\)\n@SpringBootApplication/);
+    const automaticManifest = await loadManifest(automatic.project);
+    assert.equal(automaticManifest.metadata.activationResult.status, 'ACTIVE');
+    assert.equal(automaticManifest.metadata.activationResult.annotationActive, true);
+    assert.equal(automaticManifest.metadata.activationResult.dependenciesReady, true);
+
+    const automaticReset = resetFixture(automatic.project);
+    assert.equal(automaticReset.status, 0, automaticReset.stderr + automaticReset.stdout);
+    assert.equal(await fs.readFile(automatic.sourcePath, 'utf8'), automatic.sourceText);
+    assert.equal(await fs.readFile(automatic.buildPath, 'utf8'), automatic.build);
+    assert.equal(await fs.pathExists(manifestPath(automatic.project, INSTALL_MODES.NORMAL)), false);
+
+    await addExistingStarter(manual);
+    await executeInteractiveSelection(manual, {
+      setupMode: 'advanced', integrationMode: 'merge', securityMode: 'full',
+      mode: 'enforce', llmProviders: ['anthropic'], infra: 'skip', startDocker: false,
+      autoAnnotate: false,
+    });
+    const manualSource = await fs.readFile(manual.sourcePath, 'utf8');
+    assert.doesNotMatch(manualSource, /@EnableAISecurity/);
+    const manualManifest = await loadManifest(manual.project);
+    assert.equal(manualManifest.metadata.activationResult.status, 'PENDING_ANNOTATION');
+    assert.equal(manualManifest.metadata.activationResult.annotationActive, false);
+    assert.equal(manualManifest.metadata.activationResult.dependenciesReady, true);
+
+    const manualReset = resetFixture(manual.project);
+    assert.equal(manualReset.status, 0, manualReset.stderr + manualReset.stdout);
+    assert.equal(await fs.readFile(manual.sourcePath, 'utf8'), manual.sourceText);
+    assert.equal(await fs.readFile(manual.buildPath, 'utf8'), manual.build);
+    assert.equal(await fs.pathExists(manifestPath(manual.project, INSTALL_MODES.NORMAL)), false);
+  } finally {
+    if (previousSource === undefined) delete process.env.CONTEXA_GEOLITE2_SOURCE_PATH;
+    else process.env.CONTEXA_GEOLITE2_SOURCE_PATH = previousSource;
+    await fs.remove(automatic.project);
+    await fs.remove(manual.project);
+  }
+});
 test('public Quick standalone flags execute end to end with exact generated artifacts', {
   skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
     ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
