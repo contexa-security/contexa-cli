@@ -127,11 +127,11 @@ test('clean -> init -> init rerun -> reset -> reset rerun', async () => {
   const records = [];
   try {
     let step = await executeStep(fixture, records, 'normal init',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.NORMAL);
     const installedBuild = await digest(fixture.build);
     step = await executeStep(fixture, records, 'normal init rerun',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.NORMAL);
     assert.equal(await digest(fixture.build), installedBuild);
     step = await executeStep(fixture, records, 'normal reset',
@@ -177,7 +177,7 @@ test('clean -> init -> init --simulate -> reset --simulate -> reset', async t =>
   const records = [];
   try {
     let step = await executeStep(fixture, records, 'normal init',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.NORMAL);
     const normalBuild = await digest(fixture.build);
     step = await executeStep(fixture, records, 'simulation init', [
@@ -209,7 +209,7 @@ test('clean dependency-only -> init --simulate -> init -> reset -> reset --simul
     ]);
     assert.equal(step.state.state, INSTALLATION_STATES.SIMULATION);
     step = await executeStep(fixture, records, 'normal init',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.BOTH);
     step = await executeStep(fixture, records, 'normal reset',
       ['reset', '--yes', '--dir', fixture.project]);
@@ -230,12 +230,12 @@ test('normal -> user build modification -> init rerun -> reset', async () => {
   const records = [];
   try {
     let step = await executeStep(fixture, records, 'normal init',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.NORMAL);
     await fs.appendFile(fixture.build, '// user-owned phase6 marker\n', 'utf8');
     const modified = await digest(fixture.build);
     step = await executeStep(fixture, records, 'normal init after user modification',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     assert.equal(step.state.state, INSTALLATION_STATES.NORMAL);
     assert.equal(await digest(fixture.build), modified);
     step = await executeStep(fixture, records, 'normal reset after user modification',
@@ -256,7 +256,7 @@ test('both -> user build modification -> reset --simulate preserves normal bytes
   const records = [];
   try {
     await executeStep(fixture, records, 'normal init',
-      ['init', '--yes', '--dir', fixture.project]);
+      ['init', '--yes', '--no-docker', '--dir', fixture.project]);
     let step = await executeStep(fixture, records, 'simulation init', [
       'init', ...simulationOptions, '--dir', fixture.project, '--infra-dir', fixture.infra,
     ]);
