@@ -96,7 +96,7 @@ async function runLocale(locale, outputDirectory) {
     }
     await fs.outputFile(sourcePath, originalSource, 'utf8');
     const result = runPseudoTerminal(
-      ['init', '--dir', project], '\n', rawTranscript, 20000, { CONTEXA_LANG: locale });
+      ['init', '--dir', project], '\n\n\n', rawTranscript, 20000, { CONTEXA_LANG: locale });
     assert.equal(result.error, undefined, result.error && result.error.message);
     assert.equal(result.signal, null, `${locale} pseudo-terminal timed out`);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -105,15 +105,14 @@ async function runLocale(locale, outputDirectory) {
     await fs.writeFile(path.join(outputDirectory, `${locale}-대화형-기본값.txt`), transcript, 'utf8');
     assert.match(transcript, /SETUP: QUICK/);
     assert.match(transcript, /INTEGRATION: MERGE/);
-    assert.match(transcript, /HOST CONFIG: NONE/);
-    assert.match(transcript, /DOCKER: NONE/);
-    assert.match(transcript, /EXTERNAL DOWNLOAD: NONE/);
+    assert.match(transcript, /Apply explicit Contexa settings/);
+    assert.match(transcript, /DOCKER: START/);
+    assert.match(transcript, /GeoLite2-City\.mmdb/);
     assert.doesNotMatch(transcript, /INTEGRATION: STANDALONE/);
-    assert.doesNotMatch(transcript, /DOCKER: START/);
     for (const [configPath, content] of configFiles) {
       assert.deepEqual(await fs.readFile(configPath), Buffer.from(content, 'utf8'));
     }
-    assert.deepEqual(await fs.readFile(sourcePath), Buffer.from(originalSource, 'utf8'));
+    assert.match(await fs.readFile(sourcePath, 'utf8'), /@EnableAISecurity\(mode = SecurityMode\.FULL\)/);
     assert.match(await fs.readFile(buildPath, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa/);
     await capture('normal-init', result);
 
