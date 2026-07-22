@@ -169,19 +169,26 @@ test('simulate compose propagates child process errors and non-zero status', () 
   assert.equal(executeCompose(['ps'], context, 'pipe', () => success), success);
 });
 
-test('Korean starter-only init and reset expose no raw key and preserve host configuration', async () => {
+test('Korean Quick init and reset expose no raw key and preserve host configuration', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
   const fixture = await createSpringProject();
+  const childEnv = {
+    ...process.env,
+    CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+  };
   try {
     const before = await fs.readFile(fixture.yml);
     const diagnostic = spawnSync(process.execPath,
       [cliPath, '--lang', 'ko', 'init', '--check', '--dir', fixture.project],
-      { encoding: 'utf8' });
+      { encoding: 'utf8', env: childEnv });
     assert.equal(diagnostic.status, 0, diagnostic.stderr);
     assert.match(diagnostic.stdout, /진단: 설치 전 확인/);
     assert.doesNotMatch(diagnostic.stdout, /\binit\.diagnostic\.[a-z][\w.]*/);
     const initialized = spawnSync(process.execPath,
-      [cliPath, '--lang', 'ko', 'init', '--yes', '--dir', fixture.project],
-      { encoding: 'utf8' });
+      [cliPath, '--lang', 'ko', 'init', '--yes', '--no-docker', '--dir', fixture.project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(initialized.status, 0, initialized.stderr);
     assert.match(initialized.stdout, /예정된 변경/);
     assert.doesNotMatch(initialized.stdout, /\b(?:planned|init)\.[a-z][\w.]*/);
@@ -190,17 +197,18 @@ test('Korean starter-only init and reset expose no raw key and preserve host con
 
     const reset = spawnSync(process.execPath,
       [cliPath, '--lang', 'ko', 'reset', '--yes', '--dir', fixture.project],
-      { encoding: 'utf8' });
+      { encoding: 'utf8', env: childEnv });
     assert.equal(reset.status, 0, reset.stderr);
     assert.doesNotMatch(reset.stdout, /\breset\.[a-z][\w.]*/);
     assert.equal(reset.stdout.includes('\uFFFD'), false);
     assert.deepEqual(await fs.readFile(fixture.yml), before);
 
     const rejected = spawnSync(process.execPath,
-      [cliPath, 'init', '--yes', '--auto-annotate', '--dir', fixture.project],
-      { encoding: 'utf8' });
+      [cliPath, 'init', '--yes', '--standalone', '--auto-annotate', '--no-docker',
+        '--dir', fixture.project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(rejected.status, 1);
-    assert.match(rejected.stderr, /AUTO_ANNOTATE_PROVIDER_REQUIRED/);
+    assert.match(rejected.stderr, /STANDALONE_AUTO_ANNOTATE_CONFLICT/);
   } finally {
     await fs.remove(fixture.project);
   }
@@ -288,7 +296,7 @@ test('English and Korean bundles are key-identical and command help exposes no r
   }
   const initHelp = spawnSync(process.execPath,
     [cliPath, 'init', '--help'], { encoding: 'utf8' });
-  assert.doesNotMatch(initHelp.stdout, /--quick\b/);
+  assert.match(initHelp.stdout, /--quick\b/);
   assert.match(initHelp.stdout, /--check\b/);
   setLocale('ko');
   const localizedUnknown = formatError(new Error('raw English internal detail'));

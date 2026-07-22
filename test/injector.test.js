@@ -193,7 +193,7 @@ test('injectYml: backs up existing file before modifying', async () => {
     const ymlPath = path.join(dir, 'application.yml');
     await fs.writeFile(ymlPath, 'server:\n  port: 8080\n');
     await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const backupDest = path.join(dir, 'contexa', 'bak', 'application.yml');
+    const backupDest = path.join(dir, 'contexa', '.cli', 'bak', 'application.yml');
     assert.ok(await fs.pathExists(backupDest));
   } finally { await fs.remove(dir); }
 });

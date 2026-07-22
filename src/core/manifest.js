@@ -11,6 +11,7 @@ const MANIFEST_VERSION = 4;
 const RESOURCE_DIGEST_VERSION = 1;
 const TRANSACTION_JOURNAL_DIGEST_VERSION = 1;
 const INSTALL_MODES = Object.freeze({ NORMAL: 'normal', SIMULATION: 'simulation' });
+const BACKUP_LAYOUTS = Object.freeze({ LEGACY: 'legacy-v1', ISOLATED: 'isolated-v1' });
 const JOURNAL_STATES = Object.freeze({
   PLANNED: 'PLANNED',
   PREPARED: 'PREPARED',
@@ -35,8 +36,24 @@ function manifestPath(projectDir, mode = INSTALL_MODES.NORMAL) {
   return path.join(stateRoot(projectDir, mode), 'manifest.json');
 }
 
+function backupLayout(projectDir, mode = INSTALL_MODES.NORMAL) {
+  const p = manifestPath(projectDir, mode);
+  if (!fs.existsSync(p)) return BACKUP_LAYOUTS.ISOLATED;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return parsed.metadata && parsed.metadata.backupLayout === BACKUP_LAYOUTS.ISOLATED
+      ? BACKUP_LAYOUTS.ISOLATED : BACKUP_LAYOUTS.LEGACY;
+  } catch {
+    // loadManifest reports malformed manifests. Keep legacy resolution here so
+    // backupRoot never redirects recovery data before that validation occurs.
+    return BACKUP_LAYOUTS.LEGACY;
+  }
+}
+
 function backupRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
-  return path.join(stateRoot(projectDir, mode), 'bak');
+  const root = stateRoot(projectDir, mode);
+  return backupLayout(projectDir, mode) === BACKUP_LAYOUTS.ISOLATED
+    ? path.join(root, '.cli', 'bak') : path.join(root, 'bak');
 }
 
 function appliedRoot(projectDir, mode = INSTALL_MODES.NORMAL) {
@@ -227,6 +244,7 @@ function installMetadata(projectDir, currentMetadata, metadata, mode) {
     ...current,
     ...(metadata || {}),
     mode,
+    backupLayout: current.backupLayout || backupLayout(projectDir, mode),
     installationId: current.installationId || crypto.randomUUID(),
     canonicalProjectPath: canonicalProjectPathSync(projectDir),
     cliVersion: releaseManifest.cliVersion,
@@ -250,7 +268,11 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
   const normalizedMode = normalizeMode(mode);
   const p = manifestPath(projectDir, normalizedMode);
   if (!await fs.pathExists(p)) {
-    return { version: MANIFEST_VERSION, metadata: { mode: normalizedMode }, files: [] };
+    return {
+      version: MANIFEST_VERSION,
+      metadata: { mode: normalizedMode, backupLayout: BACKUP_LAYOUTS.ISOLATED },
+      files: [],
+    };
   }
   let parsed;
   try {
@@ -263,6 +285,7 @@ async function loadManifest(projectDir, mode = INSTALL_MODES.NORMAL) {
     version: parsed.version,
     metadata: {
       mode: normalizedMode,
+      backupLayout: backupLayout(projectDir, normalizedMode),
       ...(parsed.metadata && typeof parsed.metadata === 'object' ? parsed.metadata : {}),
     },
     files: Array.isArray(parsed.files) ? parsed.files : [],
@@ -509,6 +532,8 @@ async function saveManifest(projectDir, manifest, mode = INSTALL_MODES.NORMAL) {
     metadata: {
       ...suppliedMetadata,
       mode: normalizedMode,
+      backupLayout: suppliedMetadata.backupLayout
+        || backupLayout(projectDir, normalizedMode),
       installationId: suppliedMetadata.installationId || crypto.randomUUID(),
       canonicalProjectPath: canonicalProjectPathSync(projectDir),
       cliVersion: suppliedMetadata.cliVersion || releaseManifest.cliVersion,

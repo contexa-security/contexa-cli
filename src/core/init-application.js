@@ -146,7 +146,9 @@ async function executeInit(opts) {
       // 1. Detect project
       const spinner = ora(t('init.detecting')).start();
       const project = await detectSpringProject(opts.dir, {
-        probeDocker: !!(opts.distributed || opts.simulate),
+        // Quick and Custom can both provision infrastructure. Detect Docker
+        // before prompting so the selected startDocker contract is honoured.
+        probeDocker: true,
       });
       spinner.stop();
 
@@ -163,32 +165,15 @@ async function executeInit(opts) {
       console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || t('common.unknown')}`));
       console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
       console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
-      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${(opts.distributed || opts.simulate)
-        ? (project.hasDocker ? chalk.green(t('init.docker.installed')) : chalk.yellow(t('init.docker.missing')))
-        : t('common.notRequested')}`));
+      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker
+        ? chalk.green(t('init.docker.installed'))
+        : chalk.yellow(t('init.docker.missing'))}`));
 
       const cliProjectName = opts.simulate
         ? SIMULATION_PROJECT
         : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
       if (!process.env.CONTEXA_PROJECT) {
         process.env.CONTEXA_PROJECT = cliProjectName;
-      }
-
-      // Docker is only consulted when the user explicitly opted into infra
-      // provisioning via --distributed. Without --distributed, init does not
-      // touch infrastructure regardless of whether Docker is installed.
-      const wantsContainers = opts.distributed && opts.docker !== false;
-      if (!project.hasDocker && wantsContainers) {
-        console.log('');
-        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
-        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
-        console.log(chalk.gray(`    ${t('init.docker.install')}`));
-        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
-        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
-        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
-        console.log('');
-        // Auto-flip to "files only" mode so we never try to call docker compose.
-        opts.docker = false;
       }
 
       // Warn when both application.properties and application.yml exist - one shadows the other.
@@ -226,6 +211,20 @@ async function executeInit(opts) {
       // override, so an Enter-only install does not spend a question on locale.
 
       const answers = await collectInitAnswers(opts, project, cliProjectName);
+
+      if (!project.hasDocker && answers.infra !== 'skip' && answers.startDocker) {
+        console.log('');
+        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
+        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
+        console.log(chalk.gray(`    ${t('init.docker.install')}`));
+        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
+        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
+        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
+        console.log('');
+        // Preserve the selected infrastructure files, but do not claim that
+        // containers were started when Docker is unavailable.
+        answers.startDocker = false;
+      }
 
 
 
@@ -441,7 +440,9 @@ async function executeInit(opts) {
           // non-empty folder. Without --force, a non-empty folder that does
           // not look like a previous contexa-cli output is rejected up-front.
           standaloneResult = await injectStandalone(standaloneDir, project, {
-            ...answers, force: !!opts.force,
+            ...answers,
+            force: !!opts.force,
+            preparedPaths: plannedGeoIpPath ? [plannedGeoIpPath] : [],
           });
           await recordChange(opts.dir, standaloneResult.ymlPath, {
             kind: 'standalone-config', generated: plannedFiles[0].generated,
@@ -471,8 +472,8 @@ async function executeInit(opts) {
         const ymlExistedBefore = await fs.pathExists(ymlPath);
 
         if (shouldWriteOverlay) {
-          // Explicit activation/infrastructure writes only the Contexa-owned
-          // overlay. Starter-only init writes no configuration.
+          // Selected activation/infrastructure settings are written only to
+          // the Contexa-owned overlay; the host application.yml stays intact.
           const startYml = process.hrtime.bigint();
           const s1 = ora(t('step.updatingYml')).start();
           try {

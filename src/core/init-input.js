@@ -75,12 +75,6 @@ async function collectInitAnswers(opts, project, cliProjectName) {
         && !opts.simulate && !opts.provider && !opts.includeOllama,
     },
     {
-      type: 'confirm', name: 'autoAnnotate',
-      message: '\n' + t('prompt.autoAnnotate'),
-      default: true,
-      when: () => !opts.simulate && !opts.autoAnnotate,
-    },
-    {
       type: 'rawlist', name: 'integrationMode',
       message: '\n' + t('prompt.integrationMode'),
       default: 'merge',
@@ -98,6 +92,17 @@ async function collectInitAnswers(opts, project, cliProjectName) {
         if (answer.setupMode !== 'advanced') return false;
         const mode = explicitIntegrationMode || answer.integrationMode;
         return mode === 'standalone' && !opts.standaloneDir;
+      },
+    },
+    {
+      type: 'confirm', name: 'autoAnnotate',
+      message: '\n' + t('prompt.autoAnnotate'),
+      default: true,
+      when: answer => {
+        if (opts.simulate || opts.autoAnnotate) return false;
+        const integration = answer.setupMode === 'advanced'
+          ? (explicitIntegrationMode || answer.integrationMode) : 'merge';
+        return integration !== 'standalone';
       },
     },
     {
@@ -177,7 +182,10 @@ async function collectInitAnswers(opts, project, cliProjectName) {
   answers.mode = answers.mode || 'shadow';
   answers.infra = opts.distributed ? 'distributed'
     : (answers.infra || (answers.setupMode === 'quick' ? 'standalone' : 'skip'));
-  answers.startDocker = opts.docker !== false && answers.startDocker !== false;
+  answers.startDocker = answers.infra !== 'skip'
+    && project.hasDocker === true
+    && opts.docker !== false
+    && answers.startDocker !== false;
 
   if (promptProvider) {
     answers.llmProviders = normalizeProviders(promptProvider);
@@ -187,11 +195,17 @@ async function collectInitAnswers(opts, project, cliProjectName) {
     answers.llmProviders = answers.setupMode === 'quick' ? ['ollama'] : [];
   }
 
-  answers.autoAnnotate = !!(opts.autoAnnotate || answers.autoAnnotate === true);
+  if (answers.integrationMode === 'standalone' && opts.autoAnnotate) {
+    throw initInputError('STANDALONE_AUTO_ANNOTATE_CONFLICT',
+      'init.error.standaloneAutoAnnotateConflict');
+  }
+  answers.autoAnnotate = answers.integrationMode !== 'standalone'
+    && !!(opts.autoAnnotate || answers.autoAnnotate === true);
   if (!aiProviderSelected(answers)) {
     throw initInputError('AI_SECURITY_PROVIDER_REQUIRED', 'init.error.aiSecurityProviderRequired');
   }
-  answers.enableAiSecurity = true;  answers.simulate = !!opts.simulate;
+  answers.enableAiSecurity = true;
+  answers.simulate = !!opts.simulate;
   answers.hasEnableAiSecurity = !!project.hasEnableAiSecurity;
   answers.hostSecurityFilterChain = !!project.hasHostSecurityFilterChain;
   answers.injectDep = !opts.simulate;

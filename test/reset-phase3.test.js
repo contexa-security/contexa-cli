@@ -52,6 +52,37 @@ test('canonical boundary identity uses native realpath and preserves missing suf
 async function tempProject() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase3-reset-'));
 }
+test('new installs isolate CLI backups and reset preserves a pre-existing contexa/bak tree', async () => {
+  const project = await tempProject();
+  try {
+    const customerBackup = path.join(project, 'contexa', 'bak', 'customer.txt');
+    const build = path.join(project, 'build.gradle');
+    const original = "dependencies {\n}\n";
+    const applied = "dependencies {\n    implementation 'ai.ctxa:spring-boot-starter-contexa:0.1.0-SNAPSHOT'\n}\n";
+    await fs.ensureDir(path.dirname(customerBackup));
+    await fs.writeFile(customerBackup, 'customer-owned\n');
+    await fs.writeFile(build, original);
+
+    const transactionId = await beginInstallTransaction(project, {
+      projectName: 'isolated-backup', infra: 'skip',
+    }, INSTALL_MODES.NORMAL, [{ filePath: build, kind: 'build-file', generated: false }]);
+    await fs.writeFile(build, applied);
+    await recordChange(project, build, { kind: 'build-file', generated: false });
+    await commitInstallTransaction(project, transactionId);
+
+    const manifest = await loadManifest(project);
+    assert.equal(manifest.metadata.backupLayout, 'isolated-v1');
+    assert.equal(backupRoot(project), path.join(project, 'contexa', '.cli', 'bak'));
+    assert.equal(await fs.readFile(customerBackup, 'utf8'), 'customer-owned\n');
+
+    const restored = await restoreProjectFiles(project);
+    assert.equal(restored.audit.restored.length, 1);
+    assert.equal(await fs.readFile(build, 'utf8'), original);
+    assert.equal(await fs.readFile(customerBackup, 'utf8'), 'customer-owned\n');
+  } finally {
+    await fs.remove(project);
+  }
+});
 
 test('canonical dependency provenance rejects version changes and decoy groups', () => {
   const expected = [{

@@ -24,6 +24,7 @@ const {
   CONTEXA_ARTIFACT_ID,
   CONTEXA_VERSION,
   resolveDependencyVersions,
+  springAiProviderArtifacts,
   backupFile,
 } = require('./common');
 const { parseMavenModel, parseGradleModel, hasCoordinate } = require('../build-model');
@@ -310,6 +311,7 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
   const content = await fs.readFile(buildPath, 'utf8');
   const added = [];
   const { springAiBom } = resolveDependencyVersions(options.dependencyVersions);
+  const providerArtifacts = springAiProviderArtifacts(llmProviders);
 
   if (buildPath.endsWith('.xml')) {
     // Maven pom.xml
@@ -366,35 +368,15 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     // customer-owned and are never removed when provider selection changes.
     const applicationModel = parseMavenModel(updated);
     const additions = [];
-    if (llmProviders.includes('openai') && !hasCoordinate(applicationModel.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-openai')) {
+    for (const artifact of providerArtifacts) {
+      if (hasCoordinate(applicationModel.dependencies, 'org.springframework.ai', artifact)) continue;
       additions.push(
         `        <dependency>\n` +
         `            <groupId>org.springframework.ai</groupId>\n` +
-        `            <artifactId>spring-ai-starter-model-openai</artifactId>\n` +
+        `            <artifactId>${artifact}</artifactId>\n` +
         `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-openai', 'compile', null, options.targetModule));
-    }
-    if (llmProviders.includes('anthropic') && !hasCoordinate(applicationModel.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-anthropic')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.springframework.ai</groupId>\n` +
-        `            <artifactId>spring-ai-starter-model-anthropic</artifactId>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-anthropic', 'compile', null, options.targetModule));
-    }
-    if (llmProviders.includes('ollama') && !hasCoordinate(applicationModel.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-ollama')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.springframework.ai</groupId>\n` +
-        `            <artifactId>spring-ai-starter-model-ollama</artifactId>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-ollama', 'compile', null, options.targetModule));
+      added.push(canonicalDependency('org.springframework.ai', artifact,
+        'compile', null, options.targetModule));
     }
     if (!hasCoordinate(applicationModel.dependencies,
       'org.springframework.ai', 'spring-ai-starter-vector-store-pgvector')) {
@@ -441,29 +423,13 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
       added.push(canonicalDependency('org.springframework.ai', 'spring-ai-bom',
         'implementation', springAiBom, options.targetModule));
     }
-    if (llmProviders.includes('openai') && !hasCoordinate(model.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-openai')) {
+    for (const artifact of providerArtifacts) {
+      if (hasCoordinate(model.dependencies, 'org.springframework.ai', artifact)) continue;
       lines.push(isKts
-        ? `    implementation("org.springframework.ai:spring-ai-starter-model-openai")`
-        : `    implementation 'org.springframework.ai:spring-ai-starter-model-openai'`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-openai', 'implementation', null, options.targetModule));
-    }
-    if (llmProviders.includes('anthropic') && !hasCoordinate(model.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-anthropic')) {
-      lines.push(isKts
-        ? `    implementation("org.springframework.ai:spring-ai-starter-model-anthropic")`
-        : `    implementation 'org.springframework.ai:spring-ai-starter-model-anthropic'`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-anthropic', 'implementation', null, options.targetModule));
-    }
-    if (llmProviders.includes('ollama') && !hasCoordinate(model.dependencies,
-      'org.springframework.ai', 'spring-ai-starter-model-ollama')) {
-      lines.push(isKts
-        ? `    implementation("org.springframework.ai:spring-ai-starter-model-ollama")`
-        : `    implementation 'org.springframework.ai:spring-ai-starter-model-ollama'`);
-      added.push(canonicalDependency('org.springframework.ai',
-        'spring-ai-starter-model-ollama', 'implementation', null, options.targetModule));
+        ? `    implementation("org.springframework.ai:${artifact}")`
+        : `    implementation 'org.springframework.ai:${artifact}'`);
+      added.push(canonicalDependency('org.springframework.ai', artifact,
+        'implementation', null, options.targetModule));
     }
     if (!hasCoordinate(model.dependencies,
       'org.springframework.ai', 'spring-ai-starter-vector-store-pgvector')) {

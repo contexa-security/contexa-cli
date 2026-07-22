@@ -228,29 +228,40 @@ test('init prints the complete plan before the first filesystem mutation', async
   }
 });
 
-test('plain init uses the starter-only plan and is idempotent without hidden flags', async () => {
+test('default Quick command path is ready-to-run and idempotent', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
   const fixture = await createSpringFixture('ctxa-phase0-plain-init-');
   try {
     const originalYml = await fs.readFile(fixture.yml);
     const originalSource = await fs.readFile(fixture.source);
-    const initial = spawnSync(process.execPath, [cliPath, 'init'], {
+    const childEnv = {
+      ...process.env,
+      PATH: path.dirname(process.execPath),
+      CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+    };
+    const initial = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--no-docker', '--dir', fixture.project], {
       cwd: fixture.project,
       encoding: 'utf8',
-      input: '\n',
       timeout: 10000,
-      env: { ...process.env, PATH: path.dirname(process.execPath) },
+      env: childEnv,
     });
     assert.equal(initial.status, 0, initial.stderr + initial.stdout);
     assert.match(await fs.readFile(fixture.build, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa/);
     assert.deepEqual(await fs.readFile(fixture.yml), originalYml);
-    assert.deepEqual(await fs.readFile(fixture.source), originalSource);
+    assert.match(await fs.readFile(fixture.source, 'utf8'),
+      /@EnableAISecurity\(mode = SecurityMode\.FULL\)/);
+    const overlayPath = path.join(fixture.project,
+      'src', 'main', 'resources', 'application-contexa.yml');
+    assert.equal(await fs.pathExists(overlayPath), true);
 
     const committed = await snapshotDirectory(fixture.project);
     const repeated = spawnSync(process.execPath, [cliPath, 'init'], {
       cwd: fixture.project,
       encoding: 'utf8',
       timeout: 10000,
-      env: { ...process.env, PATH: path.dirname(process.execPath) },
+      env: childEnv,
     });
     assert.equal(repeated.status, 0, repeated.stderr + repeated.stdout);
     assert.match(repeated.stdout, /already installed/i);
@@ -259,17 +270,17 @@ test('plain init uses the starter-only plan and is idempotent without hidden fla
     assert.doesNotMatch(repeated.stdout, /--force|--yes/);
     assert.deepEqual(await snapshotDirectory(fixture.project), committed);
 
-    const reset = spawnSync(process.execPath, [cliPath, 'reset'], {
+    const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', fixture.project], {
       cwd: fixture.project,
       encoding: 'utf8',
-      input: 'y\n',
       timeout: 10000,
-      env: { ...process.env, PATH: path.dirname(process.execPath) },
+      env: childEnv,
     });
     assert.equal(reset.status, 0, reset.stderr + reset.stdout);
     assert.equal(await fs.readFile(fixture.build, 'utf8'), fixture.originalBuild);
     assert.deepEqual(await fs.readFile(fixture.yml), originalYml);
     assert.deepEqual(await fs.readFile(fixture.source), originalSource);
+    assert.equal(await fs.pathExists(overlayPath), false);
     assert.equal(await fs.pathExists(manifestPath(fixture.project, INSTALL_MODES.NORMAL)), false);
   } finally {
     await fs.remove(fixture.project);
@@ -1039,10 +1050,20 @@ test('async command error matrix returns non-zero on stderr without success or r
   }
 });
 
-test('actual starter-only init is idempotent and reset preserves the host project byte-for-byte', async () => {
+test('actual Quick init is idempotent and reset preserves the host project byte-for-byte', {
+  skip: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH
+    ? false : 'requires CONTEXA_TEST_GEOLITE2_SOURCE_PATH',
+}, async () => {
   const { project, build, yml, source, originalBuild, originalYml, originalSource } = await createSpringFixture('ctxa-phase0-command-');
   try {
-    const init = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8' });
+    const childEnv = {
+      ...process.env,
+      PATH: path.dirname(process.execPath),
+      CONTEXA_GEOLITE2_SOURCE_PATH: process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH,
+    };
+    const init = spawnSync(process.execPath,
+      [cliPath, 'init', '--yes', '--no-docker', '--dir', project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(init.status, 0, init.stderr + init.stdout);
     assert.match(init.stdout, /Planned changes/);
     const manifest = await loadManifest(project, INSTALL_MODES.NORMAL);
@@ -1051,28 +1072,42 @@ test('actual starter-only init is idempotent and reset preserves the host projec
     assert.match(await fs.readFile(build, 'utf8'), /ai\.ctxa:spring-boot-starter-contexa:0\.1\.0-SNAPSHOT/);
     assert.ok(manifest.files.every(entry => entry.installationId === manifest.metadata.installationId));
     assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
-    assert.deepEqual(await fs.readFile(source), Buffer.from(originalSource, 'utf8'));
+    assert.match(await fs.readFile(source, 'utf8'),
+      /@EnableAISecurity\(mode = SecurityMode\.FULL\)/);
+    const overlayPath = path.join(project, 'src/main/resources/application-contexa.yml');
+    const overlay = yaml.load(await fs.readFile(overlayPath, 'utf8'));
+    assert.equal(overlay.contexa.security.zerotrust.mode, 'SHADOW');
+    assert.equal(overlay.contexa.llm.selection.chat.priority, 'ollama');
     const updatedYml = yaml.load(await fs.readFile(yml, 'utf8'));
     assert.equal(updatedYml.spring.security.user.name, 'host-user');
     assert.equal(updatedYml.spring.datasource.url, 'jdbc:postgresql://127.0.0.1:35433/host-owned');
     assert.equal(updatedYml.spring.ai.provider, 'host-owned');
 
     const firstBuild = await fs.readFile(build);
+    const firstSource = await fs.readFile(source);
+    const firstOverlay = await fs.readFile(overlayPath);
     const firstManifest = await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL));
-    const repeatedInit = spawnSync(process.execPath, [cliPath, 'init', '--yes', '--dir', project], { encoding: 'utf8' });
+    const repeatedInit = spawnSync(process.execPath,
+      [cliPath, 'init', '--yes', '--no-docker', '--dir', project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(repeatedInit.status, 0, repeatedInit.stderr + repeatedInit.stdout);
     assert.deepEqual(await fs.readFile(build), firstBuild);
     assert.deepEqual(await fs.readFile(yml), Buffer.from(originalYml, 'utf8'));
-    assert.deepEqual(await fs.readFile(source), Buffer.from(originalSource, 'utf8'));
+    assert.deepEqual(await fs.readFile(source), firstSource);
+    assert.deepEqual(await fs.readFile(overlayPath), firstOverlay);
     assert.deepEqual(await fs.readFile(manifestPath(project, INSTALL_MODES.NORMAL)), firstManifest);
 
-    const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
+    const reset = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(reset.status, 0, reset.stderr + reset.stdout);
     assert.equal(await fs.readFile(build, 'utf8'), originalBuild);
     assert.equal(await fs.readFile(yml, 'utf8'), originalYml);
+    assert.equal(await fs.readFile(source, 'utf8'), originalSource);
+    assert.equal(await fs.pathExists(overlayPath), false);
     assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.NORMAL)), false);
 
-    const repeated = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
+    const repeated = spawnSync(process.execPath, [cliPath, 'reset', '--yes', '--dir', project],
+      { encoding: 'utf8', env: childEnv });
     assert.equal(repeated.status, 0, repeated.stderr);
     assert.match(repeated.stdout, /No matching Contexa ownership manifest exists/);
   } finally {
