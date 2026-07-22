@@ -9,6 +9,9 @@ const path = require('path');
 
 const root = path.join(__dirname, '..');
 const cliPath = path.join(root, 'src', 'index.js');
+const cliExecutable = process.env.CONTEXA_CLI_EXECUTABLE
+  ? path.resolve(process.env.CONTEXA_CLI_EXECUTABLE)
+  : null;
 
 function commandArgument(value) {
   return JSON.stringify(String(value));
@@ -22,7 +25,10 @@ function cleanTranscript(value) {
 }
 
 function runPseudoTerminal(args, input, rawTranscript, timeout = 20000, extraEnvironment = {}) {
-  const command = [process.execPath, cliPath, ...args].map(commandArgument).join(' ');
+  const invocation = cliExecutable
+    ? [cliExecutable, ...args]
+    : [process.execPath, cliPath, ...args];
+  const command = invocation.map(commandArgument).join(' ');
   return spawnSync('script', [
     '--quiet', '--return', '--flush', '--command', command, rawTranscript,
   ], {
