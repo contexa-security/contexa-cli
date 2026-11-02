@@ -281,7 +281,7 @@ test('starter not resolvable: rolled back, git diff is empty, no contexa/ folder
   const result = await init(project, sandbox, [], { CONTEXA_TEST_DEPENDENCY_CHECK: 'starter-missing' });
   assert.equal(result.code, 1, result.output);
   assert.match(result.stderr, /STARTER_UNAVAILABLE/);
-  assert.match(result.stderr, /ai\.ctxa:spring-boot-starter-contexa:0\.1\.0/);
+  assert.ok(result.stderr.includes(`ai.ctxa:spring-boot-starter-contexa:${releaseManifest.starter.version}`), result.stderr);
   assert.match(result.stdout, /All project changes were undone/);
   assert.equal(await fs.pathExists(path.join(project, 'contexa')), false);
   assert.deepEqual(await snapshotDirectory(project, { exclude: ['.git'] }), before);
@@ -504,7 +504,7 @@ test('the closing hint shows cd relative below the current folder, absolute else
 
 // --- Java 17 on a computer whose text encoding is not UTF-8 ------------------------------------
 
-test('bootSupport: Contexa 0.1.0 starts on Spring Boot 3.5.x only', () => {
+test('bootSupport: Contexa 0.1.x starts on Spring Boot 3.5.x only', () => {
   const { bootSupport } = require('../src/core/init-application');
   assert.deepEqual(['2.7.18', '3.3.13', '3.4.13', '3.5.0', '3.5.16', '4.0.0', null].map(bootSupport),
     ['too-old', 'too-old', 'too-old', 'supported', 'supported', 'too-new', 'unknown']);
@@ -530,7 +530,7 @@ test('doctor lists every check on an installed project (an unreachable database 
   assert.match(result.stdout, /v Project: doctor-app \(Gradle\)/);
   assert.match(result.stdout, /v Spring Boot: 3\.5\.4/);
   assert.match(result.stdout, /v Java: 17/);
-  assert.match(result.stdout, /v Contexa starter: spring-boot-starter-contexa:0\.1\.0/);
+  assert.match(result.stdout, new RegExp(`v Contexa starter: spring-boot-starter-contexa:${releaseManifest.starter.version.replace(/\./g, '\\.')}`));
   assert.match(result.stdout, /v @EnableAISecurity: present/);
   assert.match(result.stdout, /v Contexa settings: src[\\/]main[\\/]resources[\\/]config[\\/]application\.yml/);
   assert.match(result.stdout, /x Contexa database: jdbc:postgresql:\/\/127\.0\.0\.1:9\/contexa_doctor_app does not answer/);
@@ -557,7 +557,7 @@ test('doctor lists every check on an installed project (an unreachable database 
     env: cliEnv(sandbox, { PATH: pathWithoutDocker(env), CONTEXA_OLLAMA_BASE_URL: 'http://127.0.0.1:9' }),
   });
   assert.equal(missing.code, 1);
-  assert.match(missing.stdout, /v Contexa starter: spring-boot-starter-contexa:0\.1\.0/);
+  assert.match(missing.stdout, new RegExp(`v Contexa starter: spring-boot-starter-contexa:${releaseManifest.starter.version.replace(/\./g, '\\.')}`));
   assert.match(missing.stdout, /x @EnableAISecurity: not on the application class/);
   assert.match(missing.stdout, /! Contexa settings: no settings file written by contexa init/);
   assert.match(missing.stdout, /x Contexa database: contexa\.datasource\.url is not set/);

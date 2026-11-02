@@ -7,6 +7,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const releaseManifest = require('../../release-manifest.json');
 
 const isWindows = process.platform === 'win32';
 
@@ -121,7 +122,7 @@ async function checkDependencies(project, options = {}) {
   // Test hook: skip the real build tool (tests without Gradle/Maven or network).
   if (process.env.CONTEXA_TEST_DEPENDENCY_CHECK === 'pass') return { skipped: false, ok: true, problems: [], tail: '' };
   if (process.env.CONTEXA_TEST_DEPENDENCY_CHECK === 'starter-missing') {
-    return { skipped: false, ok: false, status: 0, problems: ['ai.ctxa:spring-boot-starter-contexa:0.1.0'], tail: '' };
+    return { skipped: false, ok: false, status: 0, problems: [`${releaseManifest.starter.groupId}:${releaseManifest.starter.artifactId}:${releaseManifest.starter.version}`], tail: '' };
   }
   const invocation = buildInvocation(project);
   if (!invocation) return { skipped: true, reason: 'NO_BUILD_TOOL' };

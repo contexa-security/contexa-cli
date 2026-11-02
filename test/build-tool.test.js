@@ -8,6 +8,7 @@ const path = require('node:path');
 
 const MODULE_ID = require.resolve('../src/core/build-tool');
 const buildTool = require('../src/core/build-tool');
+const releaseManifest = require('../release-manifest.json');
 
 // build-tool decides between Windows and POSIX when it is loaded; load a copy as the other
 // platform to check the commands it shows there.
@@ -290,6 +291,6 @@ test('checkDependencies: CONTEXA_TEST_DEPENDENCY_CHECK replaces the build tool i
   await withEnv({ CONTEXA_TEST_DEPENDENCY_CHECK: 'starter-missing' }, async () => {
     const result = await buildTool.checkDependencies({ buildTool: 'maven', projectDir: os.tmpdir() });
     assert.equal(result.ok, false);
-    assert.deepEqual(result.problems, ['ai.ctxa:spring-boot-starter-contexa:0.1.0']);
+    assert.deepEqual(result.problems, [`ai.ctxa:spring-boot-starter-contexa:${releaseManifest.starter.version}`]);
   });
 });

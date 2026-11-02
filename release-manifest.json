@@ -10,7 +10,7 @@
   "starter": {
     "groupId": "ai.ctxa",
     "artifactId": "spring-boot-starter-contexa",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "dependencyVersions": {
     "springAiBom": "1.1.8",

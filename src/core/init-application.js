@@ -170,7 +170,7 @@ function javaMajorVersion() {
   return major === 1 ? Number(match[2]) : major;
 }
 
-// Spring Boot versions Contexa 0.1.0 starts on: 3.5.x. On 3.4 and older its task executor bean
+// Spring Boot versions Contexa 0.1.x starts on: 3.5.x. On 3.4 and older its task executor bean
 // clashes with the one Spring Boot names taskExecutor, and the application does not start (F-52);
 // 4.x is not supported yet.
 function bootSupport(version) {

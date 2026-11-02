@@ -35,7 +35,7 @@ binaries exist for Linux x64, macOS Apple Silicon and Windows x64.
 | What | Why |
 |---|---|
 | Java 17 or newer | Spring Boot 3 and Contexa |
-| A Spring Boot **3.5.x** application | Contexa 0.1.0 does not start on 3.4 and older, and does not support Spring Boot 4 yet. `contexa init` stops before changing anything if it finds another version |
+| A Spring Boot **3.5.x** application | Contexa 0.1.x does not start on 3.4 and older, and does not support Spring Boot 4 yet. `contexa init` stops before changing anything if it finds another version |
 | Docker (Docker Desktop on Windows/macOS) | Runs the local PostgreSQL with pgvector. Not needed with `--db-url` |
 | Ollama, or an OpenAI / Anthropic API key | The AI model. Without a running Ollama, Contexa starts one in Docker |
 
