@@ -10,6 +10,8 @@ const {
   hasCoordinate,
 } = require('./build-model');
 
+const { isContexaSettings } = require('./injector/config');
+
 const CONTEXA_GROUP_ID = 'ai.ctxa';
 const CONTEXA_ARTIFACT_ID = 'spring-boot-starter-contexa';
 
@@ -19,9 +21,11 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
     isSpring: false, buildTool: null, buildFilePath: null, hasSpringBoot: false,
     hasSpringSecurityCore: false, hasContexta: false, contextaVersion: null, projectName: null,
     projectDir: rootDir, appYmlPath: null, appPropertiesPath: null,
-    applicationConfigPaths: [], mainApplicationCandidates: [], hasDocker: false,
+    applicationConfigPaths: [], configDirPaths: [], mainApplicationCandidates: [], hasDocker: false,
     gradleRootDir: null, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false,
-    ambiguousModules: [],
+    hostDefinesUsers: false, hostSecurityAlternative: null,
+    ambiguousModules: [], springBootVersion: null, springBootVersionSource: null,
+    hostOwnsDatabase: false, hostDatabaseReason: null, hostConfigKeys: new Set(),
   };
 
   const localCandidate = await readBuildCandidate(rootDir);
@@ -57,7 +61,211 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
 
   await inventoryConfiguration(result, result.projectDir);
   await inventoryApplicationSources(result, result.projectDir);
+  if (candidate) {
+    const boot = await detectSpringBootVersion(result, rootDir);
+    result.springBootVersion = boot.version;
+    result.springBootVersionSource = boot.source;
+    const hostDatabase = await detectHostDatabase(result);
+    result.hostOwnsDatabase = hostDatabase.owns;
+    result.hostDatabaseReason = hostDatabase.reason;
+    result.hostConfigKeys = await collectHostConfigKeys([...result.applicationConfigPaths, ...result.configDirPaths]);
+    result.hostSecurityAlternative = await detectHostSecurityAlternative(result);
+  }
   return finishDetection(result, rootDir, opts);
+}
+
+// --- Spring Boot version -------------------------------------------------------------------
+//
+// Read from the build files the way a developer would: the Boot plugin version (Gradle, also
+// through gradle.properties, the version catalog, buildscript classpath or settings
+// pluginManagement) or the starter parent / spring-boot-dependencies import (Maven). Unknown is
+// not an error; the dependency check after the change is the final word.
+
+const BOOT_GRADLE_PLUGIN = /id\s*\(?\s*["']org\.springframework\.boot["']\s*\)?\s*version\s*\(?\s*["']([^"']+)["']/;
+const BOOT_GRADLE_CLASSPATH = /spring-boot-gradle-plugin:([^"'\s)]+)/;
+
+async function readIfExists(file) {
+  try { return await fs.readFile(file, 'utf8'); } catch { return null; }
+}
+
+function gradleProperty(properties, name) {
+  if (!properties) return null;
+  const match = properties.match(new RegExp(`^\\s*${escapeRegex(name)}\\s*[=:]\\s*(\\S+)\\s*$`, 'm'));
+  return match ? match[1] : null;
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function resolveGradlePlaceholder(value, properties) {
+  if (!value) return null;
+  const placeholder = value.match(/^\$\{?([\w.-]+)\}?$/);
+  if (!placeholder) return value;
+  return gradleProperty(properties, placeholder[1]);
+}
+
+function catalogBootVersion(catalog) {
+  if (!catalog) return null;
+  const pluginLine = catalog.split(/\r?\n/).find(line => /id\s*=\s*["']org\.springframework\.boot["']/.test(line));
+  if (pluginLine) {
+    const literal = pluginLine.match(/version\s*=\s*["']([^"']+)["']/);
+    if (literal) return literal[1];
+    const ref = pluginLine.match(/version\.ref\s*=\s*["']([^"']+)["']/);
+    if (ref) {
+      const value = catalog.match(new RegExp(`^\\s*${escapeRegex(ref[1])}\\s*=\\s*["']([^"']+)["']`, 'm'));
+      if (value) return value[1];
+    }
+  }
+  return null;
+}
+
+function directoriesUpTo(startDir, stopDir) {
+  const dirs = [];
+  let current = path.resolve(startDir);
+  const stop = path.resolve(stopDir);
+  for (;;) {
+    dirs.push(current);
+    if (current === stop) break;
+    const parent = path.dirname(current);
+    if (parent === current || !(parent === stop || parent.startsWith(stop + path.sep))) break;
+    current = parent;
+  }
+  return dirs;
+}
+
+async function detectSpringBootVersion(result, rootDir) {
+  const dirs = directoriesUpTo(result.projectDir, result.gradleRootDir || rootDir);
+  if (result.buildTool === 'gradle') {
+    for (const dir of dirs) {
+      const properties = await readIfExists(path.join(dir, 'gradle.properties'));
+      const catalog = await readIfExists(path.join(dir, 'gradle', 'libs.versions.toml'));
+      for (const name of ['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts']) {
+        const source = await readIfExists(path.join(dir, name));
+        if (!source) continue;
+        const plugin = source.match(BOOT_GRADLE_PLUGIN);
+        if (plugin) {
+          const version = resolveGradlePlaceholder(plugin[1], properties);
+          if (version) return { version, source: path.join(dir, name) };
+        }
+        const classpath = source.match(BOOT_GRADLE_CLASSPATH);
+        if (classpath) {
+          const version = resolveGradlePlaceholder(classpath[1], properties);
+          if (version) return { version, source: path.join(dir, name) };
+        }
+        if (/alias\s*\(\s*libs\.plugins\.[\w.]*spring[\w.]*boot/i.test(source)) {
+          const version = catalogBootVersion(catalog);
+          if (version) return { version, source: path.join(dir, 'gradle', 'libs.versions.toml') };
+        }
+      }
+    }
+    return { version: null, source: null };
+  }
+  for (const dir of dirs) {
+    const pom = await readIfExists(path.join(dir, 'pom.xml'));
+    if (!pom) continue;
+    const properties = {};
+    const propertiesBlock = pom.match(/<properties>([\s\S]*?)<\/properties>/);
+    if (propertiesBlock) {
+      for (const match of propertiesBlock[1].matchAll(/<([\w.-]+)>([^<]*)<\/\1>/g)) {
+        properties[match[1]] = match[2].trim();
+      }
+    }
+    const resolve = value => {
+      const placeholder = value && value.match(/^\$\{([\w.-]+)\}$/);
+      return placeholder ? properties[placeholder[1]] || null : value;
+    };
+    const parent = pom.match(/<parent>[\s\S]*?<artifactId>\s*spring-boot-starter-parent\s*<\/artifactId>[\s\S]*?<version>\s*([^<\s]+)\s*<\/version>[\s\S]*?<\/parent>/);
+    if (parent && resolve(parent[1])) return { version: resolve(parent[1]), source: path.join(dir, 'pom.xml') };
+    const bom = pom.match(/<artifactId>\s*spring-boot-dependencies\s*<\/artifactId>\s*<version>\s*([^<\s]+)\s*<\/version>/);
+    if (bom && resolve(bom[1])) return { version: resolve(bom[1]), source: path.join(dir, 'pom.xml') };
+  }
+  return { version: null, source: null };
+}
+
+// --- Host database -------------------------------------------------------------------------
+//
+// Contexa keeps its own database. When the host application has no database of its own, the
+// Contexa DataSource has to be the application DataSource as well
+// (contexa.datasource.isolation.contexa-owned-application=true), otherwise Spring Boot's
+// DataSource auto-configuration, pulled in through the starter, fails at startup.
+
+const HOST_DATABASE_ARTIFACTS = [
+  ['org.springframework.boot', /^spring-boot-starter-(?:data-jpa|jdbc|data-jdbc|jooq)$/],
+  ['org.mybatis.spring.boot', /^mybatis-spring-boot-starter$/],
+  ['com.h2database', /^h2$/],
+  ['org.hsqldb', /^hsqldb$/],
+  ['org.apache.derby', /^derby$/],
+  ['org.flywaydb', /^flyway-core$/],
+  ['org.liquibase', /^liquibase-core$/],
+];
+
+// Spring Boot does not create its default user (the password it logs at the start) when OAuth2 or
+// SAML classes are on the classpath. An application whose build brings them had no default user
+// before Contexa either (F-50).
+const HOST_SECURITY_ALTERNATIVE_ARTIFACTS = [
+  ['org.springframework.boot', /^spring-boot-starter-oauth2-(?:client|resource-server|authorization-server)$/],
+  ['org.springframework.security', /^spring-security-(?:oauth2-[\w-]+|saml2-[\w-]+)$/],
+];
+
+async function detectHostSecurityAlternative(result) {
+  const source = await readIfExists(result.buildFilePath);
+  if (!source) return null;
+  const model = result.buildTool === 'maven' ? parseMavenModel(source) : parseGradleModel(source);
+  const coordinate = model.dependencies.find(item => HOST_SECURITY_ALTERNATIVE_ARTIFACTS.some(([group, artifact]) =>
+    item.group === group && artifact.test(item.artifact)));
+  return coordinate ? `${coordinate.group}:${coordinate.artifact}` : null;
+}
+
+async function detectHostDatabase(result) {
+  const source = await readIfExists(result.buildFilePath);
+  if (source) {
+    const model = result.buildTool === 'maven' ? parseMavenModel(source) : parseGradleModel(source);
+    const coordinate = model.dependencies.find(item => HOST_DATABASE_ARTIFACTS.some(([group, artifact]) =>
+      item.group === group && artifact.test(item.artifact)));
+    if (coordinate) return { owns: true, reason: `${coordinate.group}:${coordinate.artifact}` };
+  }
+  const keys = await collectHostConfigKeys([...result.applicationConfigPaths, ...(result.configDirPaths || [])]);
+  if (keys.has('spring.datasource.url')) return { owns: true, reason: 'spring.datasource.url' };
+  return { owns: false, reason: null };
+}
+
+// Leaf keys (relaxed: kebab-case, lower-case) set in the host's own application config files.
+async function collectHostConfigKeys(configPaths = []) {
+  const keys = new Set();
+  const yaml = require('js-yaml');
+  const normalize = key => key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  const walk = (node, prefix) => {
+    if (node && typeof node === 'object' && !Array.isArray(node)) {
+      for (const [key, value] of Object.entries(node)) walk(value, prefix ? `${prefix}.${key}` : key);
+    } else if (prefix) {
+      keys.add(normalize(prefix));
+    }
+  };
+  for (const file of configPaths) {
+    const name = path.basename(file);
+    if (!/^application\.(?:yml|yaml|properties)$/.test(name)) continue;
+    const text = await readIfExists(file);
+    if (!text || isContexaSettings(text)) continue;
+    if (name.endsWith('.properties')) {
+      for (const line of text.split(/\r?\n/)) {
+        const match = line.match(/^\s*([^#!\s][^=:\s]*)\s*[=:]/);
+        if (match) keys.add(normalize(match[1]));
+      }
+    } else {
+      try {
+        for (const document of yaml.loadAll(text)) {
+          const activation = document && document.spring && document.spring.config
+            && document.spring.config.activate;
+          if (activation) continue;
+          walk(document, '');
+        }
+      } catch {
+        // An unreadable host file is reported by doctor; detection only needs the readable keys.
+      }
+    }
+  }
+  return keys;
 }
 
 async function inheritedGradleMetadata(moduleDir) {
@@ -152,7 +360,9 @@ async function readBuildCandidate(dir) {
   if (!gradlePath) return null;
   const source = await fs.readFile(gradlePath, 'utf8');
   const model = parseGradleModel(source);
-  const hasSpringBoot = model.pluginIds.includes('org.springframework.boot')
+  // `id 'org.springframework.boot' version 'x' apply false` on a multi-module root only puts the
+  // plugin on the classpath; it does not make the root a Spring Boot application.
+  const hasSpringBoot = model.appliedPluginIds.includes('org.springframework.boot')
     || model.dependencies.some(coordinate => coordinate.group === 'org.springframework.boot'
       && /^spring-boot-starter(?:-.+)?$/.test(coordinate.artifact));
   const contextaDependency = model.dependencies.find(coordinate =>
@@ -209,6 +419,17 @@ async function inventoryConfiguration(result, projectDir) {
   result.appYmlPath = result.applicationConfigPaths.find(file => /application\.yml$/.test(file))
     || result.applicationConfigPaths.find(file => /application\.yaml$/.test(file)) || null;
   result.appPropertiesPath = result.applicationConfigPaths.find(file => /application\.properties$/.test(file)) || null;
+  // The application's own files in src/main/resources/config/ (Spring Boot reads that folder too,
+  // with precedence); the file Contexa writes there is not the application's.
+  const configDir = path.join(resourcesDir, 'config');
+  const configEntries = await fs.readdir(configDir, { withFileTypes: true }).catch(() => []);
+  result.configDirPaths = [];
+  for (const entry of configEntries) {
+    if (!entry.isFile() || !/^application\.(?:yml|yaml|properties)$/.test(entry.name)) continue;
+    const file = path.join(configDir, entry.name);
+    if (!isContexaSettings(await readIfExists(file))) result.configDirPaths.push(file);
+  }
+  result.configDirPaths.sort();
 }
 
 async function inventoryApplicationSources(result, projectDir) {
@@ -234,6 +455,11 @@ async function inventoryApplicationSources(result, projectDir) {
       const kotlinSecurityChain = /@Bean(?:\s*\([^)]*\))?[\s\S]{0,500}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*SecurityFilterChain\b/.test(code);
       if (javaSecurityChain || kotlinSecurityChain) {
         result.hasHostSecurityFilterChain = true;
+      }
+      // Users or another way to sign in of the application's own; then Spring Boot's default user
+      // plays no part (F-50).
+      if (/\b(?:UserDetailsService|UserDetailsManager|AuthenticationProvider|AuthenticationManager|AuthenticationManagerResolver|oauth2Login|oauth2ResourceServer|saml2Login|ldapAuthentication|jdbcAuthentication|inMemoryAuthentication)\b/.test(code)) {
+        result.hostDefinesUsers = true;
       }
     }
   }
@@ -301,4 +527,10 @@ async function firstExisting(paths) {
   for (const file of paths) if (await fs.pathExists(file)) return file;
   return null;
 }
-module.exports = { detectSpringProject };
+module.exports = {
+  detectSpringProject,
+  detectSpringBootVersion,
+  detectHostDatabase,
+  collectHostConfigKeys,
+  catalogBootVersion,
+};

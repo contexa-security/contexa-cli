@@ -1,78 +1,73 @@
 'use strict';
 
+// `contexa init`: add Contexa to a Spring Boot 3 application and get it running.
+//
+//   1. Find the application (or create a sample one in an empty folder).
+//   2. Check what would stop it before anything is changed: Spring Boot and Java versions,
+//      the main class, Docker or an existing PostgreSQL, Ollama or an API key.
+//   3. Ask at most one question (the AI model provider) and show the plan.
+//   4. Prepare the local services (PostgreSQL, Ollama, models). The project is untouched so far.
+//   5. Change the project in one transaction: build file, @EnableAISecurity, Contexa settings.
+//      Resolve the dependencies with the project's own build tool; on failure every change is
+//      rolled back and the reason shown.
+//   6. Offer to start the application and confirm it is up.
+//
+// Running it again is safe: what is already in place is kept, what is missing is added.
+
 const chalk = require('chalk');
 const crypto = require('crypto');
-const ora   = require('ora');
-const path  = require('path');
-const fs    = require('fs-extra');
-const {
-  dockerCompose,
-  dockerComposeDown,
-  inspectDockerLabels,
-  isDockerCliInstalled,
-  isDockerDaemonRunning,
-} = require('./docker');
+const fs = require('fs-extra');
+const inquirer = require('inquirer');
+const ora = require('ora');
+const path = require('path');
+const yaml = require('js-yaml');
+const { spawnSync } = require('child_process');
 const releaseManifest = require('../../release-manifest.json');
-const { pullOllamaModelWithProgress, waitForDockerOllama } = require('./ollama');
-const {
-  DEFAULT_OLLAMA_CHAT_MODEL,
-  DEFAULT_OLLAMA_EMBEDDING_MODEL,
-  isValidOllamaModel,
-} = require('./provider');
-const { DEFAULT_INFRASTRUCTURE_PORTS, configuredPort } = require('./infrastructure');
-const { TIMEOUTS } = require('./timeouts');
-const {
-  aiProviderSelected,
-  normalizePath,
-  printPlannedChanges,
-  trackedFileState,
-  activationResult,
-} = require('./init-plan');
-const { collectInitAnswers, selectInitLocale } = require('./init-input');
-const { printInitCompletion } = require('./init-report');
-const { runPreinstallationChecks } = require('./init-diagnostics');
+const { t } = require('./i18n');
 const { detectSpringProject } = require('./detector');
-const { ensureVerifiedArtifact } = require('./artifact');
-const { injectYml, normalOverlayPath, injectMavenDep, injectGradleDep, injectDistributedDeps,
-        injectSpringAiDeps, injectEnableAiSecurity, inspectAiDependencies, injectStandalone,
-        generateDockerCompose } = require('./injector');
-const { inspectInfra } = require('./preflight');
-const {
-  resolveProjectName,
-  containerName,
-  resolveInfraDir,
-  assertSafeInfraDir,
-} = require('./project');
-const { t, formatError } = require('./i18n');
 const {
   INSTALL_MODES,
   acquireInstallLock,
+  backupRoot,
   beginInstallTransaction,
   commitInstallTransaction,
   loadManifest,
   manifestPath,
-  prepareDockerMutation,
-  prepareExternalFileChange,
-  recordDockerMutationApplied,
-  recordExternalFileChange,
   recordChange,
   recordInstallMetadata,
   releaseInstallLock,
   rollbackInstallTransaction,
   sha256FileSync,
+  stateRoot,
 } = require('./manifest');
-const { buildDockerResourceContract, performOwnedDockerCleanup } = require('./reset-service');
 const {
-  SIMULATION_PORTS,
-  SIMULATION_PROFILE,
-  SIMULATION_PROJECT,
-  simulationConfigurationPath,
-  simulationEnvironment,
-  simulationGeoIpPath,
-  simulationOverlayPath,
-  waitForSimulationInfrastructure,
-  writeSimulationConfiguration,
-} = require('./simulation');
+  injectGradleDep,
+  injectMavenDep,
+  injectSpringAiDeps,
+  injectEnableAiSecurity,
+} = require('./injector/build');
+const {
+  planContexaConfig,
+  ADMIN_PASSWORD_PROPERTY,
+  APP_USER_PASSWORD_PROPERTY,
+  buildContexaSettings,
+  writeContexaConfig,
+  providerKey,
+} = require('./injector/config');
+const {
+  APPROXIMATE_MODEL_SIZE_GB,
+  normalizeProvider,
+  ollamaModels,
+  usesOllama,
+} = require('./provider');
+const local = require('./local-infra');
+const { pullOllamaModelWithProgress } = require('./ollama');
+const { checkDependencies, runCommandText } = require('./build-tool');
+const { hasCredential, readCredential, saveCredential, credentialsPath } = require('./credentials');
+const { sampleTarget, createSampleProject } = require('./sample-project');
+const { runApplication } = require('./app-runner');
+
+const MODE = INSTALL_MODES.NORMAL;
 
 function initError(code, key, ...args) {
   const error = new Error(`${code} ${t(key, ...args)}`);
@@ -82,853 +77,719 @@ function initError(code, key, ...args) {
   return error;
 }
 
-function normalizeInitInputError(error) {
-  const message = error && error.message ? error.message : '';
-  if (/^(?:Gradle script|Maven XML) is malformed:/.test(message)) {
-    return initError('INVALID_BUILD_FILE', 'init.error.malformedBuild', message);
+function isInteractive(opts) {
+  return !opts.yes && process.stdin.isTTY === true && process.stdout.isTTY === true;
+}
+
+function relative(baseDir, file) {
+  return path.relative(baseDir, file).split(path.sep).join('/') || '.';
+}
+
+function step(text) {
+  return ora({ text, discardStdin: false }).start();
+}
+
+// --- 1. the application ---------------------------------------------------------------------
+
+// A build file that cannot be parsed is reported as such, before anything is changed.
+async function detectProject(dir) {
+  try {
+    return await detectSpringProject(dir, { probeDocker: false });
+  } catch (error) {
+    if (/malformed|unexpected|unclosed/i.test(error.message || '')) {
+      throw initError('INVALID_BUILD_FILE', 'init.error.invalidBuildFile', error.message);
+    }
+    throw error;
   }
-  const overlayPrefix = 'Contexa overlay path is already user-owned: ';
-  if (message.startsWith(overlayPrefix)) {
-    return initError('CONTEXA_OVERLAY_USER_OWNED',
-      'init.error.overlayUserOwned', message.slice(overlayPrefix.length));
+}
+
+async function findApplication(opts, interactive) {
+  let dir = path.resolve(opts.dir || process.cwd());
+  let project = await detectProject(dir);
+
+  if (project.ambiguousModules.length > 0) {
+    if (!interactive) {
+      throw initError('MODULE_AMBIGUOUS', 'init.error.moduleAmbiguous',
+        project.ambiguousModules.map(module => relative(dir, module)).join(', '));
+    }
+    const { module } = await inquirer.prompt([{
+      type: 'rawlist',
+      name: 'module',
+      message: t('init.prompt.module'),
+      choices: project.ambiguousModules.map(module => ({ name: relative(dir, module), value: module })),
+    }]);
+    project = await detectProject(module);
   }
-  if (error && error.name === 'YAMLException') {
-    return initError('INVALID_CONTEXA_YAML', 'init.error.malformedYaml', message);
+
+  if (!project.isSpring) {
+    if (project.buildTool) {
+      throw initError('SPRING_BOOT_REQUIRED', 'init.error.notSpringBoot', relative(dir, project.buildFilePath));
+    }
+    const target = await sampleTarget(dir);
+    console.log(chalk.yellow(`  ${t('init.sample.none')}`));
+    let create = !interactive;
+    if (interactive) {
+      ({ create } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'create',
+        message: t('init.sample.confirm', target),
+        default: true,
+      }]));
+    }
+    if (!create) throw initError('CANCELLED', 'init.cancelled');
+    const sample = await createSampleProject(target);
+    console.log(chalk.green(`  v ${t('init.sample.created', sample.projectDir)}`));
+    dir = sample.projectDir;
+    project = await detectProject(dir);
+    project.createdSample = true;
   }
+  return { installRoot: dir, project };
+}
+
+// --- 2. checks before any change ------------------------------------------------------------
+
+// The Java the Gradle and Maven wrappers run on: JAVA_HOME when set, otherwise java on PATH.
+function javaExecutable() {
+  const home = process.env.JAVA_HOME;
+  if (home) {
+    const candidate = path.join(home, 'bin', process.platform === 'win32' ? 'java.exe' : 'java');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return 'java';
+}
+
+function javaMajorVersion() {
+  // Test hook: the Java version without running java.
+  if (process.env.CONTEXA_TEST_JAVA_VERSION) return Number(process.env.CONTEXA_TEST_JAVA_VERSION) || null;
+  const result = spawnSync(javaExecutable(), ['-version'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  if (result.error || result.status !== 0) return null;
+  const text = `${result.stdout || ''}\n${result.stderr || ''}`;
+  const match = text.match(/version "(\d+)(?:\.(\d+))?/);
+  if (!match) return null;
+  const major = Number(match[1]);
+  return major === 1 ? Number(match[2]) : major;
+}
+
+// Spring Boot versions Contexa 0.1.0 starts on: 3.5.x. On 3.4 and older its task executor bean
+// clashes with the one Spring Boot names taskExecutor, and the application does not start (F-52);
+// 4.x is not supported yet.
+function bootSupport(version) {
+  const match = String(version || '').match(/^(\d+)\.(\d+)/);
+  if (!match) return 'unknown';
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  if (major >= 4) return 'too-new';
+  if (major < 3 || (major === 3 && minor < 5)) return 'too-old';
+  return 'supported';
+}
+
+function checkProject(project, java = javaMajorVersion()) {
+  const warnings = [];
+  const version = project.springBootVersion;
+  if (version) {
+    const support = bootSupport(version);
+    if (support === 'too-new') throw initError('SPRING_BOOT_UNSUPPORTED', 'init.error.boot4', version);
+    if (support === 'too-old') throw initError('SPRING_BOOT_TOO_OLD', 'init.error.bootOld', version);
+  } else {
+    warnings.push(t('init.warn.bootUnknown'));
+  }
+  if (java === null) throw initError('JAVA_REQUIRED', 'init.error.javaMissing');
+  if (java < 17) warnings.push(t('init.warn.javaOld', java));
+  if (project.mainApplicationCandidates.length === 0) {
+    throw initError('MAIN_CLASS_MISSING', 'init.error.mainClassMissing');
+  }
+  return { warnings, java };
+}
+
+async function chooseMainClass(project, installRoot, interactive) {
+  const candidates = project.mainApplicationCandidates;
+  if (candidates.length === 1 || project.hasEnableAiSecurity) return candidates[0];
+  if (!interactive) {
+    throw initError('MAIN_CLASS_AMBIGUOUS', 'init.error.mainClassAmbiguous',
+      candidates.map(file => relative(installRoot, file)).join(', '));
+  }
+  const { file } = await inquirer.prompt([{
+    type: 'rawlist',
+    name: 'file',
+    message: t('init.prompt.mainClass'),
+    choices: candidates.map(candidate => ({ name: relative(installRoot, candidate), value: candidate })),
+  }]);
+  return file;
+}
+
+// --- 3. the one question --------------------------------------------------------------------
+
+async function chooseProvider(opts, previous, interactive) {
+  const fromFlag = normalizeProvider(opts.provider);
+  if (fromFlag) return fromFlag;
+  if (!interactive) return previous || 'ollama';
+  const { provider } = await inquirer.prompt([{
+    type: 'rawlist',
+    name: 'provider',
+    message: t('init.prompt.provider'),
+    default: ['ollama', 'openai', 'anthropic'].indexOf(previous || 'ollama'),
+    choices: [
+      { name: t('init.prompt.provider.ollama'), value: 'ollama' },
+      { name: t('init.prompt.provider.openai'), value: 'openai' },
+      { name: t('init.prompt.provider.anthropic'), value: 'anthropic' },
+    ],
+  }]);
+  return provider;
+}
+
+// The admin-console account when Contexa provides the sign-in of an existing application (the
+// example application has the sample accounts). Contexa creates it at the first start from
+// contexa.iam.seed.admin.password; the password is made once and kept with the API keys, outside
+// the project, so a deployment without that file never gets this account. An application that
+// configures Contexa's seed accounts itself is left to its own settings.
+async function planAdministrator(project, securityMode) {
+  if (securityMode !== 'full' || project.createdSample) return null;
+  for (const key of project.hostConfigKeys) {
+    if (key.startsWith('contexa.iam.seed.admin.') || key === 'contexa.iam.seed.accounts.enabled') return null;
+  }
+  const saved = await readCredential(ADMIN_PASSWORD_PROPERTY);
+  return { username: 'admin', password: saved || generatePassword(), saved: !!saved };
+}
+
+// An application that keeps its own sign-in and relies on Spring Boot's default user (the
+// password Spring Boot logs at the start) would lose it with Contexa: Spring Boot does not create
+// the user once the OAuth2 classes of the starter are on the classpath, and with Contexa's
+// delegating password encoder it would store a generated password that no sign-in can match
+// (F-50). So the user is kept with a password made once and kept outside the project, like the
+// admin-console password. Applications with users of their own, with OAuth2 or SAML of their own,
+// or with spring.security.user.* set are left alone.
+async function planBootDefaultUser(project, securityMode) {
+  if (securityMode !== 'sandbox' || project.hostDefinesUsers || project.hostSecurityAlternative) return null;
+  if ([...project.hostConfigKeys].some(key => key.startsWith('spring.security.user.'))) return null;
+  const saved = await readCredential(APP_USER_PASSWORD_PROPERTY);
+  const password = saved ? saved.replace(/^\{noop\}/, '') : generatePassword();
+  return { username: 'user', password, saved: !!saved };
+}
+
+// Letters and digits that cannot be mistaken for each other when typed from the screen.
+function generatePassword(length = 16) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  return Array.from({ length }, () => alphabet[crypto.randomInt(alphabet.length)]).join('');
+}
+
+// API key for OpenAI / Anthropic: set in the application, an environment variable, a key saved
+// earlier, or entered now (then kept outside the project).
+async function ensureApiKey(provider, project, interactive) {
+  const key = providerKey(provider);
+  if (!key) return { source: null };
+  if (project.hostConfigKeys.has(key.property)) return { source: 'application' };
+  if (process.env[key.env]) return { source: 'environment', env: key.env };
+  if (await hasCredential(key.property)) return { source: 'saved' };
+  if (!interactive) throw initError('API_KEY_REQUIRED', 'init.error.apiKeyMissing', key.env);
+  const { value } = await inquirer.prompt([{
+    type: 'password',
+    name: 'value',
+    mask: '*',
+    message: t('init.prompt.apiKey', provider === 'openai' ? 'OpenAI' : 'Anthropic'),
+    validate: input => (String(input).trim().length >= 10 ? true : t('init.prompt.apiKey.invalid')),
+  }]);
+  return { source: 'entered', property: key.property, value: String(value).trim() };
+}
+
+// --- local services -------------------------------------------------------------------------
+
+function localProblemError(problem) {
+  const error = initError(problem.code, `init.problem.${problem.code}`, ...(problem.args || []));
+  error.hintKey = `init.problem.${problem.code}.hint`;
   return error;
 }
 
-async function recoverInterruptedDockerMutation(dockerMutation) {
-  if (!dockerMutation || dockerMutation.action === 'REUSE') {
-    return { removed: [], restored: [], preserved: [], conflict: [], failed: [] };
+async function resolveLocalServices(opts, provider, interactive, securityMode) {
+  for (;;) {
+    const external = opts.dbUrl ? {
+      url: opts.dbUrl,
+      username: opts.dbUsername || 'contexa',
+      password: null,
+    } : null;
+    const plan = await local.planLocalServices({
+      needOllama: usesOllama(provider),
+      needPostgres: !external,
+      wantMail: securityMode === 'full',
+    });
+    if (plan.problems.length === 0) return { plan, external };
+    const problem = plan.problems[0];
+    if (!interactive) throw localProblemError(problem);
+    const choices = [];
+    if (problem.code === 'DOCKER_STOPPED') {
+      choices.push({ name: t('init.problem.retryDocker'), value: 'retry' });
+    }
+    if (problem.code === 'OLLAMA_MISSING') {
+      choices.push({ name: t('init.problem.retryOllama'), value: 'retry' });
+      if (provider === 'ollama') choices.push({ name: t('init.problem.useOpenAi'), value: 'openai' });
+    }
+    if (['DOCKER_MISSING', 'DOCKER_STOPPED', 'DOCKER_COMPOSE_MISSING'].includes(problem.code) && !external) {
+      choices.push({ name: t('init.problem.ownPostgres'), value: 'own-db' });
+    }
+    choices.push({ name: t('init.problem.cancel'), value: 'cancel' });
+    console.log(chalk.yellow(`\n  ! ${t(`init.problem.${problem.code}`, ...(problem.args || []))}`));
+    console.log(chalk.gray(`    ${t(`init.problem.${problem.code}.hint`)}`));
+    const { action } = await inquirer.prompt([{
+      type: 'rawlist', name: 'action', message: t('init.problem.question'), choices,
+    }]);
+    if (action === 'cancel') throw initError('CANCELLED', 'init.cancelled');
+    if (action === 'openai') return { switchProvider: 'openai' };
+    if (action === 'own-db') {
+      const answers = await inquirer.prompt([
+        {
+          type: 'input', name: 'url', message: t('init.prompt.dbUrl'),
+          validate: input => (/^jdbc:postgresql:\/\/.+/.test(String(input).trim()) ? true : t('init.prompt.dbUrl.invalid')),
+        },
+        { type: 'input', name: 'username', message: t('init.prompt.dbUsername'), default: 'contexa' },
+      ]);
+      opts.dbUrl = answers.url.trim();
+      opts.dbUsername = answers.username.trim();
+    }
   }
-  const installationId = dockerMutation.contract.installationId;
-  const env = dockerMutation.contract.mode === INSTALL_MODES.SIMULATION
-    ? simulationEnvironment(process.env, installationId)
-    : { ...process.env, CONTEXA_PROJECT: dockerMutation.projectName };
-  return performOwnedDockerCleanup({
-    contract: dockerMutation.contract,
-    mode: dockerMutation.contract.mode,
-    installationId,
-    projectName: dockerMutation.projectName,
-    infraDir: dockerMutation.infraDir,
-    composeChecksum: dockerMutation.composeChecksum,
-    env,
-  }, {
-    isCliInstalled: isDockerCliInstalled,
-    isDaemonRunning: isDockerDaemonRunning,
-    inspectLabels: inspectDockerLabels,
-    composeDown: (projectName, infraDir, composeEnv) => dockerComposeDown(
-      projectName,
-      infraDir,
-      composeEnv,
-      { removeVolumes: dockerMutation.removeVolumes }
-    ),
-  });
 }
 
-async function refreshExistingInstallationMetadata(projectDir, project) {
-  if (project.contextaVersion !== releaseManifest.starter.version) return false;
-  if (!await fs.pathExists(manifestPath(projectDir, INSTALL_MODES.NORMAL))) return false;
-
-  let lock = null;
+async function prepareLocalServices(plan, project, installRoot, provider, models) {
+  const starting = (plan.postgres && plan.postgres.action !== 'reuse')
+    || (plan.ollama && plan.ollama.mode === 'docker' && plan.ollama.action !== 'reuse');
+  const spinner = step(starting ? t('init.step.startingServices') : t('init.step.checkingServices'));
+  let endpoints;
   try {
-    lock = await acquireInstallLock(projectDir, INSTALL_MODES.NORMAL);
-    const current = await loadManifest(projectDir, INSTALL_MODES.NORMAL);
-    if (current.metadata.cliVersion === releaseManifest.cliVersion
-        && current.metadata.starterVersion === releaseManifest.starter.version) {
-      return false;
+    endpoints = await local.startLocalServices(plan);
+    spinner.succeed(starting ? t('init.step.servicesStarted') : t('init.step.servicesReady'));
+  } catch (error) {
+    spinner.fail(t('init.step.servicesFailed'));
+    throw error;
+  }
+  let database = null;
+  if (plan.postgres) {
+    const dbSpinner = step(t('init.step.database'));
+    try {
+      database = await local.ensureProjectDatabase(installRoot, project.projectName);
+      dbSpinner.succeed(t(database.created ? 'init.step.databaseCreated' : 'init.step.databaseReady', database.database));
+    } catch (error) {
+      dbSpinner.fail(t('init.step.databaseFailed'));
+      throw error;
     }
-    await recordInstallMetadata(projectDir, {}, INSTALL_MODES.NORMAL);
-    return true;
+  }
+  if (endpoints.ollamaBaseUrl) {
+    const wanted = provider === 'ollama' ? [models.chat, models.embedding] : [models.embedding];
+    const missing = await local.missingModels(endpoints.ollamaBaseUrl, wanted);
+    const port = Number(new URL(endpoints.ollamaBaseUrl).port || 11434);
+    for (const model of missing) {
+      const label = t('init.step.model', model);
+      const modelSpinner = step(label);
+      try {
+        await pullOllamaModelWithProgress(port, model, modelSpinner, label, { timeoutMs: 60 * 60 * 1000 });
+        modelSpinner.succeed(t('init.step.modelReady', model));
+      } catch (error) {
+        modelSpinner.fail(t('init.step.modelFailed', model));
+        throw initError('MODEL_DOWNLOAD_FAILED', 'init.error.modelDownload', model, error.message);
+      }
+    }
+  }
+  return { endpoints, database };
+}
+
+// --- plan ------------------------------------------------------------------------------------
+
+function printPlan(context) {
+  const { project, installRoot, mainClass, securityMode, configPlan, provider, services, external, models, apiKey } = context;
+  const out = line => console.log(chalk.gray(`    - ${line}`));
+  console.log(chalk.cyan(`\n  ${t('init.plan.title')}`));
+  console.log(chalk.white(`  ${t('init.plan.project')}`));
+  out(t('init.plan.build', relative(installRoot, project.buildFilePath)));
+  if (!project.hasEnableAiSecurity) {
+    out(t(securityMode === 'full' ? 'init.plan.annotationFull' : 'init.plan.annotationSandbox',
+      relative(installRoot, mainClass)));
+  }
+  const configKey = editedSinceLastInit(context.existing, installRoot, configPlan.filePath) ? 'init.plan.configKept'
+    : fs.existsSync(configPlan.filePath) ? 'init.plan.configUpdate' : 'init.plan.config';
+  out(t(configKey, relative(installRoot, configPlan.filePath)));
+  if (configPlan.importTarget) out(t('init.plan.import', relative(installRoot, configPlan.importTarget)));
+  else out(t('init.plan.hostConfigKept'));
+  console.log(chalk.white(`  ${t('init.plan.computer')}`));
+  if (external) {
+    out(t('init.plan.externalDb', external.url));
+  } else if (services.postgres) {
+    out(t(services.postgres.action === 'create' ? 'init.plan.postgresCreate'
+      : services.postgres.action === 'start' ? 'init.plan.postgresStart' : 'init.plan.postgresReuse',
+    services.postgres.port));
+    out(t('init.plan.database'));
+  }
+  if (services.ollama) {
+    out(t(services.ollama.mode === 'native' ? 'init.plan.ollamaNative'
+      : services.ollama.action === 'create' ? 'init.plan.ollamaCreate'
+        : services.ollama.action === 'start' ? 'init.plan.ollamaStart' : 'init.plan.ollamaReuse',
+    services.ollama.baseUrl));
+    const wanted = provider === 'ollama' ? [models.chat, models.embedding] : [models.embedding];
+    const toDownload = Array.isArray(context.missingModels) ? context.missingModels : wanted;
+    if (toDownload.length === 0) {
+      out(t('init.plan.modelsPresent', wanted.join(', ')));
+    } else {
+      const size = toDownload.reduce((sum, model) => sum + (APPROXIMATE_MODEL_SIZE_GB[model] || 0), 0);
+      out(t('init.plan.models', toDownload.join(', '), size ? `~${size.toFixed(1)} GB` : '?'));
+    }
+  }
+  if (services.mail) {
+    out(t(services.mail.action === 'create' ? 'init.plan.mailCreate' : 'init.plan.mailReuse',
+      `http://127.0.0.1:${services.mail.uiPort}`));
+  }
+  if (context.administrator) {
+    out(t(context.administrator.saved ? 'init.plan.adminReuse' : 'init.plan.adminCreate', credentialsPath()));
+  }
+  if (context.bootDefaultUser) out(t('init.plan.bootUser', credentialsPath()));
+  if (apiKey && apiKey.source === 'entered') out(t('init.plan.apiKeySaved', credentialsPath()));
+  if (apiKey && apiKey.source === 'environment') out(t('init.plan.apiKeyEnv', apiKey.env));
+  console.log(chalk.gray(`  ${t('init.plan.undo')}`));
+}
+
+// --- 5. project changes ---------------------------------------------------------------------
+
+function aiProviderArtifacts(provider) {
+  return provider === 'anthropic' ? ['anthropic', 'ollama'] : [provider];
+}
+
+async function applyProjectChanges(context) {
+  const { installRoot, project, mainClass, securityMode, configPlan, settings, provider } = context;
+  const plannedFiles = [
+    { filePath: project.buildFilePath, kind: 'build-file' },
+    { filePath: configPlan.filePath, kind: 'contexa-config' },
+  ];
+  if (!project.hasEnableAiSecurity) plannedFiles.push({ filePath: mainClass, kind: 'application-source' });
+  if (configPlan.importTarget) plannedFiles.push({ filePath: configPlan.importTarget, kind: 'config-import' });
+
+  const transactionId = await beginInstallTransaction(installRoot, {
+    projectName: project.projectName,
+    integrationMode: 'merge',
+    infra: 'skip',
+    aiSecurityRequested: true,
+  }, MODE, plannedFiles);
+  try {
+    const options = { mode: MODE, targetModule: relative(installRoot, project.projectDir) };
+    const spinner = step(t('init.step.build'));
+    const starterAdded = project.buildTool === 'maven'
+      ? await injectMavenDep(project.buildFilePath, options)
+      : await injectGradleDep(project.buildFilePath, options);
+    const aiAdded = await injectSpringAiDeps(project.buildFilePath, aiProviderArtifacts(provider), options);
+    if (starterAdded || aiAdded) {
+      await recordChange(installRoot, project.buildFilePath, { kind: 'build-file', reason: 'Contexa dependencies' }, MODE);
+    }
+    spinner.succeed(t(starterAdded || aiAdded ? 'init.step.buildDone' : 'init.step.buildPresent',
+      relative(installRoot, project.buildFilePath)));
+
+    if (!project.hasEnableAiSecurity) {
+      const annotation = step(t('init.step.annotation'));
+      const result = await injectEnableAiSecurity(installRoot, {
+        mode: MODE,
+        securityMode,
+        mainApplicationCandidates: [mainClass],
+      });
+      if (result.changed) {
+        await recordChange(installRoot, result.filePath, { kind: 'application-source', reason: '@EnableAISecurity' }, MODE);
+      }
+      annotation.succeed(t('init.step.annotationDone', relative(installRoot, result.filePath)));
+    }
+
+    const config = step(t('init.step.config'));
+    if (editedSinceLastInit(context.existing, installRoot, configPlan.filePath)) {
+      // The user changed the settings file after the last init; their version stays. What this
+      // run would set differently (another model provider, a new database) is listed, so it can
+      // be changed by hand instead of being lost silently.
+      const differences = settingsDifferences(context.existing, installRoot, configPlan.filePath, settings);
+      if (differences.length === 0) {
+        config.info(t('init.step.configKept', relative(installRoot, configPlan.filePath)));
+      } else {
+        config.warn(t('init.step.configKeptDiffers', relative(installRoot, configPlan.filePath)));
+        for (const line of differences) console.log(chalk.yellow(`      ${line}`));
+      }
+    } else {
+      await writeContexaConfig(configPlan, settings);
+      await recordChange(installRoot, configPlan.filePath, { kind: 'contexa-config', generated: true, reason: 'Contexa settings' }, MODE);
+      if (configPlan.importTarget) {
+        await recordChange(installRoot, configPlan.importTarget, { kind: 'config-import', reason: 'spring.config.import' }, MODE);
+      }
+      config.succeed(t('init.step.configDone', relative(installRoot, configPlan.filePath)));
+    }
+
+    // The dependencies have to resolve with the project's own repositories; otherwise the first
+    // build would fail, so nothing is kept.
+    const check = step(t('init.step.dependencies'));
+    const result = await checkDependencies(project);
+    if (result.skipped) {
+      check.warn(t('init.step.dependenciesSkipped'));
+    } else if (!result.ok) {
+      check.fail(t('init.step.dependenciesFailed'));
+      const starterMissing = result.problems.some(problem => problem.startsWith(`${releaseManifest.starter.groupId}:`));
+      const error = initError(starterMissing ? 'STARTER_UNAVAILABLE' : 'DEPENDENCY_RESOLUTION_FAILED',
+        starterMissing ? 'init.error.starterUnavailable' : 'init.error.dependencies',
+        result.problems.join(', ') || '-');
+      if (result.problems.length === 0) error.detail = result.tail;
+      throw error;
+    } else {
+      check.succeed(t('init.step.dependenciesDone'));
+    }
+    await commitInstallTransaction(installRoot, transactionId, MODE);
+  } catch (caught) {
+    const error = friendlyFileError(caught);
+    const rollback = await rollbackInstallTransaction(installRoot, transactionId, MODE, { failures: [] });
+    if (rollback.rolledBack) {
+      console.log(chalk.yellow(`  ! ${t('init.rolledBack')}`));
+    } else {
+      error.message = `${error.message}; ${t('init.rollbackFailed', rollback.failures.join('; '))}`;
+    }
+    throw error;
+  }
+}
+
+// Settings this run changes compared with what the last init wrote (another model provider, a
+// new database) and that the kept file does not have yet. Values the last init wrote too are the
+// user's business: what they changed there by hand is never listed.
+function settingsDifferences(manifest, installRoot, filePath, settings) {
+  const flatten = (node, prefix, out) => {
+    if (node && typeof node === 'object' && !Array.isArray(node)) {
+      for (const [key, value] of Object.entries(node)) flatten(value, prefix ? `${prefix}.${key}` : key, out);
+    } else if (prefix) {
+      out[prefix] = node;
+    }
+    return out;
+  };
+  const read = file => {
+    try {
+      return flatten(yaml.load(fs.readFileSync(file, 'utf8')) || {}, '', {});
+    } catch {
+      return null;
+    }
+  };
+  const entry = manifest && Array.isArray(manifest.files)
+    ? manifest.files.find(file => file.relativePath === relative(installRoot, filePath)) : null;
+  const last = entry && entry.appliedRelativePath
+    ? read(path.join(backupRoot(installRoot, MODE), entry.appliedRelativePath)) : null;
+  const current = read(filePath) || {};
+  const same = (left, right) => String(left) === String(right);
+  return Object.entries(flatten(settings, '', {}))
+    .filter(([key, value]) => !(last && key in last && same(last[key], value)))
+    .filter(([key, value]) => !(key in current && same(current[key], value)))
+    .map(([key, value]) => `${key}: ${value}`);
+}
+
+// True when a file the last init wrote has been changed by hand since.
+function editedSinceLastInit(manifest, installRoot, filePath) {
+  if (!manifest || !Array.isArray(manifest.files) || !fs.existsSync(filePath)) return false;
+  const entry = manifest.files.find(file => file.relativePath === relative(installRoot, filePath));
+  if (!entry || !entry.cliApplied || !entry.lastCliChecksum) return false;
+  return sha256FileSync(filePath) !== entry.lastCliChecksum;
+}
+
+// File system errors in plain words: which file, and that nothing was kept.
+function friendlyFileError(error) {
+  if (!error || error.messageKey || !['EPERM', 'EACCES', 'EBUSY', 'EROFS'].includes(error.code)) return error;
+  return initError('FILE_NOT_WRITABLE', 'init.error.fileNotWritable', error.path || '-');
+}
+
+// A failed first init leaves no Contexa state folder behind. This runs while the lock is held and
+// keeps the lock file; the folder itself goes after the lock is released, and only if it is empty,
+// so a contexa command that took the lock in between keeps its state.
+async function clearFailedFirstInit(installRoot, lock) {
+  if (await fs.pathExists(manifestPath(installRoot, MODE))) {
+    const manifest = await loadManifest(installRoot, MODE).catch(() => null);
+    if (!manifest || (Array.isArray(manifest.files) && manifest.files.some(file => file.cliApplied))) return false;
+  }
+  const root = stateRoot(installRoot, MODE);
+  if (!await fs.pathExists(root)) return false;
+  for (const entry of await fs.readdir(root)) {
+    const entryPath = path.join(root, entry);
+    if (path.resolve(entryPath) !== path.resolve(lock.filePath)) await fs.remove(entryPath);
+  }
+  return true;
+}
+
+async function removeFolderIfEmpty(dir) {
+  try {
+    await fs.rmdir(dir);
+  } catch (error) {
+    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST', 'EPERM', 'EBUSY'].includes(error.code)) throw error;
+  }
+}
+
+// The state folder ignores itself, so backups never end up in source control.
+async function ensureStateIgnored(installRoot) {
+  const root = stateRoot(installRoot, MODE);
+  if (await fs.pathExists(root)) {
+    const ignore = path.join(root, '.gitignore');
+    if (!await fs.pathExists(ignore)) await fs.writeFile(ignore, '# Contexa installation record and backups\n*\n');
+  }
+}
+
+// --- 6. done ---------------------------------------------------------------------------------
+
+function printDone(context) {
+  const { project, installRoot, apiKey, securityMode } = context;
+  console.log(chalk.green(`\n  ${t('init.done.title')}`));
+  console.log(chalk.gray(`    - ${t('init.done.mode')}`));
+  console.log(chalk.gray(`    - ${t(securityMode === 'full' ? 'init.done.signInContexa' : 'init.done.signInApp')}`));
+  if (context.bootDefaultUser) {
+    const { username, password } = context.bootDefaultUser;
+    console.log(chalk.white(`    - ${t('init.done.bootUser', username, password, credentialsPath())}`));
+  }
+  if (securityMode === 'full') {
+    console.log(chalk.gray(`    - ${context.mailUi ? t('init.done.mailbox', context.mailUi) : t('init.done.mailMissing')}`));
+    if (project.createdSample) {
+      console.log(chalk.gray(`    - ${t('init.done.sampleAccounts', 'http://localhost:8080/contexa/admin')}`));
+    } else if (context.administrator) {
+      const { username, password } = context.administrator;
+      console.log(chalk.white(`    - ${t('init.done.adminAccount', '/contexa/admin', username, password, credentialsPath())}`));
+    }
+  }
+  if (apiKey && apiKey.source === 'entered') console.log(chalk.gray(`    - ${t('init.done.apiKey', credentialsPath())}`));
+  if (context.external) console.log(chalk.yellow(`    - ${t('init.done.dbPassword', context.external.url)}`));
+  console.log(chalk.white(`\n  ${t('init.done.run')}`));
+  // A folder below the current one reads best as a relative path, anything else as absolute.
+  const below = relative(process.cwd(), installRoot);
+  const runDir = below.startsWith('..') ? installRoot : below;
+  if (runDir !== '.') console.log(chalk.cyan(`    cd ${runDir}`));
+  for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`    ${line}`));
+  console.log(chalk.gray(`\n  ${t('init.done.doctor')}`));
+  console.log(chalk.gray(`  ${t('init.done.reset')}`));
+}
+
+async function offerRun(context) {
+  const { project } = context;
+  const { run } = await inquirer.prompt([{
+    type: 'confirm', name: 'run', message: t('init.run.confirm'), default: true,
+  }]);
+  if (!run) return;
+  console.log(chalk.gray(`\n  ${t('init.run.starting', runCommandText(project).split('\n').join(' ; '))}\n`));
+  const result = await runApplication(project, {
+    onStarted: ({ port }) => {
+      console.log(chalk.green(`\n  v ${t('init.run.started', `http://localhost:${port}`)}`));
+      if (context.securityMode === 'full') {
+        console.log(chalk.gray(`    ${t('init.run.console', `http://localhost:${port}/contexa/admin`)}`));
+      }
+      console.log(chalk.gray(`    ${t('init.run.stop')}\n`));
+    },
+  });
+  if (result.outcome === 'failed') {
+    console.log(chalk.red(`\n  x ${t('init.run.failed')}`));
+    if (result.summary) console.log(chalk.gray(result.summary.split('\n').map(line => `    ${line}`).join('\n')));
+    console.log(chalk.yellow(`  -> ${t(result.hint)}`));
+    process.exitCode = 1;
+  }
+}
+
+// --- main ------------------------------------------------------------------------------------
+
+async function executeInit(opts) {
+  const interactive = isInteractive(opts);
+  console.log(chalk.cyan(`\n  Contexa ${releaseManifest.cliVersion} - ${t('init.title')}\n`));
+
+  const { installRoot, project } = await findApplication(opts, interactive);
+  const { warnings } = checkProject(project);
+  console.log(chalk.green(`  v ${t('init.found', project.projectName || path.basename(project.projectDir),
+    project.buildTool === 'maven' ? 'Maven' : 'Gradle', project.springBootVersion || '?')}`));
+  for (const warning of warnings) console.log(chalk.yellow(`  ! ${warning}`));
+
+  const existing = await fs.pathExists(manifestPath(installRoot, MODE))
+    ? await loadManifest(installRoot, MODE).catch(() => null) : null;
+  if (existing && project.hasContexta) console.log(chalk.gray(`  ${t('init.again')}`));
+
+  const mainClass = await chooseMainClass(project, installRoot, interactive);
+  // The application keeps sign-in when it declares its own SecurityFilterChain (Contexa's
+  // SANDBOX default); otherwise Contexa provides sign-in (FULL).
+  const securityMode = project.hasHostSecurityFilterChain ? 'sandbox' : 'full';
+
+  let provider = await chooseProvider(opts, existing && existing.metadata && existing.metadata.provider, interactive);
+  let resolved = await resolveLocalServices(opts, provider, interactive, securityMode);
+  if (resolved.switchProvider) {
+    provider = resolved.switchProvider;
+    resolved = await resolveLocalServices(opts, provider, interactive, securityMode);
+  }
+  const { plan, external } = resolved;
+  const apiKey = await ensureApiKey(provider, project, interactive);
+  const administrator = await planAdministrator(project, securityMode);
+  const bootDefaultUser = await planBootDefaultUser(project, securityMode);
+  const models = ollamaModels();
+
+  // Only the settings file Contexa wrote is its own: the application's file that got the import
+  // line is recorded as changed too, but it stays the application's (F-51).
+  const ownedPaths = new Set(((existing && existing.files) || [])
+    .filter(file => file.cliApplied && file.kind === 'contexa-config')
+    .map(file => relative(project.projectDir, path.join(installRoot, file.relativePath))));
+  const configPlan = await planContexaConfig(project.projectDir, ownedPaths);
+
+  // Which models still have to be downloaded, when Ollama can already be asked.
+  let missingModels = null;
+  if (plan.ollama) {
+    const wanted = provider === 'ollama' ? [models.chat, models.embedding] : [models.embedding];
+    if (plan.ollama.action === 'create') missingModels = wanted;
+    else if (plan.ollama.action === 'reuse') missingModels = await local.missingModels(plan.ollama.baseUrl, wanted);
+  }
+
+  const context = {
+    installRoot, project, mainClass, securityMode, configPlan, provider,
+    services: plan, external, models, apiKey, missingModels, existing, administrator, bootDefaultUser,
+  };
+  printPlan(context);
+  if (interactive) {
+    const { proceed } = await inquirer.prompt([{
+      type: 'confirm', name: 'proceed', message: t('init.plan.confirm'), default: true,
+    }]);
+    if (!proceed) {
+      console.log(chalk.yellow(`\n  ${t('init.cancelled')}\n`));
+      return;
+    }
+  }
+  console.log('');
+
+  // Local services first: if they cannot be prepared, the project stays as it was.
+  const prepared = await prepareLocalServices(plan, project, installRoot, provider, models);
+  const database = external || prepared.database;
+  context.mailUi = prepared.endpoints.mail ? prepared.endpoints.mail.uiUrl : null;
+  if (apiKey.source === 'entered') await saveCredential(apiKey.property, apiKey.value);
+  if (administrator && !administrator.saved) await saveCredential(ADMIN_PASSWORD_PROPERTY, administrator.password);
+  if (bootDefaultUser && !bootDefaultUser.saved) {
+    await saveCredential(APP_USER_PASSWORD_PROPERTY, `{noop}${bootDefaultUser.password}`);
+  }
+
+  context.settings = buildContexaSettings({
+    database,
+    provider,
+    ollamaBaseUrl: prepared.endpoints.ollamaBaseUrl,
+    mail: prepared.endpoints.mail,
+    chatModel: models.chat,
+    embeddingModel: models.embedding,
+    hostOwnsDatabase: project.hostOwnsDatabase,
+    hostConfigKeys: project.hostConfigKeys,
+    credentialsImport: !!administrator || !!bootDefaultUser,
+    bootDefaultUser: !!bootDefaultUser,
+  });
+
+  // Taken outside the try: when another contexa command holds the project, its state is not
+  // touched at all.
+  let lock = await acquireInstallLock(installRoot, MODE, 'init');
+  try {
+    await applyProjectChanges(context);
+    await recordInstallMetadata(installRoot, {
+      provider,
+      securityMode,
+      configFile: relative(installRoot, configPlan.filePath),
+      database: database ? { name: database.database || null, url: database.url, external: !!external } : null,
+      localServices: { postgres: !!plan.postgres, ollama: plan.ollama ? plan.ollama.mode : null },
+    }, MODE);
+    await ensureStateIgnored(installRoot);
+  } catch (error) {
+    const cleared = await clearFailedFirstInit(installRoot, lock).catch(() => false);
+    await releaseInstallLock(lock);
+    lock = null;
+    if (cleared) await removeFolderIfEmpty(stateRoot(installRoot, MODE));
+    throw error;
   } finally {
     await releaseInstallLock(lock);
   }
+  if (!external) {
+    await local.registerProject(installRoot, { database: database && database.database, provider });
+  }
+
+  printDone(context);
+  if (interactive) await offerRun(context);
+  console.log('');
 }
 
-async function executeInit(opts) {
-      const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
-      let installLock = null;
-      let installTransactionId = null;
-      let transactionManifestExisted = false;
-      try {
-      await selectInitLocale(opts);
-      // --simulate isolates this run from any other contexa stack on the same
-      // host: separate compose project name, separate container names, and
-      // separate ports. Implemented as preset env vars consumed by both the
-      // generated docker-compose.yml and the runtime contexa.* / spring.*
-      // env-fallback placeholders the CLI writes into application.yml.
-      if (opts.simulate) {
-        opts.distributed = true;
-        // --simulate stack is fully isolated and meant for hands-on practice
-        // without external API keys; Ollama is auto-included here so the demo
-        // works end-to-end with no cloud credentials.
-        opts.includeOllama = true;
-        Object.assign(process.env, simulationEnvironment(process.env, 'preflight'));
-        console.log(chalk.cyan(`\n  ${t('init.simulation.title')}`));
-        console.log(chalk.gray(`    ${t('init.simulation.postgres', SIMULATION_PORTS.postgres, DEFAULT_INFRASTRUCTURE_PORTS.postgres)}`));
-        console.log(chalk.gray(`    ${t('init.simulation.ollama', SIMULATION_PORTS.ollama, DEFAULT_INFRASTRUCTURE_PORTS.ollama)}`));
-        console.log(chalk.gray(`    ${t('init.simulation.redis', SIMULATION_PORTS.redis)}`));
-        console.log(chalk.gray(`    ${t('init.simulation.kafka', SIMULATION_PORTS.kafka)}`));
-        console.log(chalk.gray(`    ${t('init.simulation.hostPreserved')}`));
-        console.log(chalk.gray(`    ${t('init.simulation.reset')}`));
-        console.log(chalk.gray(`    ${t('init.simulation.manage')}`));
-      }
-      if (opts.distributed) {
-        console.log(chalk.yellow('\n  ! ' + t('init.distributed.warning')));
-        console.log(chalk.gray('    ' + t('init.distributed.note') + '\n'));
-      }
-      console.log('');
-
-      if (runPreinstallationChecks(opts)) return;
-
-      // 1. Detect project
-      const spinner = ora(t('init.detecting')).start();
-      let project;
-      try {
-        project = await detectSpringProject(opts.dir, {
-          // Quick and Custom can both provision infrastructure. Detect Docker
-          // before prompting so the selected startDocker contract is honoured.
-          probeDocker: true,
-        });
-      } catch (error) {
-        spinner.stop();
-        throw normalizeInitInputError(error);
-      }
-      spinner.stop();
-
-      if (!project.isSpring) {
-        console.log(chalk.red('  x ' + t('init.notSpring')));
-        console.log(chalk.gray('    ' + t('init.notSpring.hint') + '\n'));
-        throw initError('SPRING_PROJECT_REQUIRED', 'init.notSpring');
-      }
-      if (opts.simulate && !project.hasContexta) {
-        throw initError('SIMULATION_STARTER_REQUIRED', 'init.error.simulationStarterRequired');
-      }
-
-      console.log(chalk.green('  v ' + t('init.detected')));
-      console.log(chalk.gray(`    ${t('init.detected.project')} : ${project.projectName || t('common.unknown')}`));
-      console.log(chalk.gray(`    ${t('init.detected.build')}   : ${project.buildTool}`));
-      console.log(chalk.gray(`    ${t('init.detected.security')}: ${project.hasSpringSecurityCore ? t('init.security.springSecurity') : chalk.yellow(t('init.security.legacy'))}`));
-      console.log(chalk.gray(`    ${t('init.detected.docker')}  : ${project.hasDocker
-        ? chalk.green(t('init.docker.installed'))
-        : chalk.yellow(t('init.docker.missing'))}`));
-
-      const cliProjectName = opts.simulate
-        ? SIMULATION_PROJECT
-        : resolveProjectName(project.projectName || path.basename(path.resolve(opts.dir)));
-      if (!process.env.CONTEXA_PROJECT) {
-        process.env.CONTEXA_PROJECT = cliProjectName;
-      }
-
-      // Warn when both application.properties and application.yml exist - one shadows the other.
-      if (project.appPropertiesPath && project.appYmlPath) {
-        console.log(chalk.yellow('  ! ' + t('scan.propertiesAndYml')));
-      }
-
-      // Simulation has its own ownership state. An existing starter is its
-      // prerequisite, not a reason to return from this command.
-      const normalOwnershipManifestExists = !opts.simulate
-        && await fs.pathExists(manifestPath(opts.dir, INSTALL_MODES.NORMAL));
-      if (project.hasContexta && !opts.simulate
-          && (project.hasEnableAiSecurity || normalOwnershipManifestExists)) {
-        if (!opts.force && !opts.yes) {
-          await refreshExistingInstallationMetadata(opts.dir, project);
-          console.log(chalk.yellow('  ' + t('init.alreadyDetected')));
-          console.log(chalk.gray('    ' + t('init.alreadyDetected.hint') + '\n'));
-          return;
-        }
-        console.log(chalk.yellow('  ' + t('init.alreadyDetected.update') + '\n'));
-      }
-
-      // 2. Prompts
-      //
-      // Decision policy: the user is NOT expected to know any flag names. Every
-      // non-trivial decision is asked by inquirer when running `contexa init`
-      // without flags. Flags only exist as prompt-bypass for advanced users /
-      // CI automation:
-      //   --lang ko|en                  bypass the language prompt
-      //   --merge / --standalone        bypass the integration-mode prompt
-      //   --standalone-dir <path>       bypass the standalone-folder prompt
-      //   --infra-dir <path>            bypass the infra-folder prompt
-      //   --distributed                 explicit "install distributed infra" intent
-      //   --simulate                    explicit "isolated simulation" intent
-      //   --no-docker                   explicit "do not start containers" intent
-      //   --yes                         CI automation: skip every prompt
-      //
-      // The language is selected before project detection. --lang, CONTEXA_LANG,
-      // --yes and --check are the explicit non-interactive paths.
-
-      const answers = await collectInitAnswers(opts, project, cliProjectName);
-
-      if (!project.hasDocker && answers.infra !== 'skip' && answers.startDocker) {
-        console.log('');
-        console.log(chalk.yellow(`  ! ${t('init.docker.required')}`));
-        console.log(chalk.gray(`    ${t('init.docker.composeOnly')}`));
-        console.log(chalk.gray(`    ${t('init.docker.install')}`));
-        console.log(chalk.gray('      Windows / macOS : https://www.docker.com/products/docker-desktop'));
-        console.log(chalk.gray('      Linux           : https://docs.docker.com/engine/install/'));
-        console.log(chalk.gray(`    ${t('init.docker.skipHint')}`));
-        console.log('');
-        // Preserve the selected infrastructure files, but do not claim that
-        // containers were started when Docker is unavailable.
-        answers.startDocker = false;
-      }
-
-
-
-      // Resolve standalone dir
-      const standaloneDir = answers.integrationMode === 'standalone'
-        ? (normalizePath(opts.standaloneDir, opts.dir)
-            || normalizePath(answers.standaloneDir, opts.dir)
-            || path.resolve(opts.dir, 'contexa'))
-        : null;
-
-      // Resolve infra dir
-      const requestedInfraDir = opts.infraDir || answers.infraDir || null;
-      const infraDirOverride = normalizePath(opts.infraDir, opts.dir)
-        || normalizePath(answers.infraDir, opts.dir)
-        || null;
-
-      const projectOwnerDir = project.projectDir || opts.dir;
-      const plannedYmlPath = opts.simulate
-        ? simulationOverlayPath(projectOwnerDir)
-        : normalOverlayPath(projectOwnerDir);
-      const plannedSimulationConfigPath = opts.simulate ? simulationConfigurationPath(project) : null;
-      const shouldWriteOverlay = answers.integrationMode === 'merge'
-        && (answers.enableAiSecurity || answers.infra !== 'skip' || answers.simulate);
-      const plannedBuildPath = project.buildFilePath
-        || (project.buildTool === 'maven' ? path.join(projectOwnerDir, 'pom.xml') : path.join(projectOwnerDir, 'build.gradle'));
-      const plannedGeoIpPath = (answers.enableAiSecurity || answers.simulate)
-        ? (opts.simulate
-            ? simulationGeoIpPath(opts.dir)
-            : path.join(opts.dir, 'contexa', 'data', 'GeoLite2-City.mmdb'))
-        : null;
-      const preflightManifest = await loadManifest(opts.dir, installMode);
-      const preserveManagedDocker = preflightManifest.metadata.dockerLifecycleManaged === true
-        && !answers.startDocker;
-      const plannedInfraDir = preserveManagedDocker
-        ? preflightManifest.metadata.infraDir
-        : answers.infra !== 'skip'
-          ? resolveInfraDir(cliProjectName, { infraDir: infraDirOverride })
-          : null;
-      if (plannedInfraDir) {
-        await assertSafeInfraDir(opts.dir, plannedInfraDir, requestedInfraDir);
-      }
-      const plannedComposePath = plannedInfraDir ? path.join(plannedInfraDir, 'docker-compose.yml') : null;
-      const plannedYmlExists = await fs.pathExists(plannedYmlPath);
-      const plannedBuildExists = await fs.pathExists(plannedBuildPath);
-      const plannedSimulationConfigExists = plannedSimulationConfigPath
-        ? await fs.pathExists(plannedSimulationConfigPath) : false;
-      const plannedGeoIpExists = plannedGeoIpPath ? await fs.pathExists(plannedGeoIpPath) : false;
-      const plannedComposeExists = plannedComposePath ? await fs.pathExists(plannedComposePath) : false;
-      const plannedStandaloneBuildPath = answers.integrationMode === 'standalone'
-        ? path.join(standaloneDir, project.buildTool === 'maven' ? 'pom-fragment.xml' : 'contexa.gradle')
-        : null;
-      const plannedStandaloneYmlPath = answers.integrationMode === 'standalone'
-        ? path.join(standaloneDir, 'application.yml')
-        : null;
-      const plannedStandaloneYmlExists = plannedStandaloneYmlPath
-        ? await fs.pathExists(plannedStandaloneYmlPath) : false;
-      const plannedStandaloneBuildExists = plannedStandaloneBuildPath
-        ? await fs.pathExists(plannedStandaloneBuildPath) : false;
-      const plannedFiles = answers.integrationMode === 'standalone'
-        ? [
-            { filePath: plannedStandaloneYmlPath, kind: 'standalone-config', generated: !plannedStandaloneYmlExists },
-            { filePath: plannedStandaloneBuildPath, kind: 'standalone-build', generated: !plannedStandaloneBuildExists },
-          ]
-        : [
-            ...(!opts.simulate ? [{ filePath: plannedBuildPath, kind: 'build-file' }] : []),
-            ...(shouldWriteOverlay ? [{
-              filePath: plannedYmlPath,
-              kind: opts.simulate ? 'simulation-overlay' : 'contexa-overlay',
-              generated: !plannedYmlExists,
-            }] : []),
-            ...(plannedSimulationConfigPath ? [{
-              filePath: plannedSimulationConfigPath,
-              kind: 'simulation-profile-configuration',
-              generated: !plannedSimulationConfigExists,
-            }] : []),
-          ];
-      if (plannedGeoIpPath) {
-        plannedFiles.push({ filePath: plannedGeoIpPath, kind: 'geoip-data', generated: true });
-      }
-      if (answers.enableAiSecurity && answers.autoAnnotate
-          && Array.isArray(project.mainApplicationCandidates)
-          && project.mainApplicationCandidates.length === 1) {
-        plannedFiles.push({
-          filePath: project.mainApplicationCandidates[0],
-          kind: 'application-source',
-          generated: false,
-        });
-      }
-
-      printPlannedChanges(answers, project, answers.integrationMode === 'standalone'
-        ? {
-            standaloneDir,
-            composePath: plannedComposePath,
-            composeExists: plannedComposeExists,
-            preserveManagedDocker,
-            geoIpPath: plannedGeoIpPath,
-            geoIpExists: plannedGeoIpExists,
-            geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
-          }
-        : {
-            ymlPath: plannedYmlPath,
-            buildPath: plannedBuildPath,
-            simulationConfigPath: plannedSimulationConfigPath,
-            simulationConfigExists: plannedSimulationConfigExists,
-            ymlExists: plannedYmlExists,
-            writeOverlay: shouldWriteOverlay,
-            buildExists: plannedBuildExists,
-            starterPresent: !!project.hasContexta,
-            composePath: plannedComposePath,
-            composeExists: plannedComposeExists,
-            preserveManagedDocker,
-            geoIpPath: plannedGeoIpPath,
-            geoIpExists: plannedGeoIpExists,
-            geoIpLocalSource: process.env.CONTEXA_GEOLITE2_SOURCE_PATH,
-          });
-
-      const transactionInfra = preserveManagedDocker
-        ? preflightManifest.metadata.infra : answers.infra;
-      const transactionInfraDir = preserveManagedDocker
-        ? preflightManifest.metadata.infraDir : plannedInfraDir;
-      let plannedInfraIssues = [];
-      if (answers.infra !== 'skip' && !preserveManagedDocker) {
-        plannedInfraIssues = await inspectInfra({
-          infra: answers.infra,
-          startDocker: answers.startDocker,
-          includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
-          strictIsolation: !!opts.simulate,
-          projectName: cliProjectName,
-          installationId: preflightManifest.metadata && preflightManifest.metadata.installationId,
-        });
-        for (const issue of plannedInfraIssues) {
-          const paint = issue.severity === 'error' ? chalk.red : issue.severity === 'warning' ? chalk.yellow : chalk.gray;
-          console.log(paint(`  ${issue.severity === 'error' ? 'x' : issue.severity === 'warning' ? '!' : 'i'} ${issue.message}`));
-          for (const hint of (issue.hint || [])) console.log(chalk.gray(`    - ${hint}`));
-        }
-        const preflightErrors = plannedInfraIssues.filter(issue => issue.severity === 'error');
-        if (preflightErrors.length > 0) {
-          throw initError('INFRASTRUCTURE_PREFLIGHT_FAILED', 'init.error.preflight');
-        }
-      }
-
-      installLock = await acquireInstallLock(opts.dir, installMode, 'init');
-      transactionManifestExisted = await fs.pathExists(manifestPath(opts.dir, installMode));
-      installTransactionId = await beginInstallTransaction(opts.dir, {
-        projectName: cliProjectName,
-        integrationMode: answers.integrationMode,
-        infra: transactionInfra,
-        infraDir: transactionInfraDir,
-        simInfraDir: opts.simulate ? resolveInfraDir('ctxa-sim', { infraDir: infraDirOverride }) : null,
-        dockerLifecycleManaged: preserveManagedDocker
-          || (answers.infra !== 'skip' && Boolean(answers.startDocker)),
-        aiSecurityRequested: !!answers.enableAiSecurity,
-        aiSecurityEnabled: false,
-      }, installMode, plannedFiles, {
-        recoverDocker: recoverInterruptedDockerMutation,
-      });
-      const installManifest = await loadManifest(opts.dir, installMode);
-      const installationId = installManifest.metadata.installationId;
-      if (Object.keys(plannedInfraIssues.identityFingerprints || {}).length > 0) {
-        await recordInstallMetadata(opts.dir, {
-          preflightServiceIdentity: {
-            verifiedAt: new Date().toISOString(),
-            fingerprints: plannedInfraIssues.identityFingerprints,
-          },
-        }, installMode);
-      }
-      if (opts.simulate) {
-        Object.assign(process.env, simulationEnvironment(process.env, installationId));
-        await recordInstallMetadata(opts.dir, {
-          simulation: {
-            projectName: SIMULATION_PROJECT,
-            profile: SIMULATION_PROFILE,
-            ports: SIMULATION_PORTS,
-            overlayPath: path.relative(opts.dir, plannedYmlPath).split(path.sep).join('/'),
-            configurationPath: path.relative(opts.dir, plannedSimulationConfigPath).split(path.sep).join('/'),
-          },
-        }, installMode);
-      }
-
-      if (answers.enableAiSecurity || answers.simulate) {
-        // Provision GeoLite2-City.mmdb only when AI security or simulation is explicitly selected.
-        const startGeo = process.hrtime.bigint();
-        const sGeo = ora(t('step.provisioningGeoIp')).start();
-        try {
-          const geoIpContract = releaseManifest.resources && releaseManifest.resources.geoIp;
-          if (!geoIpContract) {
-            throw initError('GEOIP_CONTRACT_MISSING', 'init.error.geoIpContractMissing');
-          }
-          const provisioned = await ensureVerifiedArtifact(geoIpContract, {
-            destination: plannedGeoIpPath,
-            sourcePath: process.env.CONTEXA_GEOLITE2_SOURCE_PATH || null,
-            timeoutMs: TIMEOUTS.artifactDownloadMs,
-          });
-          if (provisioned.changed) {
-            await recordChange(opts.dir, plannedGeoIpPath, { kind: 'geoip-data', generated: true, reason: 'Verified GeoIP context for explicit AI security setup' }, installMode);
-          }
-          const action = provisioned.changed
-            ? (process.env.CONTEXA_GEOLITE2_SOURCE_PATH ? 'copied and verified' : 'downloaded and verified')
-            : 'already present and verified';
-          sGeo.succeed(`GeoLite2-City.mmdb ${action} (${(Number(process.hrtime.bigint() - startGeo) / 1e6).toFixed(0)}ms)`);
-        } catch (err) {
-          sGeo.fail(`Failed to provision GeoLite2-City.mmdb: ${err.message}`);
-          throw err;
-        }
-      }
-
-      console.log('');
-
-      // 3 + 4. Apply contexa configuration to the customer project.
-      //
-      // Two integration modes:
-      //   merge      - mutate the customer's application.yml and build file
-      //                in-place (single transaction with .bak rollback).
-      //   standalone - write contexa-only artifacts to a separate folder; the
-      //                customer's project files are NEVER touched.
-      let standaloneResult = null;
-      let aiAnnotationApplied = !!project.hasEnableAiSecurity;
-      let aiDependenciesProcessed = false;
-      let starterDependencyChanged = false;
-      if (answers.integrationMode === 'standalone') {
-        console.log(chalk.cyan('\n  ' + t('standalone.intro')));
-        console.log(chalk.gray(`  ${t('standalone.location')} ${standaloneDir}`));
-        const startStandalone = process.hrtime.bigint();
-        const sStandalone = ora(t('step.writingStandalone')).start();
-        try {
-          // Pass --force so injectStandalone will overwrite an existing
-          // non-empty folder. Without --force, a non-empty folder that does
-          // not look like a previous contexa-cli output is rejected up-front.
-          standaloneResult = await injectStandalone(standaloneDir, project, {
-            ...answers,
-            force: !!opts.force,
-            preparedPaths: plannedGeoIpPath ? [plannedGeoIpPath] : [],
-          });
-          await recordChange(opts.dir, standaloneResult.ymlPath, {
-            kind: 'standalone-config', generated: plannedFiles[0].generated,
-            reason: 'Contexa standalone configuration output',
-          }, installMode);
-          await recordChange(opts.dir, standaloneResult.buildFragmentPath, {
-            kind: 'standalone-build', generated: plannedFiles[1].generated,
-            reason: 'Contexa standalone build output',
-          }, installMode);
-          const elapsed = Number(process.hrtime.bigint() - startStandalone) / 1e6;
-          sStandalone.succeed(`${t('step.standaloneWritten')} (${elapsed.toFixed(0)}ms)`);
-        } catch (err) {
-          sStandalone.fail(t('step.standaloneWritten'));
-          console.log('');
-          console.log(chalk.red(`  x ${t('init.error.standaloneWrite')}`));
-          console.log(chalk.gray('    ' + formatError(err)));
-          console.log('');
-          throw err;
-        }
-      } else {
-        // Merge mode: yml + build mutation as a SINGLE transaction. If any step
-        // inside fails, every change in this block is rolled back from its .bak
-        // so the customer never ends up with a half-applied install (e.g. yml
-        // mutated but build dep missing).
-        const ymlPath = plannedYmlPath;
-        const buildPath = plannedBuildPath;
-        const ymlExistedBefore = await fs.pathExists(ymlPath);
-
-        if (shouldWriteOverlay) {
-          // Selected activation/infrastructure settings are written only to
-          // the Contexa-owned overlay; the host application.yml stays intact.
-          const startYml = process.hrtime.bigint();
-          const s1 = ora(t('step.updatingYml')).start();
-          try {
-            const ymlState = trackedFileState(installManifest, opts.dir, ymlPath);
-            if (ymlState.userModified || (ymlState.entry
-                && ymlState.entry.ownership === 'USER_OWNED')) {
-              throw new Error(`Contexa overlay path is already user-owned: ${ymlPath}`);
-            } else {
-              const applied = await injectYml(ymlPath, {
-                ...answers,
-                managedPaths: ymlState.entry && ymlState.entry.managedPaths,
-                removeLegacyNormalServerPort: !!(ymlState.entry && ymlState.entry.generated),
-              });
-              await recordChange(opts.dir, ymlPath, {
-                kind: opts.simulate ? 'simulation-overlay' : 'contexa-overlay',
-                generated: !ymlExistedBefore,
-                reason: 'Explicit Contexa configuration',
-                managedPaths: applied.managedPaths,
-              }, installMode);
-              const elapsed = Number(process.hrtime.bigint() - startYml) / 1e6;
-              s1.succeed(`${t('step.ymlUpdated')} (${elapsed.toFixed(0)}ms)`);
-            }
-          } catch (err) {
-            err = normalizeInitInputError(err);
-            s1.fail(t('step.ymlUpdated'));
-            console.log('');
-            console.log(chalk.red(`  x ${t('init.error.ymlUpdate')}`));
-            console.log(chalk.gray('    ' + formatError(err)));
-            console.log('');
-            throw err;
-          }
-        }
-
-        if (opts.simulate) {
-          const simulationConfig = await writeSimulationConfiguration(
-            project, plannedSimulationConfigPath);
-          await recordChange(opts.dir, simulationConfig.filePath, {
-            kind: 'simulation-profile-configuration',
-            generated: !plannedSimulationConfigExists,
-            reason: 'Profile-only simulation activation',
-          }, installMode);
-          aiAnnotationApplied = true;
-        }
-
-
-        // application.properties + application.yml coexistence is a load-order
-        // hazard in Spring Boot. Surface a single-line resolution hint here so
-        // the user does not have to dig through docs.
-        if (project.appPropertiesPath && project.appYmlPath) {
-          console.log(chalk.yellow(`  ! ${t('init.config.both')}`));
-          console.log(chalk.gray(`    ${t('init.config.shadowRisk')}`));
-          console.log(chalk.gray(`    ${t('init.config.singleSource')}`));
-        }
-
-        // 4. Inject dependency (rolls back yml on failure)
-        const addedDependencies = [];
-        const dependencyOptions = {
-          mode: installMode,
-          targetModule: path.relative(path.resolve(opts.dir), projectOwnerDir)
-            .split(path.sep).join('/') || '.',
-          addedDependencies,
-        };
-        // Source activation is independent from build dependency mutation.
-        if (answers.enableAiSecurity && answers.autoAnnotate) {
-          try {
-            const sAnnot = ora(t('step.injectingAnnotation')).start();
-            const sourceState = project.mainApplicationCandidates.length === 1
-              ? trackedFileState(installManifest, opts.dir, project.mainApplicationCandidates[0])
-              : { entry: null, userModified: false };
-            if (sourceState.userModified) {
-              sAnnot.warn('Skipped user-modified main application source.');
-            }
-            const injected = sourceState.userModified ? null : await injectEnableAiSecurity(opts.dir, {
-                mode: installMode,
-                securityMode: answers.securityMode,
-                mainApplicationCandidates: project.mainApplicationCandidates,
-              });
-            if (injected && injected.changed) {
-              sAnnot.succeed(t('step.annotationInjected'));
-              await recordChange(opts.dir, injected.filePath, { kind: 'java-annotation', generated: false, reason: 'Explicit --auto-annotate AI security activation' }, installMode);
-              project.hasEnableAiSecurity = true;
-              aiAnnotationApplied = true;
-            } else {
-              aiAnnotationApplied = aiAnnotationApplied || !!project.hasEnableAiSecurity || !!(injected && injected.filePath);
-              sAnnot.info(t('step.annotationPresent'));
-            }
-          } catch (err) {
-            console.log(chalk.red(`  x ${t('init.error.annotation', formatError(err))}`));
-            throw err;
-          }
-        }
-
-        if (answers.injectDep) {
-          try {
-            const buildState = trackedFileState(installManifest, opts.dir, buildPath);
-            if (buildState.userModified) {
-              console.log(chalk.yellow(`  ! ${t('init.build.userModified')}`));
-            } else {
-            const startDep = process.hrtime.bigint();
-            const s2 = ora(t('step.addingDep')).start();
-            const ok = project.buildTool === 'maven'
-              ? await injectMavenDep(buildPath, dependencyOptions)
-              : await injectGradleDep(buildPath, dependencyOptions);
-            if (ok) {
-              starterDependencyChanged = true;
-              await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Contexa starter dependency' }, installMode);
-            }
-            const elapsed = Number(process.hrtime.bigint() - startDep) / 1e6;
-            ok ? s2.succeed(`${t('step.depAdded')} (${elapsed.toFixed(0)}ms)`) : s2.info(t('step.depAlreadyPresent'));
-
-            // Spring AI provider starters and vector-store are added only for explicit AI security setup.
-            if (answers.enableAiSecurity && aiProviderSelected(answers)) {
-              const startAiDep = process.hrtime.bigint();
-              const sAi = ora(t('step.addingAiDependencies')).start();
-              const addedAi = await injectSpringAiDeps(
-                buildPath, answers.llmProviders, dependencyOptions);
-              if (addedAi) {
-                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit AI provider dependencies' }, installMode);
-              }
-              const elapsedAi = Number(process.hrtime.bigint() - startAiDep) / 1e6;
-              addedAi ? sAi.succeed(`Spring AI dependencies added (${elapsedAi.toFixed(0)}ms)`) : sAi.info('Spring AI dependencies already present');
-            }
-
-            if (answers.infra === 'distributed') {
-              const startDistDep = process.hrtime.bigint();
-              const s2b = ora(t('step.addingDistributedDeps')).start();
-              const added = await injectDistributedDeps(buildPath, dependencyOptions);
-              if (added) {
-                await recordChange(opts.dir, buildPath, { kind: 'build-file', generated: false, reason: 'Explicit distributed infrastructure dependencies' }, installMode);
-              }
-              const elapsedDist = Number(process.hrtime.bigint() - startDistDep) / 1e6;
-              added ? s2b.succeed(`${t('step.distributedDepsAdded')} (${elapsedDist.toFixed(0)}ms)`) : s2b.info(t('step.distributedDepsPresent'));
-            }
-            if (answers.enableAiSecurity) {
-              aiDependenciesProcessed = await inspectAiDependencies(
-                buildPath, answers.llmProviders);
-            }
-            if (addedDependencies.length > 0) {
-              const existing = Array.isArray(installManifest.metadata.dependencyProvenance)
-                ? installManifest.metadata.dependencyProvenance : [];
-              const byKey = new Map();
-              for (const coordinate of [...existing, ...addedDependencies]) {
-                const key = [coordinate.group, coordinate.artifact,
-                  coordinate.configuration, coordinate.version || '',
-                  coordinate.targetModule].join(':');
-                byKey.set(key, coordinate);
-              }
-              await recordInstallMetadata(opts.dir, {
-                dependencyProvenance: [...byKey.values()].sort((left, right) =>
-                  [left.targetModule, left.group, left.artifact, left.configuration]
-                    .join(':').localeCompare(
-                      [right.targetModule, right.group, right.artifact, right.configuration]
-                        .join(':'))),
-              }, installMode);
-            }
-            }
-          } catch (err) {
-            console.log('');
-            console.log(chalk.red(`  x ${t('init.error.buildInjection')}`));
-            console.log(chalk.gray('    ' + formatError(err)));
-            console.log('');
-            throw err;
-          }
-        }
-      }
-
-      // 5. Generate docker-compose.yml
-      //
-      // Infrastructure files (docker-compose.yml) are written to a
-      // contexa-owned directory, NEVER the customer project directory. The
-      // customer project's existing docker-compose.yml (if any) is therefore
-      // never touched. Default location is OS-specific contexa home; users
-      // can override via --infra-dir.
-      let infraDir = preserveManagedDocker ? preflightManifest.metadata.infraDir : null;
-      if (preserveManagedDocker) {
-        console.log(chalk.green(`  v ${t('init.infrastructure.managedDockerPreserved')}`));
-      } else if (answers.infra !== 'skip') {
-        const includesOllama = !!(answers.llmProviders && answers.llmProviders.includes('ollama'));
-        if (answers.infra === 'distributed') {
-          console.log(chalk.cyan(`\n  ${t('init.infrastructure.distributed',
-            includesOllama ? ' + Ollama' : '')}`));
-        } else {
-          console.log(chalk.cyan(`\n  ${t('init.infrastructure.standalone',
-            includesOllama ? ' + Ollama' : '')}`));
-        }
-
-        infraDir = resolveInfraDir(cliProjectName, { infraDir: infraDirOverride });
-        console.log(chalk.gray(`  ${t('init.infrastructure.location', infraDir)}`));
-        console.log(chalk.gray(`  ${t('init.infrastructure.schemaOwner')}`));
-
-        const startCompose = process.hrtime.bigint();
-        const s3 = ora(t('step.generatingCompose')).start();
-        const composePath = path.join(infraDir, 'docker-compose.yml');
-        await prepareExternalFileChange(opts.dir, installTransactionId, composePath, infraDir, installMode);
-        await generateDockerCompose(infraDir, {
-          ...answers,
-          projectName: cliProjectName,
-          mode: installMode,
-          installationId,
-          includeOllama: !!(answers.llmProviders && answers.llmProviders.includes('ollama')),
-          // The ownership transaction already preserves the previous external
-          // file. A second sibling backup would survive a successful reset.
-          backupExisting: false,
-        });
-        await recordExternalFileChange(opts.dir, installTransactionId, composePath, installMode);
-        const dockerResourceContract = buildDockerResourceContract(cliProjectName, {
-          infra: answers.infra,
-          includeOllama: includesOllama,
-          mode: installMode,
-          installationId,
-        });
-        await recordInstallMetadata(opts.dir, {
-          dockerResources: dockerResourceContract,
-          composeChecksum: sha256FileSync(composePath),
-        }, installMode);
-        const elapsedCompose = Number(process.hrtime.bigint() - startCompose) / 1e6;
-        s3.succeed((answers.infra === 'distributed'
-          ? t('step.composeGenerated.distributed')
-          : t('step.composeGenerated')) + ` (${elapsedCompose.toFixed(0)}ms)`);
-
-        // 5b. Pre-flight checks before docker compose up. We do this even when
-        // --no-docker is set so the user knows what conflicts to expect when
-        // they run compose manually later.
-        const issues = plannedInfraIssues;
-
-        const servicesToUp = issues.servicesToUp || [];
-        const skippedServices = issues.skippedServices || [];
-
-        // 6. Start Docker
-        // cwd is the contexa-owned infraDir so the docker-compose.yml that we
-        // just generated is the one compose picks up - never the customer's.
-        if (skippedServices.length > 0) {
-          console.log(chalk.green(`  v ${t('init.infrastructure.skipped', skippedServices.join(', '))}`));
-        }
-
-        if (answers.startDocker && project.hasDocker) {
-          await prepareDockerMutation(opts.dir, installTransactionId, {
-            action: servicesToUp.length === 0 ? 'REUSE' : 'START',
-            projectName: cliProjectName,
-            infraDir,
-            composeChecksum: sha256FileSync(composePath),
-            contract: dockerResourceContract,
-            services: servicesToUp.length === 0 ? skippedServices : servicesToUp,
-            removeVolumes: !transactionManifestExisted,
-          }, installMode);
-          if (servicesToUp.length === 0) {
-            await recordDockerMutationApplied(opts.dir, installTransactionId, installMode);
-            console.log(chalk.green(`  v ${t('init.infrastructure.alreadyRunning')}`));
-          } else {
-            const s4 = ora(`${t('step.startingDocker')} (${servicesToUp.join(', ')})`).start();
-            try {
-              const upArgs = opts.simulate
-                ? ['-p', SIMULATION_PROJECT, 'up', '-d', ...servicesToUp]
-                : ['up', '-d', ...servicesToUp];
-              const upResult = dockerCompose(upArgs, {
-                cwd: infraDir,
-                env: opts.simulate ? simulationEnvironment(process.env, installationId) : process.env,
-                stdio: 'inherit',
-                timeout: opts.simulate ? TIMEOUTS.dockerComposeMutationMs : undefined,
-              });
-              if (upResult.error) throw upResult.error;
-              if (upResult.status !== 0) {
-                throw initError('DOCKER_COMPOSE_UP_FAILED', 'init.error.composeUp', upResult.status);
-              }
-              await recordDockerMutationApplied(opts.dir, installTransactionId, installMode);
-              s4.succeed(t('step.dockerStarted'));
-
-            // 7. Pull Ollama models (only if Ollama was explicitly included)
-            // Container name is project-aware (production: contexa-ollama,
-            // simulate: ctxa-sim-ollama, custom CONTEXA_PROJECT: <name>-ollama).
-              if (answers.llmProviders && answers.llmProviders.includes('ollama')) {
-              const ollamaContainer = containerName('ollama');
-              const chatModel = process.env.OLLAMA_CHAT_MODEL || DEFAULT_OLLAMA_CHAT_MODEL;
-              const embedModel = process.env.OLLAMA_EMBEDDING_MODEL || DEFAULT_OLLAMA_EMBEDDING_MODEL;
-              if (!isValidOllamaModel(chatModel)) {
-                throw initError('INVALID_OLLAMA_MODEL', 'init.error.chatModel', chatModel);
-              }
-              if (!isValidOllamaModel(embedModel)) {
-                throw initError('INVALID_OLLAMA_MODEL', 'init.error.embeddingModel', embedModel);
-              }
-              // Pull selected Ollama models when local Ollama is enabled.
-              const ollamaPort = configuredPort(
-                'CONTEXA_OLLAMA_PORT', DEFAULT_INFRASTRUCTURE_PORTS.ollama
-              );
-                const s5 = ora(t('step.pullingChat', chatModel)).start();
-                try {
-                  const ready = await waitForDockerOllama(
-                    ollamaContainer, Date.now() + TIMEOUTS.ollamaReadyMs);
-
-                  if (ready) {
-                    await pullOllamaModelWithProgress(ollamaPort, chatModel, s5, t('step.pullingChat', chatModel).replace('...', ''));
-                    s5.succeed(t('step.chatPulled', chatModel));
-
-                    const s6 = ora(t('step.pullingEmbedding', embedModel)).start();
-                    await pullOllamaModelWithProgress(ollamaPort, embedModel, s6, t('step.pullingEmbedding', embedModel).replace('...', ''));
-                    s6.succeed(t('step.embeddingPulled'));
-                  } else {
-                    throw initError('OLLAMA_READY_TIMEOUT', 'init.error.ollamaReady', ollamaContainer);
-                  }
-                } catch (e) {
-                  s5.fail(t('step.modelPullFailed', chatModel));
-                  throw e;
-                }
-              }
-            } catch (e) {
-              s4.fail(t('step.dockerFailed'));
-              throw e;
-            }
-          }
-          if (opts.simulate && answers.startDocker) {
-            const simulationEvidence = await waitForSimulationInfrastructure(installationId,
-              !!(answers.llmProviders && answers.llmProviders.includes('ollama')));
-            await recordInstallMetadata(opts.dir, {
-              simulationInfrastructure: {
-                verifiedAt: new Date().toISOString(),
-                services: simulationEvidence.services,
-                images: simulationEvidence.images,
-                versions: simulationEvidence.versions,
-                identityFingerprints: Object.fromEntries(
-                  Object.entries(simulationEvidence.probes).map(([service, identity]) => [
-                    service,
-                    `sha256:${crypto.createHash('sha256')
-                      .update(`${service}|${identity}`).digest('hex')}`,
-                  ])
-                ),
-              },
-            }, installMode);
-          }
-        }
-      }
-      const finalActivationResult = activationResult(answers, project, {
-        aiAnnotationApplied,
-        aiDependenciesProcessed,
-      });
-      await recordInstallMetadata(opts.dir, {
-        aiSecurityRequested: finalActivationResult.requested,
-        aiSecurityEnabled: finalActivationResult.enabled,
-        activationResult: finalActivationResult,
-      }, installMode);
-      await commitInstallTransaction(opts.dir, installTransactionId, installMode);
-      installTransactionId = null;
-
-      printInitCompletion({
-        answers,
-        project,
-        standaloneDir,
-        shouldWriteOverlay,
-        standaloneResult,
-        simulate: !!opts.simulate,
-        projectDir: opts.dir,
-        aiAnnotationApplied,
-        aiDependenciesProcessed,
-        starterDependencyChanged,
-        preserveManagedDocker,
-      });
-
-      } catch (error) {
-        const infrastructureRollbackErrors = [];
-        if (installTransactionId) {
-          try {
-            const activeManifest = await loadManifest(opts.dir, installMode);
-            const dockerMutation = activeManifest.transaction
-              && activeManifest.transaction.id === installTransactionId
-              && activeManifest.transaction.dockerMutation;
-            if (dockerMutation && ['PREPARED', 'APPLIED'].includes(dockerMutation.state)) {
-              await recoverInterruptedDockerMutation(dockerMutation);
-            }
-          } catch (cleanupError) {
-            infrastructureRollbackErrors.push(`Docker rollback: ${cleanupError.message}`);
-          }
-          const rollback = await rollbackInstallTransaction(
-            opts.dir,
-            installTransactionId,
-            installMode,
-            { failures: infrastructureRollbackErrors }
-          );
-          if (!rollback.rolledBack) {
-            infrastructureRollbackErrors.splice(0, infrastructureRollbackErrors.length, ...rollback.failures);
-          } else {
-            console.log(chalk.yellow(`  ! ${t('init.rollback.restored')}`));
-          }
-        }
-        if (infrastructureRollbackErrors.length > 0) {
-          throw new Error(`${error.message}; automatic rollback failed: ${infrastructureRollbackErrors.join('; ')}`);
-        }
-        throw error;
-      } finally {
-        await releaseInstallLock(installLock);
-      }
-}
-
-module.exports = {
-  executeInit,
-  recoverInterruptedDockerMutation,
-};
+module.exports = { executeInit, checkProject, bootSupport, javaMajorVersion };

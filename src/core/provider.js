@@ -1,34 +1,40 @@
 'use strict';
 
-const SUPPORTED_PROVIDERS = Object.freeze(['openai', 'anthropic', 'ollama']);
-const DEFAULT_OLLAMA_CHAT_MODEL = 'qwen2.5:7b';
+// AI model providers Contexa can be set up with, and the Ollama models it uses by default.
+// The default chat model is the one Contexa itself falls back to (qwen3:8b), so the settings
+// and the downloaded model always agree.
+
+const SUPPORTED_PROVIDERS = Object.freeze(['ollama', 'openai', 'anthropic']);
+const DEFAULT_OLLAMA_CHAT_MODEL = 'qwen3:8b';
 const DEFAULT_OLLAMA_EMBEDDING_MODEL = 'mxbai-embed-large';
+const APPROXIMATE_MODEL_SIZE_GB = Object.freeze({
+  'qwen3:8b': 5.2,
+  'mxbai-embed-large': 0.7,
+});
 const OLLAMA_MODEL_PATTERN = /^[a-zA-Z0-9._\-:/]+$/;
 
-function normalizeProviders(providerOption, options = {}) {
-  const includeOllama = !!options.includeOllama;
-  const simulate = !!options.simulate;
-  if (!providerOption) return includeOllama || simulate ? ['ollama'] : [];
+function providerError(code, key, args = []) {
+  const error = new Error(`${code} ${args.join(' ')}`.trim());
+  error.code = code;
+  error.messageKey = key;
+  error.messageArgs = args;
+  return error;
+}
 
-  const values = String(providerOption)
-    .split(',')
-    .map(value => value.trim().toLowerCase())
-    .filter(Boolean);
-  if (values.includes('none')) return [];
-
-  const invalid = values.filter(value => !SUPPORTED_PROVIDERS.includes(value));
-  if (invalid.length > 0) {
-    const error = new Error(
-      `INVALID_PROVIDER Unsupported provider: ${invalid.join(', ')}. `
-      + `Use ${SUPPORTED_PROVIDERS.join(', ')}, or none.`
-    );
-    error.code = 'INVALID_PROVIDER';
-    error.messageKey = 'common.invalidProvider';
-    error.messageArgs = [invalid.join(', '), SUPPORTED_PROVIDERS.join(', ')];
-    throw error;
+function normalizeProvider(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const provider = String(value).trim().toLowerCase();
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    throw providerError('INVALID_PROVIDER', 'common.invalidProvider',
+      [String(value), SUPPORTED_PROVIDERS.join(', ')]);
   }
-  if (includeOllama && !values.includes('ollama')) values.push('ollama');
-  return [...new Set(values)];
+  return provider;
+}
+
+// Ollama serves chat for "ollama", and embeddings for both "ollama" and "anthropic" (Anthropic has
+// no embedding model).
+function usesOllama(provider) {
+  return provider === 'ollama' || provider === 'anthropic';
 }
 
 function isValidOllamaModel(name) {
@@ -36,10 +42,24 @@ function isValidOllamaModel(name) {
     && name.length <= 200 && OLLAMA_MODEL_PATTERN.test(name);
 }
 
+function ollamaModels(environment = process.env) {
+  const chat = environment.CONTEXA_OLLAMA_CHAT_MODEL || DEFAULT_OLLAMA_CHAT_MODEL;
+  const embedding = environment.CONTEXA_OLLAMA_EMBEDDING_MODEL || DEFAULT_OLLAMA_EMBEDDING_MODEL;
+  for (const model of [chat, embedding]) {
+    if (!isValidOllamaModel(model)) {
+      throw providerError('INVALID_OLLAMA_MODEL', 'common.invalidOllamaModel', [model]);
+    }
+  }
+  return { chat, embedding };
+}
+
 module.exports = {
   SUPPORTED_PROVIDERS,
   DEFAULT_OLLAMA_CHAT_MODEL,
   DEFAULT_OLLAMA_EMBEDDING_MODEL,
-  normalizeProviders,
+  APPROXIMATE_MODEL_SIZE_GB,
+  normalizeProvider,
+  usesOllama,
   isValidOllamaModel,
+  ollamaModels,
 };

@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "channel": "snapshot",
-  "releaseTag": "v0.1.6",
-  "cliVersion": "0.1.6",
+  "releaseTag": "v0.2.0",
+  "cliVersion": "0.2.0",
   "source": {
     "repository": "contexa-security/contexa-cli",
     "commit": "0000000000000000000000000000000000000000"
@@ -13,9 +13,8 @@
     "version": "0.1.0"
   },
   "dependencyVersions": {
-    "springAiBom": "1.1.2",
-    "redisson": "3.48.0",
-    "springStateMachine": "4.0.0"
+    "springAiBom": "1.1.8",
+    "sampleSpringBoot": "3.5.16"
   },
   "assets": [
     {"os": "linux", "arch": "x64", "file": "contexa-linux-x64", "checksumFile": "contexa-linux-x64.sha256", "codeSignature": "unsigned-snapshot"},
@@ -34,19 +33,9 @@
     "file": "release-manifest.json.sig",
     "publicKeyFile": "release-signing-public.pem"
   },
-  "resources": {
-    "geoIp": {
-      "version": "contexa-0e9c9577bfdad11136c392d30d94b93b4ac3d968",
-      "url": "https://raw.githubusercontent.com/contexa-security/contexa/0e9c9577bfdad11136c392d30d94b93b4ac3d968/data/GeoLite2-City.mmdb",
-      "sha256": "78758017b97a2c648ef09cbd98d4d1177ddc6bfa492847fdbbe484a89c355230",
-      "size": 63510258,
-      "format": "maxmind-mmdb"
-    }
-  },
   "primaryCommands": [
     "contexa init",
-    "contexa reset",
-    "contexa init --simulate",
-    "contexa reset --simulate"
+    "contexa doctor",
+    "contexa reset"
   ]
 }

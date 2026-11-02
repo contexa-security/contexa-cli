@@ -356,6 +356,55 @@ function pluginIds(tokens, blocks) {
   return [...new Set(ids)];
 }
 
+// Plugin declarations with their version and whether they are applied to this project.
+// `id 'x' version 'v' apply false` only puts the plugin on the classpath (multi-module roots),
+// `alias(libs.plugins.x)` refers to a version catalog entry.
+function pluginDeclarations(tokens, blocks) {
+  const declarations = [];
+  const lineTokens = (start, end) => {
+    const line = [];
+    for (let index = start; index < end && tokens[index].type !== 'newline'; index++) {
+      line.push(tokens[index]);
+    }
+    return line;
+  };
+  for (const block of blocks.filter(item => item.name === 'plugins' && !item.parent)) {
+    for (let index = block.openTokenIndex + 1; index < block.closeTokenIndex; index++) {
+      const token = tokens[index];
+      if (token.type !== 'identifier' || !['id', 'alias'].includes(token.value)) continue;
+      if (index > 0 && tokens[index - 1].type !== 'newline' && tokens[index - 1].value !== '{') continue;
+      const line = lineTokens(index + 1, block.closeTokenIndex);
+      const versionIndex = line.findIndex(item => item.type === 'identifier' && item.value === 'version');
+      const applyIndex = line.findIndex(item => item.type === 'identifier' && item.value === 'apply');
+      const declaration = {
+        id: null,
+        alias: null,
+        version: versionIndex !== -1 && line[versionIndex + 1] && line[versionIndex + 1].type === 'string'
+          ? line[versionIndex + 1].value : null,
+        applied: !(applyIndex !== -1 && line[applyIndex + 1] && line[applyIndex + 1].value === 'false'),
+      };
+      if (token.value === 'id') {
+        const id = line.find(item => item.type === 'string');
+        if (!id) continue;
+        declaration.id = id.value;
+      } else {
+        const alias = line.find(item => item.type === 'identifier');
+        if (!alias) continue;
+        declaration.alias = alias.value;
+      }
+      declarations.push(declaration);
+    }
+  }
+  for (let index = 0; index < tokens.length - 2; index++) {
+    if (tokens[index].type === 'identifier' && tokens[index].value === 'apply'
+        && tokens[index + 1].type === 'identifier' && tokens[index + 1].value === 'plugin') {
+      const id = lineTokens(index + 2, tokens.length).find(token => token.type === 'string');
+      if (id) declarations.push({ id: id.value, alias: null, version: null, applied: true });
+    }
+  }
+  return declarations;
+}
+
 function parseGradleModel(source) {
   const tokens = tokenizeGradle(source);
   const blocks = gradleBlocks(tokens);
@@ -363,10 +412,13 @@ function parseGradleModel(source) {
     .filter(block => block.name === 'dependencies')
     .map(block => ({ block, coordinates: coordinatesInGradleBlock(tokens, block) }));
   const topLevelDependencies = dependencyBlocks.find(item => !item.block.parent) || null;
+  const declarations = pluginDeclarations(tokens, blocks);
   return {
     tokens,
     blocks,
     pluginIds: pluginIds(tokens, blocks),
+    pluginDeclarations: declarations,
+    appliedPluginIds: [...new Set(declarations.filter(item => item.applied && item.id).map(item => item.id))],
     dependencyBlocks,
     topLevelDependencies,
     dependencies: topLevelDependencies ? topLevelDependencies.coordinates : [],

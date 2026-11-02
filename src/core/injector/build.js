@@ -2,20 +2,13 @@
 
 // Build-file injection: pom.xml / build.gradle / build.gradle.kts.
 //
-// Three responsibilities:
-//   1. Add the contexa starter (spring-boot-starter-contexa) to the project's
-//      dependency block. Idempotent.
-//   2. Add the distributed-mode dependencies (spring-kafka, redisson) when
-//      --distributed is selected. Idempotent.
-//   3. Locate the *top-level* dependencies block in Gradle, never the one
-//      inside buildscript / subprojects / pluginManagement.
+//   1. Add the Contexa starter (spring-boot-starter-contexa). Idempotent.
+//   2. Add the Spring AI BOM, the selected model starters and the PgVector store starter that
+//      @EnableAISecurity needs. Dependencies the project already declares are never touched.
+//   3. Add @EnableAISecurity to the single @SpringBootApplication class.
 //
-// Spring AI provider starters (spring-ai-starter-model-*) and the pgvector
-// vector-store starter are intentionally NOT injected. They are only needed
-// when the customer declares @EnableAISecurity, and adding them blindly
-// breaks customers who use spring-boot-starter-contexa without the annotation
-// (PgVector / ChatModel beans get instantiated against missing infrastructure
-// at startup).
+// Gradle insertion targets the *top-level* dependencies block, never the one inside
+// buildscript / subprojects / pluginManagement. New lines follow the file's own indentation.
 
 const fs = require('fs-extra');
 const path = require('path');
@@ -25,11 +18,34 @@ const {
   CONTEXA_VERSION,
   resolveDependencyVersions,
   springAiProviderArtifacts,
-  backupFile,
 } = require('./common');
 const { parseMavenModel, parseGradleModel, hasCoordinate } = require('../build-model');
 const CONTEXA_SNAPSHOT_REPOSITORY =
   'https://central.sonatype.com/repository/maven-snapshots/';
+
+// Inserted snippets are written with 4-space indentation; a file indented with tabs (the
+// start.spring.io default) gets tabs instead, so the result reads like the rest of the file.
+function usesTabs(content) {
+  const tabbed = (content.match(/^\t+\S/gm) || []).length;
+  const spaced = (content.match(/^ {2,}\S/gm) || []).length;
+  return tabbed > spaced;
+}
+
+function adaptIndent(content, text) {
+  if (!usesTabs(content)) return text;
+  return text.replace(/^((?: {4})+)/gm, match => '\t'.repeat(match.length / 4));
+}
+
+// Inserts `block` (whole lines with their own indentation, each ending in a newline) in front of
+// the closing tag at `index`. When the tag starts its own line the block goes before that line,
+// so neither the block's first line nor the tag is indented twice.
+function insertBeforeClosingTag(text, index, block) {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  const before = text.slice(lineStart, index);
+  if (/^[ \t]*$/.test(before)) return text.slice(0, lineStart) + block + text.slice(lineStart);
+  const indent = before.match(/^[ \t]*/)[0];
+  return text.slice(0, index) + '\n' + block + indent + text.slice(index);
+}
 
 function isSnapshotVersion(version) {
   return typeof version === 'string' && version.endsWith('-SNAPSHOT');
@@ -129,7 +145,6 @@ async function injectMavenDep(pomPath, options = {}) {
     && !hasSnapshotRepository(pom);
   if (!addDependency && !addRepository) return false;
 
-  await backupFile(pomPath, options);
   let updated = pom;
   if (addDependency) {
     const dep =
@@ -137,17 +152,17 @@ async function injectMavenDep(pomPath, options = {}) {
       `            <groupId>${CONTEXA_GROUP_ID}</groupId>\n` +
       `            <artifactId>${CONTEXA_ARTIFACT_ID}</artifactId>\n` +
       `            <version>${CONTEXA_VERSION}</version>\n` +
-      `        </dependency>\n    `;
+      `        </dependency>\n`;
     const target = model.dependenciesCloseIndex;
     if (target !== -1) {
-      updated = updated.slice(0, target) + dep + updated.slice(target);
+      updated = insertBeforeClosingTag(updated, target, adaptIndent(pom, dep));
     } else {
       const projectClose = updated.lastIndexOf('</project>');
       if (projectClose === -1) {
         throw new Error('Maven injection impossible: pom.xml has no project closing tag.');
       }
-      const dependencies = `    <dependencies>\n${dep}</dependencies>\n`;
-      updated = updated.slice(0, projectClose) + dependencies + updated.slice(projectClose);
+      updated = insertBeforeClosingTag(updated, projectClose,
+        adaptIndent(pom, `    <dependencies>\n${dep}    </dependencies>\n`));
     }
   }
   if (addRepository) updated = insertMavenSnapshotRepository(updated);
@@ -215,7 +230,7 @@ function hasGradleDependency(content, groupId, artifactId) {
 // that are already present.
 function insertIntoTopLevelDependencies(content, lines) {
   const insertPos = findTopLevelDependenciesInsertIndex(content);
-  const block = '\n' + lines.join('\n');
+  const block = '\n' + lines.map(line => adaptIndent(content, line)).join('\n');
   if (insertPos === -1) {
     // No top-level block - append a new one. Trailing newline normalized.
     const trimmed = content.replace(/\s+$/, '');
@@ -236,7 +251,6 @@ async function injectGradleDep(gradlePath, options = {}) {
     && !hasSnapshotRepository(gradle);
   if (!addDependency && !addRepository) return false;
 
-  await backupFile(gradlePath, options);
   const isKotlinDsl = gradlePath.endsWith('.kts');
   if (addDependency) {
     const depLine = isKotlinDsl
@@ -252,120 +266,6 @@ async function injectGradleDep(gradlePath, options = {}) {
   }
   return true;
 }
-// Inject Redis/Kafka client dependencies for the distributed PoC profile.
-// Idempotent ??silently does nothing if any of the markers already exist.
-//
-// spring-kafka version is omitted: Spring Boot's BOM manages it. redisson's
-// version can be overridden via CONTEXA_REDISSON_VERSION env var so that
-// customers whose own BOM pins a different redisson can avoid a clash.
-async function injectDistributedDeps(buildPath, options = {}) {
-  if (!buildPath || !await fs.pathExists(buildPath)) return false;
-  const content = await fs.readFile(buildPath, 'utf8');
-  const { redisson: redissonVersion, springStateMachine } =
-    resolveDependencyVersions(options.dependencyVersions);
-
-  if (buildPath.endsWith('.xml')) {
-    const model = parseMavenModel(content);
-    const additions = [];
-    const added = [];
-    if (!hasCoordinate(model.dependencies, 'org.springframework.kafka', 'spring-kafka')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.springframework.kafka</groupId>\n` +
-        `            <artifactId>spring-kafka</artifactId>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.kafka', 'spring-kafka',
-        'compile', null, options.targetModule));
-    }
-    if (!hasCoordinate(model.dependencies, 'org.redisson', 'redisson')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.redisson</groupId>\n` +
-        `            <artifactId>redisson</artifactId>\n` +
-        `            <version>${redissonVersion}</version>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.redisson', 'redisson',
-        'compile', redissonVersion, options.targetModule));
-    }
-    if (!hasCoordinate(model.dependencies,
-      'org.springframework.boot', 'spring-boot-starter-data-redis')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.springframework.boot</groupId>\n` +
-        `            <artifactId>spring-boot-starter-data-redis</artifactId>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.boot',
-        'spring-boot-starter-data-redis', 'compile', null, options.targetModule));
-    }
-    if (!hasCoordinate(model.dependencies,
-      'org.springframework.statemachine', 'spring-statemachine-data-redis')) {
-      additions.push(
-        `        <dependency>\n` +
-        `            <groupId>org.springframework.statemachine</groupId>\n` +
-        `            <artifactId>spring-statemachine-data-redis</artifactId>\n` +
-        `            <version>${springStateMachine}</version>\n` +
-        `        </dependency>`);
-      added.push(canonicalDependency('org.springframework.statemachine',
-        'spring-statemachine-data-redis', 'compile', springStateMachine, options.targetModule));
-    }
-    if (additions.length === 0) return false;
-
-    await backupFile(buildPath, options);
-    const block = additions.join('\n') + '\n    ';
-    const updated = model.dependenciesCloseIndex !== -1
-      ? content.slice(0, model.dependenciesCloseIndex) + block
-        + content.slice(model.dependenciesCloseIndex)
-      : content.slice(0, model.projectCloseIndex)
-        + `    <dependencies>\n${block}</dependencies>\n`
-        + content.slice(model.projectCloseIndex);
-    await fs.writeFile(buildPath, updated);
-    captureAddedDependencies(options, added);
-    return true;
-  }
-
-  // Gradle (Groovy or Kotlin DSL)
-  const isKts = buildPath.endsWith('.kts');
-  const model = parseGradleModel(content);
-  const lines = [];
-  const added = [];
-  if (!hasCoordinate(model.dependencies, 'org.springframework.kafka', 'spring-kafka')) {
-    lines.push(isKts
-      ? `    implementation("org.springframework.kafka:spring-kafka")`
-      : `    implementation 'org.springframework.kafka:spring-kafka'`);
-    added.push(canonicalDependency('org.springframework.kafka', 'spring-kafka',
-      'implementation', null, options.targetModule));
-  }
-  if (!hasCoordinate(model.dependencies, 'org.redisson', 'redisson')) {
-    lines.push(isKts
-      ? `    implementation("org.redisson:redisson:${redissonVersion}")`
-      : `    implementation 'org.redisson:redisson:${redissonVersion}'`);
-    added.push(canonicalDependency('org.redisson', 'redisson',
-      'implementation', redissonVersion, options.targetModule));
-  }
-  if (!hasCoordinate(model.dependencies,
-    'org.springframework.boot', 'spring-boot-starter-data-redis')) {
-    lines.push(isKts
-      ? `    implementation("org.springframework.boot:spring-boot-starter-data-redis")`
-      : `    implementation 'org.springframework.boot:spring-boot-starter-data-redis'`);
-    added.push(canonicalDependency('org.springframework.boot',
-      'spring-boot-starter-data-redis', 'implementation', null, options.targetModule));
-  }
-  if (!hasCoordinate(model.dependencies,
-    'org.springframework.statemachine', 'spring-statemachine-data-redis')) {
-    lines.push(isKts
-      ? `    implementation("org.springframework.statemachine:spring-statemachine-data-redis:${springStateMachine}")`
-      : `    implementation 'org.springframework.statemachine:spring-statemachine-data-redis:${springStateMachine}'`);
-    added.push(canonicalDependency('org.springframework.statemachine',
-      'spring-statemachine-data-redis', 'implementation', springStateMachine, options.targetModule));
-  }
-  if (lines.length === 0) return false;
-  await backupFile(buildPath, options);
-  const updated = insertIntoTopLevelDependencies(content, lines);
-  await fs.writeFile(buildPath, updated);
-  captureAddedDependencies(options, added);
-  return true;
-}
-
 async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropic'], options = {}) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
@@ -384,27 +284,27 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
       'org.springframework.ai', 'spring-ai-bom')) {
       const mgmtIndex = initialModel.dependencyManagementCloseIndex;
       if (mgmtIndex !== -1) {
-        const bomDep = 
+        const bomDep =
           `            <dependency>\n` +
           `                <groupId>org.springframework.ai</groupId>\n` +
           `                <artifactId>spring-ai-bom</artifactId>\n` +
           `                <version>${springAiBom}</version>\n` +
           `                <type>pom</type>\n` +
           `                <scope>import</scope>\n` +
-          `            </dependency>\n        `;
+          `            </dependency>\n`;
         if (initialModel.managedDependenciesCloseIndex !== -1) {
-          const target = initialModel.managedDependenciesCloseIndex;
-          updated = updated.slice(0, target) + bomDep + updated.slice(target);
+          updated = insertBeforeClosingTag(updated, initialModel.managedDependenciesCloseIndex,
+            adaptIndent(content, bomDep));
           changed = true;
         } else {
-          const dependencies = `        <dependencies>\n${bomDep}</dependencies>\n    `;
-          updated = updated.slice(0, mgmtIndex) + dependencies + updated.slice(mgmtIndex);
+          updated = insertBeforeClosingTag(updated, mgmtIndex,
+            adaptIndent(content, `        <dependencies>\n${bomDep}        </dependencies>\n`));
           changed = true;
         }
       } else {
         const endIdx = initialModel.projectCloseIndex;
         if (endIdx !== -1) {
-          const bomBlock = 
+          const bomBlock = adaptIndent(content,
             `    <dependencyManagement>\n` +
             `        <dependencies>\n` +
             `            <dependency>\n` +
@@ -415,8 +315,8 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
             `                <scope>import</scope>\n` +
             `            </dependency>\n` +
             `        </dependencies>\n` +
-            `    </dependencyManagement>\n\n`;
-          updated = updated.slice(0, endIdx) + bomBlock + updated.slice(endIdx);
+            `    </dependencyManagement>\n\n`);
+          updated = insertBeforeClosingTag(updated, endIdx, bomBlock);
           changed = true;
         }
       }
@@ -451,18 +351,15 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
 
     if (additions.length > 0) {
       const currentModel = parseMavenModel(updated);
-      const block = additions.join('\n') + '\n    ';
+      const block = additions.join('\n') + '\n';
       updated = currentModel.dependenciesCloseIndex !== -1
-        ? updated.slice(0, currentModel.dependenciesCloseIndex) + block
-          + updated.slice(currentModel.dependenciesCloseIndex)
-        : updated.slice(0, currentModel.projectCloseIndex)
-          + `    <dependencies>\n${block}</dependencies>\n`
-          + updated.slice(currentModel.projectCloseIndex);
+        ? insertBeforeClosingTag(updated, currentModel.dependenciesCloseIndex, adaptIndent(content, block))
+        : insertBeforeClosingTag(updated, currentModel.projectCloseIndex,
+          adaptIndent(content, `    <dependencies>\n${block}    </dependencies>\n`));
       changed = true;
     }
 
     if (changed) {
-      await backupFile(buildPath, options);
       await fs.writeFile(buildPath, updated);
       captureAddedDependencies(options, added);
       return true;
@@ -501,7 +398,6 @@ async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropi
     }
 
     if (lines.length === 0 && updated === content) return false;
-    await backupFile(buildPath, options);
     const finalContent = lines.length > 0 ? insertIntoTopLevelDependencies(updated, lines) : updated;
     await fs.writeFile(buildPath, finalContent);
     captureAddedDependencies(options, added);
@@ -540,12 +436,15 @@ async function injectEnableAiSecurity(projectDir, options = {}) {
     throw new Error('Automatic @EnableAISecurity injection stopped safely: the selected source has no real @SpringBootApplication annotation.');
   }
 
-  await backupFile(filePath, options);
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
-  const imports = [
-    'io.contexa.contexacommon.annotation.EnableAISecurity',
-    'io.contexa.contexacommon.security.bridge.SecurityMode',
-  ];
+  // SANDBOX is the annotation default (the application keeps owning sign-in), so it is written
+  // without attributes; FULL hands sign-in to Contexa and needs the SecurityMode import.
+  const imports = securityMode === 'full'
+    ? [
+        'io.contexa.contexacommon.annotation.EnableAISecurity',
+        'io.contexa.contexacommon.security.bridge.SecurityMode',
+      ]
+    : ['io.contexa.contexacommon.annotation.EnableAISecurity'];
   for (const importedType of imports) {
     const importPattern = new RegExp(`^\\s*import\\s+${escapeForRegex(importedType)}(?:;)?\\s*$`, 'm');
     if (importPattern.test(source)) continue;
@@ -554,7 +453,9 @@ async function injectEnableAiSecurity(projectDir, options = {}) {
 
   code = maskSourceNonCode(source);
   const refreshedSpringAnnotation = code.match(/@(?:org\.springframework\.boot\.autoconfigure\.)?SpringBootApplication\b/);
-  const annotation = `@EnableAISecurity(mode = SecurityMode.${securityMode.toUpperCase()})${newline}`;
+  const annotation = securityMode === 'full'
+    ? `@EnableAISecurity(mode = SecurityMode.FULL)${newline}`
+    : `@EnableAISecurity${newline}`;
   source = source.slice(0, refreshedSpringAnnotation.index) + annotation + source.slice(refreshedSpringAnnotation.index);
   await fs.writeFile(filePath, source);
   return { changed: true, filePath };
@@ -603,7 +504,6 @@ function maskSourceNonCode(source) {
 module.exports = {
   injectMavenDep,
   injectGradleDep,
-  injectDistributedDeps,
   injectSpringAiDeps,
   injectEnableAiSecurity,
   inspectAiDependencies,

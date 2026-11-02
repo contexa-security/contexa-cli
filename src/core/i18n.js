@@ -55,7 +55,11 @@ function formatError(error, fallbackCode = 'UNEXPECTED_ERROR') {
     const args = Array.isArray(error.messageArgs) ? error.messageArgs : [];
     return `${code} ${t(error.messageKey, ...args)}`;
   }
-  return `${code} ${t('common.unexpectedError')}`;
+  // Keep the underlying cause: a bare "operation failed" leaves the user nothing to act on.
+  const cause = error && error.message ? String(error.message).trim() : '';
+  return cause
+    ? `${code} ${t('common.unexpectedError')}\n    ${cause}`
+    : `${code} ${t('common.unexpectedError')}`;
 }
 
 module.exports = {

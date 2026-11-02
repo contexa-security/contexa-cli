@@ -58,114 +58,30 @@ jobs:
         run: |
           node -e "const m=require('./release-manifest.json'); const p=require('./package.json'); if (m.cliVersion !== p.version) throw new Error('manifest/package CLI version mismatch'); if (process.env.GITHUB_REF_TYPE === 'tag' && !/^v\d+\.\d+\.\d+$/.test(process.env.GITHUB_REF_NAME)) throw new Error('release tag must match vMAJOR.MINOR.PATCH'); if (process.env.GITHUB_REF_TYPE === 'tag' && m.releaseTag !== process.env.GITHUB_REF_NAME) throw new Error('manifest/tag mismatch'); if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(m.starter.version)) throw new Error('invalid starter version'); if (!m.signature.required || m.signature.algorithm !== 'RSA-3072-SHA256') throw new Error('signed release manifest is required'); if(m.source.repository!==process.env.GITHUB_REPOSITORY||m.source.commit!==process.env.GITHUB_SHA)throw new Error('source provenance mismatch')"
 
-      - name: Run Phase 5 focused regression tests
-        if: runner.os == 'Linux'
-        run: node --test test/phase5-contract.test.js test/preflight.test.js test/ollama.test.js
-
-      - name: Run Phase 5 project identity regression
-        if: runner.os == 'Linux'
-        run: node --test --test-name-pattern="S3:" test/sideeffect-zero.test.js
-
-      - name: Download the Phase 6 verified GeoLite2 fixture
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p phase6-evidence
-          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
-          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
-          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
-            "$geo_url" --output phase6-evidence/GeoLite2-City.mmdb
-          node -e "const c=require('crypto'),f=require('fs');const actual=c.createHash('sha256').update(f.readFileSync(process.argv[1])).digest('hex');if(actual!==process.argv[2])throw new Error('GeoLite2 checksum mismatch')" \
-            phase6-evidence/GeoLite2-City.mmdb "$geo_sha"
-
-      - name: Run restored init and reset lifecycle regressions
-        if: runner.os == 'Linux'
+      - name: Run the test suite
         shell: bash
         env:
-          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
-          CONTEXA_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
-        run: |
-          set -euo pipefail
-          node --test --test-name-pattern="Custom Merge and Standalone|public Quick standalone|Standalone prepared-directory allowance" test/init-selection-matrix.test.js
-          node --test --test-name-pattern="init provenance distinguishes" test/phase0-contract.test.js
-          node --test --test-name-pattern="Phase 2 actual init process|Phase 2 twenty different projects|Phase 2 INF01-INF08" test/phase2-init-acceptance.test.js
-          node --test --test-name-pattern="Phase 3 reset recovers" test/phase3-reset-acceptance.test.js
-          node --test --test-name-pattern="F1: malformed yml" test/stress.test.js
-
-      - name: Run Phase 6 state-transition acceptance
-        shell: bash
-        env:
-          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
-          CONTEXA_PHASE6_EVIDENCE_DIR: ${{ github.workspace }}/phase6-evidence/state-transitions
+          CONTEXA_TEST_EVIDENCE_DIR: ${{ github.workspace }}/test-evidence
         run: |
           set -o pipefail
-          node --test test/phase6-state-transitions.test.js 2>&1 | tee phase6-evidence/state-transitions.tap
+          mkdir -p test-evidence
+          node --test test/*.test.js 2>&1 | tee test-evidence/unit-${{ matrix.label }}.tap
 
-      - name: Publish Phase 6 failure detail
-        if: failure()
+      - name: Compile injected build models
+        if: runner.os == 'Linux'
         shell: bash
+        env:
+          CONTEXA_BUILD_MODEL_DIR: test-evidence/build-models
         run: |
-          node -e "const f=require('fs');const p='phase6-evidence/state-transitions.tap';const s=f.existsSync(p)?f.readFileSync(p,'utf8').slice(-12000):'TAP output is missing';const e=s.replace(/%/g,'%25').replace(/\r/g,'%0D').replace(/\n/g,'%0A');console.log('::error file=test/phase6-state-transitions.test.js,line=1,title=Phase 6 state transition failure::'+e)"
+          set -euo pipefail
+          mkdir -p "$CONTEXA_BUILD_MODEL_DIR"
+          node test/build-models.cjs
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: phase6-state-transition-evidence-${{ matrix.label }}
-          path: phase6-evidence/
-
-      - name: Validate Phase 2 interactive and build models
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          CONTEXA_TRANSCRIPT_DIR: phase2-evidence/interactive
-          CONTEXA_BUILD_MODEL_DIR: phase2-evidence/build-models
-          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
-        run: |
-          set -euo pipefail
-          mkdir -p "$CONTEXA_TRANSCRIPT_DIR" "$CONTEXA_BUILD_MODEL_DIR"
-          node test/interactive-defaults.cjs
-          node test/build-models.cjs
-
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
-        with:
-          name: phase2-acceptance-evidence
-          path: phase2-evidence/
-
-      - name: Validate Phase 3 reset ownership and recovery
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p phase3-evidence
-          node --test test/reset-phase3.test.js > phase3-evidence/reset-phase3.tap
-
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
-        with:
-          name: phase3-acceptance-evidence
-          path: phase3-evidence/
-
-      - name: Validate Phase 4 simulation isolation
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p phase4-evidence
-          geo_url="$(node -p "require('./release-manifest.json').resources.geoIp.url")"
-          geo_sha="$(node -p "require('./release-manifest.json').resources.geoIp.sha256")"
-          curl --fail --location --silent --show-error --retry 2 --max-time 60 \
-            "$geo_url" --output phase4-evidence/GeoLite2-City.mmdb
-          echo "$geo_sha  phase4-evidence/GeoLite2-City.mmdb" | sha256sum --check
-          CONTEXA_TEST_GEOLITE2_SOURCE_PATH="$PWD/phase4-evidence/GeoLite2-City.mmdb" \
-            node --test --test-name-pattern "normal and simulation command states coexist" \
-            test/phase0-contract.test.js > phase4-evidence/simulation-coexistence.tap
-
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Linux'
-        with:
-          name: phase4-acceptance-evidence
-          path: phase4-evidence/
+          name: test-evidence-${{ matrix.label }}
+          path: test-evidence/
 
       - name: Bundle
         run: npx esbuild src/index.js --bundle --platform=node --target=node18 --outfile=dist/bundle.js --format=cjs
@@ -191,17 +107,19 @@ jobs:
           npx postject dist\${{ matrix.output }} NODE_SEA_BLOB dist\sea-prep.blob `
             --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
 
-      - name: Run Phase 6 exact commands against the built binary
-        if: runner.os == 'Linux'
+      - name: Install and reset a fixture project with the built binary
+        if: runner.os != 'Windows'
         shell: bash
         env:
           CONTEXA_CLI_EXECUTABLE: ${{ github.workspace }}/dist/${{ matrix.output }}
-          CONTEXA_TEST_GEOLITE2_SOURCE_PATH: ${{ github.workspace }}/phase6-evidence/GeoLite2-City.mmdb
-          CONTEXA_TRANSCRIPT_DIR: ${{ github.workspace }}/phase6-evidence/interactive
-          CONTEXA_PHASE6_ACTUAL_DOCKER: '1'
-        run: |
-          set -o pipefail
-          node test/interactive-defaults.cjs 2>&1 | tee phase6-evidence/interactive-acceptance.log
+        run: node test/binary-smoke.cjs
+
+      - name: Install and reset a fixture project with the built binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CONTEXA_CLI_EXECUTABLE: ${{ github.workspace }}\dist\${{ matrix.output }}
+        run: node test/binary-smoke.cjs
 
       - name: Verify binary architecture and smoke (Linux/macOS)
         if: runner.os != 'Windows'

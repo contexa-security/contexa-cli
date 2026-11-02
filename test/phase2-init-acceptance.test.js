@@ -1,15 +1,28 @@
 'use strict';
 
+// Acceptance tests for `contexa init` as a process: locking, concurrency, termination at every
+// durable state, repetition, and unusual paths. The CLI runs with the test hooks from
+// test/harness.js (no Docker, build tool, Java or network).
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('fs-extra');
 const os = require('node:os');
 const path = require('node:path');
+const yaml = require('js-yaml');
 const { spawn } = require('node:child_process');
 
-const root = path.join(__dirname, '..');
-const cliPath = path.join(root, 'src', 'index.js');
+const {
+  ROOT,
+  createSandbox,
+  localStatePath,
+  cliEnv,
+  runCli,
+  createGradleProject,
+  snapshotDirectory,
+  starterCount,
+} = require('./harness');
 const releaseManifest = require('../release-manifest.json');
 const {
   INSTALL_MODES,
@@ -20,70 +33,33 @@ const {
   manifestPath,
   releaseInstallLock,
 } = require('../src/core/manifest');
-const { collectInitAnswers } = require('../src/core/init-input');
 
-function testEnvironment(extra = {}) {
-  const verifiedGeoIp = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
-  return {
-    ...process.env,
-    ...(verifiedGeoIp ? { CONTEXA_GEOLITE2_SOURCE_PATH: verifiedGeoIp } : {}),
-    ...extra,
-    CONTEXA_LANG: 'en',
-  };
-}
+const YML = path.join('src', 'main', 'resources', 'application.yml');
+const CONFIG = path.join('src', 'main', 'resources', 'config', 'application.yml');
+const MAIN_CLASS = path.join('src', 'main', 'java', 'example', 'SampleApplication.java');
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-async function createProject(parent, name) {
-  const project = path.join(parent, name);
-  await fs.ensureDir(path.join(project, 'src', 'main', 'resources'));
-  await fs.ensureDir(path.join(project, 'src', 'main', 'java', 'example'));
-  await fs.writeFile(path.join(project, 'settings.gradle'), `rootProject.name = '${name.replace(/[^a-zA-Z0-9-]/g, '-')}'\n`);
-  await fs.writeFile(path.join(project, 'build.gradle'),
-    "plugins { id 'org.springframework.boot' version '3.3.0' }\n" +
-    "dependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }\n");
-  await fs.writeFile(path.join(project, 'src', 'main', 'resources', 'application.yml'),
-    'server:\n  port: 9080\nspring:\n  datasource:\n    url: jdbc:postgresql://host-db:5432/host\n');
-  await fs.writeFile(path.join(project, 'src', 'main', 'java', 'example', 'SampleApplication.java'),
-    'package example;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n' +
-    '@SpringBootApplication\npublic class SampleApplication {}\n');
-  return project;
+async function sandboxFor(t, prefix) {
+  const sandbox = await createSandbox(prefix);
+  t.after(() => fs.remove(sandbox.root));
+  return sandbox;
 }
 
-function runInit(project, extra = [], extraEnvironment = {}) {
-  const safeArgs = [...extra];
-  if (!safeArgs.includes('--no-docker')) safeArgs.push('--no-docker');
-  if (!safeArgs.includes('--infra-dir')) {
-    safeArgs.push('--infra-dir', path.join(project, 'contexa-test-infra'));
-  }
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath,
-      [cliPath, 'init', '--yes', '--dir', project, ...safeArgs],
-      { cwd: root, env: testEnvironment(extraEnvironment), windowsHide: true });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => child.kill(), 20000);
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', error => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
-    });
-  });
+function runInit(project, sandbox, extra = [], overrides = {}) {
+  return runCli(['init', '--yes', '--dir', project, ...extra], { env: cliEnv(sandbox, overrides) });
 }
 
-function runInterruptedInit(project, targetState, signalPath) {
+// Starts init in a child process that stops for good right after the manifest reaches
+// `targetState`, and writes `signalPath` at that moment.
+function runInterruptedInit(project, sandbox, targetState, signalPath) {
   const script = [
     "'use strict';",
     "const fs = require('fs-extra');",
-    `const manifestPath = ${JSON.stringify(path.join(root, 'src/core/manifest.js'))};`,
-    `const initPath = ${JSON.stringify(path.join(root, 'src/core/init-application.js'))};`,
+    `const manifestPath = ${JSON.stringify(path.join(ROOT, 'src/core/manifest.js'))};`,
+    `const initPath = ${JSON.stringify(path.join(ROOT, 'src/core/init-application.js'))};`,
     'const project = process.argv[1];',
     'const targetState = process.argv[2];',
     'const signalPath = process.argv[3];',
@@ -108,18 +84,18 @@ function runInterruptedInit(project, targetState, signalPath) {
     '};',
     'require(manifestPath);',
     'const { executeInit } = require(initPath);',
-    "executeInit({ dir: project, yes: true, docker: false, infraDir: require('node:path').join(project, 'contexa-test-infra') })",
+    'executeInit({ dir: project, yes: true })',
     '  .then(() => process.exit(0))',
     '  .catch(error => { console.error(error.stack || error); process.exit(2); });',
   ].join('\n');
   return spawn(process.execPath, ['-e', script, project, targetState, signalPath], {
-    cwd: root,
-    env: testEnvironment(),
+    cwd: ROOT,
+    env: cliEnv(sandbox),
     windowsHide: true,
   });
 }
 
-async function awaitFile(filePath, timeoutMs = 10000) {
+async function awaitFile(filePath, timeoutMs = 30000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (await fs.pathExists(filePath)) return;
@@ -134,44 +110,14 @@ function awaitClose(child) {
     child.once('close', (code, signal) => resolve({ code, signal }));
   });
 }
-function starterCount(buildText) {
-  return (buildText.match(/ai\.ctxa:spring-boot-starter-contexa/g) || []).length;
-}
-function runInitWithoutFlags(project) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, 'init'], {
-      cwd: project,
-      env: testEnvironment(),
-      windowsHide: true,
-    });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => child.kill(), 20000);
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', error => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, signal, stdout, stderr });
-    });
-  });
-}
 
 test('Phase 2 no-op init refreshes release provenance without changing customer files', async t => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-provenance-'));
-  t.after(() => fs.remove(parent));
-  const project = await createProject(parent, 'provenance-refresh');
-  const initial = await runInit(project);
-  assert.equal(initial.code, 0, initial.stderr + initial.stdout);
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-provenance-');
+  const project = await createGradleProject(sandbox.root, 'provenance-refresh');
+  const initial = await runInit(project, sandbox);
+  assert.equal(initial.code, 0, initial.output);
 
-  const customerFiles = [
-    path.join(project, 'build.gradle'),
-    path.join(project, 'src', 'main', 'resources', 'application.yml'),
-    path.join(project, 'src', 'main', 'java', 'example', 'SampleApplication.java'),
-  ];
+  const customerFiles = ['build.gradle', YML, MAIN_CLASS, CONFIG].map(file => path.join(project, file));
   const before = new Map();
   for (const file of customerFiles) before.set(file, sha256(await fs.readFile(file)));
 
@@ -181,8 +127,9 @@ test('Phase 2 no-op init refreshes release provenance without changing customer 
   current.metadata.resourceDigest = calculateResourceDigest(current);
   await fs.writeJson(manifestPath(project, INSTALL_MODES.NORMAL), current, { spaces: 2 });
 
-  const repeated = await runInitWithoutFlags(project);
-  assert.equal(repeated.code, 0, repeated.stderr + repeated.stdout);
+  // Plain `contexa init` in the project folder, without flags (stdin is not a terminal here).
+  const repeated = await runCli(['init'], { cwd: project, env: cliEnv(sandbox) });
+  assert.equal(repeated.code, 0, repeated.output);
   for (const file of customerFiles) {
     assert.equal(sha256(await fs.readFile(file)), before.get(file), file);
   }
@@ -191,70 +138,30 @@ test('Phase 2 no-op init refreshes release provenance without changing customer 
   assert.equal(refreshed.metadata.starterVersion, releaseManifest.starter.version);
 });
 
-test('Phase 2 existing infra-dir option selects PostgreSQL-only infrastructure without changing quick init', async () => {
-  const answers = await collectInitAnswers(
-    { dir: process.cwd(), yes: true, docker: false, infraDir: path.join(process.cwd(), 'infra') },
-    { hasDocker: true, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false },
-    'phase2-project');
-  assert.equal(answers.setupMode, 'quick');
-  assert.equal(answers.infra, 'standalone');
-  assert.equal(answers.startDocker, false);
+test('Phase 2 malformed Gradle build fails without customer-file mutation', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-malformed-');
+  const project = await createGradleProject(sandbox.root, 'malformed-build');
+  const buildPath = path.join(project, 'build.gradle');
+  await fs.writeFile(buildPath, "plugins {\n  id 'org.springframework.boot'\n", 'utf8');
+  const before = await snapshotDirectory(project);
+  const result = await runInit(project, sandbox);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /INVALID_BUILD_FILE/);
+  assert.match(result.stderr, /Gradle script is malformed/);
+  assert.match(result.stderr, /Fix it and run contexa init again/);
+  assert.deepEqual(await snapshotDirectory(project), before);
+  assert.equal(await fs.pathExists(installLockPath(project)), false);
 });
 
-test('Phase 2 malformed Contexa YAML and malformed build fail without customer-file mutation', async t => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-malformed-'));
-  try {
-    await t.test('malformed Contexa YAML', async () => {
-      const project = await createProject(parent, 'malformed-yaml');
-      const buildPath = path.join(project, 'build.gradle');
-      const ymlPath = path.join(project, 'src/main/resources/application.yml');
-      const overlayPath = path.join(project, 'src/main/resources/application-contexa.yml');
-      await fs.writeFile(overlayPath, 'contexa:\n  security: [\n', 'utf8');
-      const beforeBuild = await fs.readFile(buildPath);
-      const beforeYml = await fs.readFile(ymlPath);
-      const beforeOverlay = await fs.readFile(overlayPath);
-      const result = await runInit(project,
-        ['--distributed', '--no-docker', '--infra-dir', path.join(project, 'infra')]);
-      const output = `${result.stdout}\n${result.stderr}`;
-      assert.notEqual(result.code, 0);
-      assert.match(output, /CONTEXA_OVERLAY_USER_OWNED/);
-      assert.match(output, /will not overwrite/);
-      assert.deepEqual(await fs.readFile(buildPath), beforeBuild);
-      assert.deepEqual(await fs.readFile(ymlPath), beforeYml);
-      assert.deepEqual(await fs.readFile(overlayPath), beforeOverlay);
-      assert.equal(await fs.pathExists(installLockPath(project)), false);
-    });
-
-    await t.test('malformed Gradle build', async () => {
-      const project = await createProject(parent, 'malformed-build');
-      const buildPath = path.join(project, 'build.gradle');
-      const ymlPath = path.join(project, 'src/main/resources/application.yml');
-      await fs.writeFile(buildPath, "plugins {\n  id 'org.springframework.boot'\n", 'utf8');
-      const beforeBuild = await fs.readFile(buildPath);
-      const beforeYml = await fs.readFile(ymlPath);
-      const result = await runInit(project);
-      const output = `${result.stdout}\n${result.stderr}`;
-      assert.notEqual(result.code, 0);
-      assert.match(output, /INVALID_BUILD_FILE/);
-      assert.match(output, /Fix the build syntax/);
-      assert.deepEqual(await fs.readFile(buildPath), beforeBuild);
-      assert.deepEqual(await fs.readFile(ymlPath), beforeYml);
-      assert.equal(await fs.pathExists(installLockPath(project)), false);
-    });
-  } finally {
-    await fs.remove(parent);
-  }
-});
-test('Phase 2 lock rejects a live owner, recovers a stale owner, and isolates simulation', async () => {
+test('Phase 2 lock rejects a live owner and recovers a stale owner', async () => {
   const project = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-lock-'));
   try {
     const normal = await acquireInstallLock(project, INSTALL_MODES.NORMAL);
     await assert.rejects(
-      acquireInstallLock(project, INSTALL_MODES.NORMAL),
-      error => error.code === 'INIT_ALREADY_RUNNING');
-    const simulation = await acquireInstallLock(project, INSTALL_MODES.SIMULATION);
-    await releaseInstallLock(simulation);
+      acquireInstallLock(project, INSTALL_MODES.NORMAL, 'reset'),
+      error => error.code === 'INIT_ALREADY_RUNNING' && error.messageKey === 'init.error.alreadyRunning');
     await releaseInstallLock(normal);
+    assert.equal(await fs.pathExists(installLockPath(project)), false);
 
     await fs.ensureDir(path.dirname(installLockPath(project)));
     await fs.writeJson(installLockPath(project), {
@@ -270,206 +177,201 @@ test('Phase 2 lock rejects a live owner, recovers a stale owner, and isolates si
   }
 });
 
-test('Phase 2 same-project ten-way init is safely rejected and retry succeeds', async () => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-same-'));
-  const project = await createProject(parent, 'same-project');
-  try {
-    const originalBuild = await fs.readFile(path.join(project, 'build.gradle'));
-    const originalYml = await fs.readFile(path.join(project, 'src/main/resources/application.yml'));
-    const held = await acquireInstallLock(project, INSTALL_MODES.NORMAL);
-    const rejected = await Promise.all(Array.from({ length: 10 }, () => runInit(project)));
+test('Phase 2 init is rejected ten times while another process holds the lock, then retry succeeds', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-same-');
+  const project = await createGradleProject(sandbox.root, 'same-project');
+  const before = await snapshotDirectory(project);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    // Re-taken before every attempt: a rejected init currently removes the owner's lock file
+    // (see the TODO test below).
+    const held = await acquireInstallLock(project, INSTALL_MODES.NORMAL, 'test');
+    const rejected = await runInit(project, sandbox);
     await releaseInstallLock(held);
-    assert.ok(rejected.every(result => result.code !== 0));
-    assert.ok(rejected.every(result =>
-      `${result.stdout}\n${result.stderr}`.includes('INIT_ALREADY_RUNNING')));
-    assert.deepEqual(await fs.readFile(path.join(project, 'build.gradle')), originalBuild);
-    assert.deepEqual(await fs.readFile(path.join(project, 'src/main/resources/application.yml')), originalYml);
+    assert.notEqual(rejected.code, 0, `attempt ${attempt + 1}`);
+    assert.match(rejected.stderr, /INIT_ALREADY_RUNNING/);
+    assert.deepEqual(await snapshotDirectory(project, { exclude: ['contexa'] }),
+      before.filter(entry => !entry.path.startsWith('contexa')));
+  }
 
-    const retry = await runInit(project);
-    assert.equal(retry.code, 0, `${retry.stdout}\n${retry.stderr}`);
-    assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
-    assert.deepEqual(await fs.readFile(path.join(project, 'src/main/resources/application.yml')), originalYml);
+  const retry = await runInit(project, sandbox);
+  assert.equal(retry.code, 0, retry.output);
+  assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
+  assert.equal(await fs.readFile(path.join(project, YML), 'utf8'), 'server:\n  port: 9080\nhost-owned:\n  marker: keep\n');
+  assert.equal(await fs.pathExists(installLockPath(project)), false);
+});
+
+test('Phase 2 a rejected init leaves the running owner\'s lock in place', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-lock-kept-');
+  const project = await createGradleProject(sandbox.root, 'lock-kept');
+  const held = await acquireInstallLock(project, INSTALL_MODES.NORMAL, 'test');
+  try {
+    const rejected = await runInit(project, sandbox);
+    assert.match(rejected.stderr, /INIT_ALREADY_RUNNING/);
+    assert.equal(await fs.pathExists(held.filePath), true, 'the owner\'s lock file survives');
+    const third = await runInit(project, sandbox);
+    assert.notEqual(third.code, 0, 'a further init is still rejected');
   } finally {
-    await fs.remove(parent);
+    await releaseInstallLock(held);
   }
 });
 
-test('Phase 2 actual init process recovers after termination at every durable state', async t => {
+test('Phase 2 actual init process recovers after termination at every durable state', { timeout: 180000 }, async t => {
   for (const state of ['PREPARED', 'APPLIED', 'COMMITTED']) {
     await t.test(state, async () => {
-      const parent = await fs.mkdtemp(path.join(os.tmpdir(), `ctxa-phase2-kill-${state}-`));
-      const project = await createProject(parent, `kill-${state.toLowerCase()}`);
-      const signalPath = path.join(parent, `${state}.signal`);
-      const ymlPath = path.join(project, 'src/main/resources/application.yml');
+      const sandbox = await createSandbox(`ctxa-phase2-kill-${state.toLowerCase()}-`);
+      const project = await createGradleProject(sandbox.root, `kill-${state.toLowerCase()}`);
+      const signalPath = path.join(sandbox.root, `${state}.signal`);
+      const ymlPath = path.join(project, YML);
       const originalYml = await fs.readFile(ymlPath);
       try {
-        const child = runInterruptedInit(project, state, signalPath);
+        const child = runInterruptedInit(project, sandbox, state, signalPath);
         child.stdout.resume();
         child.stderr.resume();
-        await awaitFile(signalPath);
         const closed = awaitClose(child);
+        await awaitFile(signalPath);
         child.kill('SIGKILL');
         await closed;
 
-        const retry = await runInit(project);
-        assert.equal(retry.code, 0, `${state}: ${retry.stdout}\n${retry.stderr}`);
+        const retry = await runInit(project, sandbox);
+        assert.equal(retry.code, 0, `${state}: ${retry.output}`);
         assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
+        assert.equal(((await fs.readFile(path.join(project, MAIN_CLASS), 'utf8')).match(/@EnableAISecurity/g) || []).length, 1);
         assert.deepEqual(await fs.readFile(ymlPath), originalYml);
         assert.equal(await fs.pathExists(installLockPath(project)), false);
         assert.equal((await loadManifest(project)).transaction.status, 'COMMITTED');
+        assert.ok(await fs.pathExists(path.join(project, 'contexa', '.gitignore')));
+
+        const removed = await runCli(['reset', '--yes', '--dir', project], { env: cliEnv(sandbox) });
+        assert.equal(removed.code, 0, `${state} reset: ${removed.output}`);
+        assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 0);
+        assert.equal(await fs.pathExists(path.join(project, 'contexa')), false);
       } finally {
-        await fs.remove(parent);
+        await fs.remove(sandbox.root);
       }
     });
   }
 });
-test('Phase 2 twenty different projects initialize concurrently without cross-project damage', async () => {
+
+test('Phase 2 twenty different projects initialize concurrently without cross-project damage', { timeout: 180000 }, async () => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-many-'));
   try {
-    const projects = await Promise.all(Array.from({ length: 20 }, (_, index) =>
-      createProject(parent, `project-${index}`)));
-    const results = await Promise.all(projects.map(project => runInit(project)));
+    // One computer-wide state per project; the shared state file is tested on its own below.
+    const sandboxes = await Promise.all(Array.from({ length: 20 }, () => createSandbox('ctxa-phase2-many-home-')));
+    const projects = await Promise.all(sandboxes.map((sandbox, index) =>
+      createGradleProject(parent, `project-${index}`)));
+    const results = await Promise.all(projects.map((project, index) => runInit(project, sandboxes[index])));
     results.forEach((result, index) =>
-      assert.equal(result.code, 0, `project ${index}: ${result.stdout}\n${result.stderr}`));
-    for (const project of projects) {
+      assert.equal(result.code, 0, `project ${index}: ${result.output}`));
+    for (const [index, project] of projects.entries()) {
       assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
-      assert.match(await fs.readFile(path.join(project, 'src/main/resources/application.yml'), 'utf8'),
-        /jdbc:postgresql:\/\/host-db:5432\/host/);
+      assert.equal(await fs.readFile(path.join(project, YML), 'utf8'), 'server:\n  port: 9080\nhost-owned:\n  marker: keep\n');
+      const settings = yaml.load(await fs.readFile(path.join(project, CONFIG), 'utf8'));
+      assert.equal(settings.contexa.datasource.url, `\${CONTEXA_DB_URL:jdbc:postgresql://127.0.0.1:55432/contexa_project_${index}}`);
       assert.equal(await fs.pathExists(installLockPath(project)), false);
     }
+    await Promise.all(sandboxes.map(sandbox => fs.remove(sandbox.root)));
   } finally {
     await fs.remove(parent);
   }
 });
 
-test('Phase 2 init remains idempotent for 100 sequential runs', async () => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-repeat-'));
-  const project = await createProject(parent, 'repeat-project');
-  try {
-    const first = await runInit(project);
-    assert.equal(first.code, 0, `${first.stdout}\n${first.stderr}`);
-    const buildPath = path.join(project, 'build.gradle');
-    const ymlPath = path.join(project, 'src/main/resources/application.yml');
-    const expectedBuild = await fs.readFile(buildPath);
-    const expectedYml = await fs.readFile(ymlPath);
-    const expectedDigest = (await loadManifest(project)).metadata.resourceDigest;
-    for (let index = 0; index < 99; index += 1) {
-      const result = await runInit(project);
-      assert.equal(result.code, 0, `run ${index + 2}: ${result.stdout}\n${result.stderr}`);
-    }
-    assert.deepEqual(await fs.readFile(buildPath), expectedBuild);
-    assert.deepEqual(await fs.readFile(ymlPath), expectedYml);
-    assert.equal(starterCount(expectedBuild.toString('utf8')), 1);
-    assert.equal((await loadManifest(project)).metadata.resourceDigest, expectedDigest);
-  } finally {
-    await fs.remove(parent);
-  }
+test('Phase 2 concurrent inits on one computer all succeed and are all registered', { timeout: 180000 }, async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-shared-');
+  const projects = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+    createGradleProject(sandbox.root, `shared-${index}`)));
+  const results = await Promise.all(projects.map(project => runInit(project, sandbox)));
+  assert.deepEqual(results.map(result => result.code), projects.map(() => 0),
+    results.filter(result => result.code !== 0).map(result => result.stderr.trim().split('\n').pop()).join('\n'));
+  const state = await fs.readJson(localStatePath(sandbox));
+  assert.equal(Object.keys(state.projects).length, projects.length);
 });
 
-test('Phase 2 init supports spaces, Korean, and a long project path', async () => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-path-'));
-  const project = await createProject(parent,
-    `공백 한글 ${'long-segment-'.repeat(8)}`);
-  try {
-    const result = await runInit(project);
-    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
-    const build = await fs.readFile(path.join(project, 'build.gradle'), 'utf8');
-    assert.equal(starterCount(build), 1);
-    assert.equal(sha256(await fs.readFile(path.join(project, 'src/main/resources/application.yml'))).length, 64);
-  } finally {
-    await fs.remove(parent);
+test('Phase 2 init remains idempotent for 100 sequential runs', { timeout: 600000 }, async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-repeat-');
+  const project = await createGradleProject(sandbox.root, 'repeat-project');
+  const first = await runInit(project, sandbox);
+  assert.equal(first.code, 0, first.output);
+  const expected = await snapshotDirectory(project, { exclude: ['contexa'] });
+  const firstManifest = await loadManifest(project);
+  for (let index = 0; index < 99; index += 1) {
+    const result = await runInit(project, sandbox);
+    assert.equal(result.code, 0, `run ${index + 2}: ${result.output}`);
   }
+  assert.deepEqual(await snapshotDirectory(project, { exclude: ['contexa'] }), expected);
+  assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
+  const lastManifest = await loadManifest(project);
+  assert.equal(lastManifest.transaction.status, 'COMMITTED');
+  assert.equal(lastManifest.metadata.installationId, firstManifest.metadata.installationId);
+  assert.deepEqual(lastManifest.files.map(file => [file.relativePath, file.originalChecksum]).sort(),
+    firstManifest.files.map(file => [file.relativePath, file.originalChecksum]).sort());
+  const transactions = path.join(project, 'contexa', '.cli', 'bak', '__transactions__');
+  const leftovers = (await fs.pathExists(transactions)) ? await fs.readdir(transactions) : [];
+  assert.ok(leftovers.length <= 1, `committed transaction backups are not piling up: ${leftovers.length}`);
+  const state = await fs.readJson(localStatePath(sandbox));
+  assert.equal(Object.keys(state.projects).length, 1);
 });
-test('Phase 2 INF01-INF08 profiles remain isolated across five init repetitions', {
-  timeout: 180000,
-}, async t => {
-  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase2-infra-matrix-'));
+
+test('Phase 2 init and reset support spaces, Korean, and a long project path', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-path-');
+  const project = await createGradleProject(sandbox.root, `공백 한글 ${'long-segment-'.repeat(8)}`,
+    { projectName: 'path-test' });
+  const before = await snapshotDirectory(project);
+  const result = await runInit(project, sandbox);
+  assert.equal(result.code, 0, result.output);
+  assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
+  assert.ok(await fs.pathExists(path.join(project, CONFIG)));
+  const state = await fs.readJson(localStatePath(sandbox));
+  assert.deepEqual(Object.values(state.projects).map(item => item.path), [path.resolve(project)]);
+
+  const removed = await runCli(['reset', '--yes', '--dir', project], { env: cliEnv(sandbox) });
+  assert.equal(removed.code, 0, removed.output);
+  assert.deepEqual(await snapshotDirectory(project), before);
+});
+
+test('Phase 2 host database profiles stay untouched across five init repetitions', { timeout: 180000 }, async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-phase2-profiles-');
   const profiles = [
-    { id: 'INF01', local: 'standalone', yml: 'host-owned:\n  marker: inf01\n' },
-    { id: 'INF02', yml: 'contexa:\n  datasource:\n    url: jdbc:postgresql://external-pg:5432/contexa\n' },
-    { id: 'INF03', yml: 'spring:\n  datasource:\n    url: jdbc:postgresql://host-db:5432/host\ncontexa:\n  datasource:\n    url: jdbc:postgresql://contexa-db:5432/contexa\n' },
-    { id: 'INF04', yml: 'spring:\n  datasource:\n    url: jdbc:postgresql://shared-db:5432/host\ncontexa:\n  datasource:\n    url: jdbc:postgresql://shared-db:5432/contexa\n' },
-    { id: 'INF05', local: 'distributed', yml: 'host-owned:\n  marker: inf05\n' },
-    { id: 'INF06', yml: 'contexa:\n  infrastructure:\n    mode: DISTRIBUTED\n  datasource:\n    url: jdbc:postgresql://managed-pg:5432/contexa\nspring:\n  data:\n    redis:\n      host: managed-redis\n  kafka:\n    bootstrap-servers: managed-kafka:9092\n' },
-    { id: 'INF07', yml: 'contexa:\n  datasource:\n    url: jdbc:postgresql://external-pg:5432/contexa\nspring:\n  data:\n    redis:\n      host: local-redis\n  kafka:\n    bootstrap-servers: local-kafka:9092\n' },
+    {
+      id: 'external-contexa-db',
+      yml: 'contexa:\n  datasource:\n    url: jdbc:postgresql://external-pg:5432/contexa\n',
+      expect: settings => {
+        assert.equal(settings.contexa.datasource.url, undefined, 'the host URL is not overridden');
+        assert.equal(settings.contexa.datasource.isolation['contexa-owned-application'], true);
+      },
+    },
+    {
+      id: 'separate-host-and-contexa-db',
+      yml: 'spring:\n  datasource:\n    url: jdbc:postgresql://host-db:5432/host\ncontexa:\n  datasource:\n    url: jdbc:postgresql://contexa-db:5432/contexa\n',
+      expect: settings => {
+        assert.equal(settings.contexa.datasource.url, undefined);
+        assert.equal(settings.contexa.datasource.isolation['contexa-owned-application'], false);
+      },
+    },
+    {
+      id: 'host-db-only',
+      yml: 'spring:\n  datasource:\n    url: jdbc:postgresql://shared-db:5432/host\n',
+      expect: settings => {
+        assert.match(settings.contexa.datasource.url, /^\$\{CONTEXA_DB_URL:jdbc:postgresql:\/\/127\.0\.0\.1:55432\/contexa_/);
+        assert.equal(settings.contexa.datasource.isolation['contexa-owned-application'], false);
+      },
+    },
   ];
-  try {
-    for (const profile of profiles) {
-      await t.test(profile.id, async () => {
-        const project = await createProject(parent, profile.id.toLowerCase());
-        const ymlPath = path.join(project, 'src/main/resources/application.yml');
-        await fs.writeFile(ymlPath, profile.yml, 'utf8');
-        const originalYml = await fs.readFile(ymlPath);
-        const infraDir = path.join(project, 'owned-infra');
-        const args = profile.local === 'distributed'
-          ? ['--distributed', '--no-docker', '--infra-dir', infraDir]
-          : profile.local === 'standalone'
-            ? ['--no-docker', '--infra-dir', infraDir]
-            : [];
-        let stableBuild = null;
-        for (let repeat = 0; repeat < 5; repeat += 1) {
-          const result = await runInit(project, args);
-          assert.equal(result.code, 0,
-            `${profile.id} repeat ${repeat + 1}: ${result.stdout}\n${result.stderr}`);
-          const currentBuild = await fs.readFile(path.join(project, 'build.gradle'));
-          if (stableBuild) assert.deepEqual(currentBuild, stableBuild);
-          stableBuild = currentBuild;
-          assert.deepEqual(await fs.readFile(ymlPath), originalYml);
-          assert.equal(starterCount(currentBuild.toString('utf8')), 1);
-        }
-        if (profile.local) {
-          const compose = await fs.readFile(path.join(infraDir, 'docker-compose.yml'), 'utf8');
-          assert.match(compose, /^\s*postgres:/m);
-          if (profile.local === 'standalone') {
-            assert.doesNotMatch(compose, /^\s*redis:/m);
-            assert.equal(await fs.pathExists(
-              path.join(project, 'src/main/resources/application-contexa.yml')), true);
-          } else {
-            assert.match(compose, /^\s*redis:/m);
-            assert.match(compose, /^\s*kafka:/m);
-            assert.match(compose, /^\s*zookeeper:/m);
-            const overlay = await fs.readFile(
-              path.join(project, 'src/main/resources/application-contexa.yml'), 'utf8');
-            assert.match(overlay, /^\s*mode:\s*DISTRIBUTED\s*$/m);
-            assert.doesNotMatch(overlay, /^server:/m);
-            assert.doesNotMatch(overlay, /^security:/m);
-          }
-        }
-      });
-    }
-
-    await t.test('INF08', async () => {
-      const geoIp = process.env.CONTEXA_TEST_GEOLITE2_SOURCE_PATH;
-      assert.ok(geoIp && await fs.pathExists(geoIp),
-        'CONTEXA_TEST_GEOLITE2_SOURCE_PATH must reference the release-verified artifact');
-      const project = await createProject(parent, 'inf08');
-      const ymlPath = path.join(project, 'src/main/resources/application.yml');
+  for (const profile of profiles) {
+    await t.test(profile.id, async () => {
+      const project = await createGradleProject(sandbox.root, profile.id, { yml: profile.yml });
+      const ymlPath = path.join(project, YML);
       const originalYml = await fs.readFile(ymlPath);
-      const normal = await runInit(project);
-      assert.equal(normal.code, 0, `${normal.stdout}\n${normal.stderr}`);
-      const simulationArgs = [
-        '--simulate', '--no-docker', '--infra-dir', path.join(project, 'simulation-infra'),
-      ];
-      const environment = { CONTEXA_GEOLITE2_SOURCE_PATH: geoIp };
+      let stable = null;
       for (let repeat = 0; repeat < 5; repeat += 1) {
-        const [normalResult, simulationResult] = await Promise.all([
-          runInit(project),
-          runInit(project, simulationArgs, environment),
-        ]);
-        assert.equal(normalResult.code, 0,
-          `INF08 normal repeat ${repeat + 1}: ${normalResult.stdout}\n${normalResult.stderr}`);
-        assert.equal(simulationResult.code, 0,
-          `INF08 simulation repeat ${repeat + 1}: ${simulationResult.stdout}\n${simulationResult.stderr}`);
+        const result = await runInit(project, sandbox);
+        assert.equal(result.code, 0, `${profile.id} repeat ${repeat + 1}: ${result.output}`);
+        const current = await snapshotDirectory(project, { exclude: ['contexa'] });
+        if (stable) assert.deepEqual(current, stable);
+        stable = current;
+        assert.deepEqual(await fs.readFile(ymlPath), originalYml);
+        assert.equal(starterCount(await fs.readFile(path.join(project, 'build.gradle'), 'utf8')), 1);
       }
-      assert.deepEqual(await fs.readFile(ymlPath), originalYml);
-      assert.equal(await fs.pathExists(path.join(project, 'contexa', 'manifest.json')), true);
-      assert.equal(await fs.pathExists(
-        path.join(project, 'contexa', 'simulation', 'manifest.json')), true);
-      assert.equal(await fs.pathExists(installLockPath(project)), false);
-      assert.equal(await fs.pathExists(
-        installLockPath(project, INSTALL_MODES.SIMULATION)), false);
+      profile.expect(yaml.load(await fs.readFile(path.join(project, CONFIG), 'utf8')));
     });
-  } finally {
-    await fs.remove(parent);
   }
 });

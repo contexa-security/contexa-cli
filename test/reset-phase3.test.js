@@ -6,7 +6,6 @@ const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
 const yaml = require('js-yaml');
-const { spawnSync } = require('child_process');
 const {
   INSTALL_MODES,
   MANIFEST_VERSION,
@@ -24,8 +23,7 @@ const {
   saveManifest,
   sha256FileSync,
 } = require('../src/core/manifest');
-const { inspectMode } = require('../src/core/installation-state');
-const { assertSafeInfraDir, canonicalBoundaryPath } = require('../src/core/project');
+const { canonicalBoundaryPath } = require('../src/core/project');
 const {
   buildDockerResourceContract,
   inverseTextMerge,
@@ -34,7 +32,17 @@ const {
   dependencyProvenanceMatches,
   yamlManagedPathMerge,
 } = require('../src/core/reset-service');
-const { injectDistributedDeps } = require('../src/core/injector/build');
+const { injectGradleDep, injectMavenDep, injectSpringAiDeps } = require('../src/core/injector/build');
+const { createSandbox, cliEnv, runCliSync, resetResult } = require('./harness');
+
+// CLI runs get a sandboxed PC-wide state, fake API keys and English messages (test/harness.js).
+let cliSandbox;
+test.before(async () => { cliSandbox = await createSandbox('ctxa-phase3-reset-cli-'); });
+test.after(() => fs.remove(cliSandbox.root));
+
+function runReset(project, extra = []) {
+  return runCliSync(['reset', '--yes', ...extra, '--dir', project], { env: cliEnv(cliSandbox) });
+}
 
 test('canonical boundary identity uses native realpath and preserves missing suffixes', async () => {
   const project = await tempProject();
@@ -52,6 +60,7 @@ test('canonical boundary identity uses native realpath and preserves missing suf
 async function tempProject() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-phase3-reset-'));
 }
+
 test('new installs isolate CLI backups and reset preserves a pre-existing contexa/bak tree', async () => {
   const project = await tempProject();
   try {
@@ -143,8 +152,6 @@ test('reset keeps the build file and ownership metadata when canonical provenanc
   }
 });
 
-const cliPath = path.resolve(__dirname, '../src/index.js');
-
 function provenLegacyMetadata(project, extra = {}) {
   return {
     mode: INSTALL_MODES.NORMAL,
@@ -157,65 +164,54 @@ function provenLegacyMetadata(project, extra = {}) {
   };
 }
 
-test('manifest v4 records distinct deterministic resource digests for normal and simulation', async () => {
+test('manifest v4 records a deterministic resource digest and distinct installations', async () => {
   const project = await tempProject();
+  const other = await tempProject();
   try {
-    const normalInfra = path.join(project, 'contexa', 'normal-infra');
-    const simulationInfra = path.join(project, 'contexa', 'simulation-infra');
-    await saveManifest(project, {
-      metadata: {
-        mode: INSTALL_MODES.NORMAL,
-        infraDir: normalInfra,
-        dockerResources: { projectName: 'contexa', resources: [] },
-      },
-      files: [],
-    }, INSTALL_MODES.NORMAL);
-    await saveManifest(project, {
-      metadata: {
-        mode: INSTALL_MODES.SIMULATION,
-        infraDir: simulationInfra,
-        dockerResources: { projectName: 'ctxa-sim', resources: [] },
-      },
-      files: [],
-    }, INSTALL_MODES.SIMULATION);
-
+    for (const dir of [project, other]) {
+      await saveManifest(dir, {
+        metadata: { mode: INSTALL_MODES.NORMAL, projectName: path.basename(dir), infra: 'skip' },
+        files: [],
+      }, INSTALL_MODES.NORMAL);
+    }
     const normal = await loadManifest(project, INSTALL_MODES.NORMAL);
-    const simulation = await loadManifest(project, INSTALL_MODES.SIMULATION);
+    const second = await loadManifest(other, INSTALL_MODES.NORMAL);
     assert.equal(normal.version, MANIFEST_VERSION);
-    assert.equal(simulation.version, MANIFEST_VERSION);
     assert.equal(normal.metadata.resourceDigestVersion, RESOURCE_DIGEST_VERSION);
-    assert.equal(simulation.metadata.resourceDigestVersion, RESOURCE_DIGEST_VERSION);
     assert.match(normal.metadata.resourceDigest, /^[a-f0-9]{64}$/);
-    assert.match(simulation.metadata.resourceDigest, /^[a-f0-9]{64}$/);
-    assert.notEqual(normal.metadata.installationId, simulation.metadata.installationId);
-    assert.notEqual(normal.metadata.resourceDigest, simulation.metadata.resourceDigest);
+    assert.match(second.metadata.resourceDigest, /^[a-f0-9]{64}$/);
+    assert.notEqual(normal.metadata.installationId, second.metadata.installationId);
+    assert.notEqual(normal.metadata.resourceDigest, second.metadata.resourceDigest);
 
     const stableDigest = normal.metadata.resourceDigest;
     await saveManifest(project, normal, INSTALL_MODES.NORMAL);
     assert.equal((await loadManifest(project, INSTALL_MODES.NORMAL)).metadata.resourceDigest, stableDigest);
   } finally {
     await fs.remove(project);
+    await fs.remove(other);
   }
 });
 
-test('manifest digest tampering is rejected without rewriting the manifest and status names the conflict', async () => {
+test('manifest digest tampering is rejected without rewriting the manifest and reset reports a conflict', async () => {
   const project = await tempProject();
   try {
     await saveManifest(project, {
-      metadata: { mode: INSTALL_MODES.NORMAL, infraDir: path.join(project, 'contexa', 'infra') },
+      metadata: { mode: INSTALL_MODES.NORMAL, projectName: 'tampered', infra: 'skip' },
       files: [],
     }, INSTALL_MODES.NORMAL);
     const target = manifestPath(project, INSTALL_MODES.NORMAL);
     const tampered = await fs.readJson(target);
-    tampered.metadata.infraDir = path.join(project, 'changed-without-digest-update');
+    tampered.metadata.cliVersion = '9.9.9-changed-without-digest-update';
     await fs.writeJson(target, tampered, { spaces: 2 });
     const exactTamperedBytes = await fs.readFile(target);
 
     await assert.rejects(loadManifest(project, INSTALL_MODES.NORMAL), /resource digest mismatch/);
     assert.deepEqual(await fs.readFile(target), exactTamperedBytes);
-    const status = await inspectMode(project, INSTALL_MODES.NORMAL);
-    assert.equal(status.status, 'CONFLICT');
-    assert.equal(status.conflictType, 'MANIFEST_DIGEST_CONFLICT');
+    const result = runReset(project);
+    assert.notEqual(result.code, 0);
+    assert.equal(resetResult(result.stdout).result, 'CONFLICT');
+    assert.match(result.stderr, /resource digest mismatch/);
+    assert.deepEqual(await fs.readFile(target), exactTamperedBytes);
   } finally {
     await fs.remove(project);
   }
@@ -265,55 +261,14 @@ test('only ownership-proven v3 manifests migrate to v4 on the next normal save',
   }
 });
 
-test('infra boundary rejects parent traversal, outside roots, symlink escape, and foreign volume before writes', async t => {
-  const project = await tempProject();
-  const outside = await tempProject();
-  try {
-    const allowed = path.join(project, 'contexa', 'infra');
-    assert.equal(await assertSafeInfraDir(project, allowed), await canonicalBoundaryPath(allowed));
-
-    const traversalTarget = path.join(project, 'escaped');
-    await assert.rejects(
-      assertSafeInfraDir(project, traversalTarget, 'contexa/../escaped'),
-      /parent traversal/);
-    await assert.rejects(assertSafeInfraDir(project, outside), /outside Contexa-owned roots/);
-    assert.equal(await fs.pathExists(path.join(traversalTarget, 'docker-compose.yml')), false);
-    assert.equal(await fs.pathExists(path.join(outside, 'docker-compose.yml')), false);
-
-    if (process.platform === 'win32') {
-      const currentDrive = path.parse(project).root.slice(0, 1).toUpperCase();
-      const foreignDrive = currentDrive === 'Z' ? 'Y' : 'Z';
-      await assert.rejects(
-        assertSafeInfraDir(project, `${foreignDrive}:\\contexa-infra`),
-        /changes drive or UNC root/);
-      await assert.rejects(
-        assertSafeInfraDir(project, '\\\\ctxa-invalid-host\\share\\infra'),
-        /changes drive or UNC root/);
-    }
-
-    const linkPath = path.join(project, 'infra-link');
-    try {
-      await fs.symlink(outside, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
-      await assert.rejects(assertSafeInfraDir(project, linkPath), /outside Contexa-owned roots/);
-      assert.equal(await fs.pathExists(path.join(outside, 'docker-compose.yml')), false);
-    } catch (error) {
-      if (error.code === 'EPERM' || error.code === 'EACCES') t.diagnostic('symlink fixture unavailable');
-      else throw error;
-    }
-  } finally {
-    await fs.remove(project);
-    await fs.remove(outside);
-  }
-});
-
 function labelsForResource(contract, type, name, base) {
   if (type === 'container') {
-    const service = ['postgres', 'ollama', 'redis', 'zookeeper', 'kafka']
+    const service = ['postgres', 'ollama']
       .find(candidate => name === `${contract.projectName}-${candidate}`);
     return { ...base, 'com.docker.compose.service': service };
   }
   if (type === 'volume') {
-    const volume = ['pgdata', 'ollama-data', 'redis-data', 'zookeeper-data', 'zookeeper-log', 'kafka-data']
+    const volume = ['pgdata', 'ollama-data']
       .find(candidate => name === `${contract.projectName}_${candidate}`);
     return { ...base, 'com.docker.compose.volume': volume };
   }
@@ -670,7 +625,7 @@ test('Docker cleanup removes only exact contract resources after labels and abse
     const composePath = path.join(infraDir, 'docker-compose.yml');
     await fs.writeFile(composePath, 'services: {}\n');
     const contract = buildDockerResourceContract('phase3', {
-      infra: 'distributed', includeOllama: true, mode: 'normal', installationId: 'phase3-installation',
+      infra: 'standalone', includeOllama: true, mode: 'normal', installationId: 'phase3-installation',
     });
     const labels = {
       'io.ctxa.owner': 'contexa-cli',
@@ -720,107 +675,6 @@ test('Docker cleanup removes only exact contract resources after labels and abse
   }
 });
 
-test('reset rejects an arbitrary --infra-dir before Docker or directory changes', async () => {
-  const project = await tempProject();
-  const ownedInfra = await tempProject();
-  const arbitrary = await tempProject();
-  try {
-    const sentinel = path.join(arbitrary, 'customer.txt');
-    await fs.writeFile(sentinel, 'customer');
-    await saveManifest(project, {
-      metadata: {
-        mode: 'normal', canonicalProjectPath: project, installationId: 'phase3-installation',
-        projectName: 'phase3', infra: 'standalone', infraDir: ownedInfra,
-        dockerResources: buildDockerResourceContract('phase3', {
-          infra: 'standalone', mode: 'normal', installationId: 'phase3-installation',
-        }),
-      },
-      files: [],
-      transaction: null,
-    });
-    const result = spawnSync(process.execPath, [
-      cliPath, 'reset', '--yes', '--infra', '--dir', project, '--infra-dir', arbitrary,
-    ], { encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /--infra-dir does not match/);
-    assert.equal(await fs.readFile(sentinel, 'utf8'), 'customer');
-    assert.equal(await fs.pathExists(manifestPath(project)), true);
-  } finally {
-    await fs.remove(project);
-    await fs.remove(ownedInfra);
-    await fs.remove(arbitrary);
-  }
-});
-
-test('normal reset leaves the simulation ownership manifest byte-for-byte unchanged', async () => {
-  const project = await tempProject();
-  try {
-    const common = { canonicalProjectPath: project, projectName: 'phase3', infra: 'skip' };
-    await saveManifest(project, {
-      metadata: { ...common, mode: 'normal', installationId: 'normal-installation' },
-      files: [],
-      transaction: null,
-    }, INSTALL_MODES.NORMAL);
-    await saveManifest(project, {
-      metadata: { ...common, mode: 'simulation', installationId: 'simulation-installation' },
-      files: [],
-      transaction: null,
-    }, INSTALL_MODES.SIMULATION);
-    const simulationPath = manifestPath(project, INSTALL_MODES.SIMULATION);
-    const before = await fs.readFile(simulationPath);
-
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.NORMAL)), false);
-    assert.deepEqual(await fs.readFile(simulationPath), before);
-  } finally {
-    await fs.remove(project);
-  }
-});
-
-test('simulation reset leaves the normal ownership manifest byte-for-byte unchanged', async () => {
-  const project = await tempProject();
-  try {
-    const common = { canonicalProjectPath: project, projectName: 'phase3', infra: 'skip' };
-    await saveManifest(project, {
-      metadata: { ...common, mode: 'normal', installationId: 'normal-installation' },
-      files: [],
-      transaction: null,
-    }, INSTALL_MODES.NORMAL);
-    const infraDir = path.join(project, 'simulation-infra');
-    const composePath = path.join(infraDir, 'docker-compose.yml');
-    const transactionId = await beginInstallTransaction(project, {
-      ...common,
-      mode: 'simulation',
-      installationId: 'simulation-installation',
-      infra: 'standalone',
-      infraDir,
-      dockerLifecycleManaged: false,
-    }, INSTALL_MODES.SIMULATION, []);
-    await prepareExternalFileChange(
-      project, transactionId, composePath, infraDir, INSTALL_MODES.SIMULATION);
-    await fs.ensureDir(infraDir);
-    await fs.writeFile(composePath, 'services: {}\n');
-    await recordExternalFileChange(
-      project, transactionId, composePath, INSTALL_MODES.SIMULATION);
-    await commitInstallTransaction(project, transactionId, INSTALL_MODES.SIMULATION);
-    const normalPath = manifestPath(project, INSTALL_MODES.NORMAL);
-    const before = await fs.readFile(normalPath);
-
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--simulate', '--dir', project], { encoding: 'utf8' });
-
-    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.equal(await fs.pathExists(manifestPath(project, INSTALL_MODES.SIMULATION)), false);
-    assert.equal(await fs.pathExists(composePath), false);
-    assert.deepEqual(await fs.readFile(normalPath), before);
-  } finally {
-    await fs.remove(project);
-  }
-});
-
 test('manifestless reset emits an explicit machine-readable no-op audit without changing user files', async () => {
   const project = await tempProject();
   try {
@@ -828,21 +682,19 @@ test('manifestless reset emits an explicit machine-readable no-op audit without 
     await fs.writeFile(userFile, 'customer-owned\n');
     const before = await fs.readFile(userFile);
 
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
-    const output = `${result.stdout}\n${result.stderr}`;
-    const marker = output.split(/\r?\n/)
-      .find(line => line.startsWith('CONTEXA_RESET_RESULT '));
-    const summary = JSON.parse(marker.slice('CONTEXA_RESET_RESULT '.length));
+    const result = runReset(project);
+    const summary = resetResult(result.stdout);
 
-    assert.equal(result.status, 0, output);
+    assert.equal(result.code, 0, result.output);
     assert.equal(summary.result, 'NO_OWNED_INSTALLATION');
+    assert.equal(summary.mode, 'normal');
     assert.equal(summary.changed, 0);
     assert.equal(summary.deleted, 0);
-    assert.equal(summary.dockerCalls, 0);
     assert.deepEqual(summary.counts,
       { removed: 0, restored: 0, preserved: 0, conflict: 0, failed: 0 });
+    assert.match(result.stdout, /Nothing to undo/);
     assert.deepEqual(await fs.readFile(userFile), before);
+    assert.equal(await fs.pathExists(path.join(project, 'contexa')), false);
   } finally {
     await fs.remove(project);
   }
@@ -856,30 +708,15 @@ test('corrupt manifest is preserved and classified as a machine-readable conflic
     const corrupt = Buffer.from('{invalid-manifest');
     await fs.writeFile(target, corrupt);
 
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
-    const output = `${result.stdout}\n${result.stderr}`;
-    const marker = output.split(/\r?\n/)
-      .find(line => line.startsWith('CONTEXA_RESET_RESULT '));
-    const summary = JSON.parse(marker.slice('CONTEXA_RESET_RESULT '.length));
+    const result = runReset(project);
+    const summary = resetResult(result.stdout);
 
-    assert.notEqual(result.status, 0);
+    assert.notEqual(result.code, 0);
     assert.equal(summary.result, 'CONFLICT');
     assert.equal(summary.changed, 0);
-    assert.equal(summary.dockerCalls, 0);
+    assert.equal(summary.counts.conflict, 1);
+    assert.ok(result.stderr.trim().length > 0, 'the reason is on stderr');
     assert.deepEqual(await fs.readFile(target), corrupt);
-  } finally {
-    await fs.remove(project);
-  }
-});
-
-test('infra guard refuses filesystem and ownership roots themselves', async () => {
-  const project = await tempProject();
-  try {
-    await assert.rejects(assertSafeInfraDir(project, project), /dedicated child directory/);
-    await assert.rejects(
-      assertSafeInfraDir(project, path.parse(project).root),
-      /dedicated child directory|outside Contexa-owned roots/);
   } finally {
     await fs.remove(project);
   }
@@ -917,51 +754,16 @@ test('reset command keeps current bytes and ownership data when 3-way restore co
     await commitInstallTransaction(project, transactionId, INSTALL_MODES.NORMAL);
     await fs.writeFile(build, current);
 
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--code', '--dir', project], { encoding: 'utf8' });
-    const output = `${result.stdout}\n${result.stderr}`;
+    const result = runReset(project);
 
-    assert.notEqual(result.status, 0);
+    assert.notEqual(result.code, 0);
     assert.equal(await fs.readFile(build, 'utf8'), current);
     assert.equal(await fs.pathExists(manifestPath(project)), true);
-    assert.match(output, /conflict/);
-    assert.doesNotMatch(output, /successfully completed/);
-  } finally {
-    await fs.remove(project);
-  }
-});
-
-test('reset command retains compose and manifest on deterministic infrastructure failure', async () => {
-  const project = await tempProject();
-  const infraDir = path.join(project, 'contexa-owned-infra');
-  try {
-    await fs.ensureDir(infraDir);
-    const composePath = path.join(infraDir, 'docker-compose.yml');
-    await fs.writeFile(composePath, 'services: {}\n');
-    await saveManifest(project, {
-      metadata: {
-        mode: 'normal', canonicalProjectPath: project, installationId: 'phase3-installation',
-        projectName: 'phase3', infra: 'standalone', infraDir,
-        composeChecksum: sha256FileSync(composePath),
-      },
-      files: [],
-      transaction: null,
-    });
-    const manifestBeforeReset = await fs.readFile(manifestPath(project));
-
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--infra', '--dir', project, '--infra-dir', infraDir], { encoding: 'utf8' });
-    const output = `${result.stdout}\n${result.stderr}`;
-
-    assert.notEqual(result.status, 0);
-    assert.equal(await fs.pathExists(composePath), true);
-    assert.equal(await fs.pathExists(manifestPath(project)), true);
-    assert.match(output, /failed|issues/i);
-    assert.doesNotMatch(output, /successfully completed/);
-    const retained = await loadManifest(project);
-    assert.equal(retained.metadata.infra, 'standalone');
-    assert.equal(retained.metadata.lastReset, undefined);
-    assert.deepEqual(await fs.readFile(manifestPath(project)), manifestBeforeReset);
+    const summary = resetResult(result.stdout);
+    assert.equal(summary.result, 'CONFLICT');
+    assert.deepEqual(summary.audit.conflict.map(item => item.resource), ['build.gradle']);
+    assert.match(result.stdout, /changed after init, left as is: build\.gradle/);
+    assert.doesNotMatch(result.stdout, /Contexa was removed from this project/);
   } finally {
     await fs.remove(project);
   }
@@ -972,15 +774,17 @@ for (const buildCase of [
     name: 'Gradle',
     file: 'build.gradle',
     source: ['dependencies {', "  implementation 'org.springframework.boot:spring-boot-starter-web'", '}', ''].join('\n'),
+    inject: build => injectGradleDep(build, { mode: INSTALL_MODES.NORMAL }),
   },
   {
     name: 'Maven',
     file: 'pom.xml',
     source: '<project><dependencies><dependency><groupId>org.springframework.boot</groupId>'
       + '<artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>\n',
+    inject: build => injectMavenDep(build, { mode: INSTALL_MODES.NORMAL }),
   },
 ]) {
-  test(`distributed ${buildCase.name} mutation is backed up before write and reset restores exact bytes`, async () => {
+  test(`${buildCase.name} build mutation is backed up before write and reset restores exact bytes`, async () => {
     const project = await tempProject();
     try {
       const build = path.join(project, buildCase.file);
@@ -994,9 +798,10 @@ for (const buildCase of [
       assert.equal(transactionEntry.startChecksum, sha256FileSync(build));
       assert.equal(await fs.pathExists(path.join(backupRoot(project), buildCase.file)), true);
 
-      assert.equal(await injectDistributedDeps(build, { mode: INSTALL_MODES.NORMAL }), true);
+      assert.equal(await buildCase.inject(build), true);
+      assert.equal(await injectSpringAiDeps(build, ['ollama'], { mode: INSTALL_MODES.NORMAL }), true);
       await recordChange(project, build,
-        { kind: 'build-file', generated: false, reason: 'Explicit distributed infrastructure dependencies' },
+        { kind: 'build-file', generated: false, reason: 'Contexa dependencies' },
         INSTALL_MODES.NORMAL);
       await commitInstallTransaction(project, transactionId, INSTALL_MODES.NORMAL);
 
@@ -1006,8 +811,8 @@ for (const buildCase of [
       assert.match(entry.backupChecksum, /^[a-f0-9]{64}$/);
       assert.equal(entry.originalChecksum, entry.backupChecksum);
       const injected = await fs.readFile(build, 'utf8');
-      assert.match(injected, /spring-kafka/);
-      assert.match(injected, /redisson/);
+      assert.match(injected, /spring-boot-starter-contexa/);
+      assert.match(injected, /spring-ai-starter-vector-store-pgvector/);
 
       const restored = await restoreProjectFiles(project, INSTALL_MODES.NORMAL);
       assert.equal(restored.audit.conflict.length, 0);
@@ -1028,21 +833,22 @@ test('reset fails closed and keeps the manifest when a required build backup is 
     const transactionId = await beginInstallTransaction(project,
       { canonicalProjectPath: project, projectName: 'phase7', infra: 'skip' },
       INSTALL_MODES.NORMAL, [{ filePath: build, kind: 'build-file', generated: false }]);
-    await injectDistributedDeps(build, { mode: INSTALL_MODES.NORMAL });
+    await injectGradleDep(build, { mode: INSTALL_MODES.NORMAL });
     await recordChange(project, build, { kind: 'build-file', generated: false }, INSTALL_MODES.NORMAL);
     await commitInstallTransaction(project, transactionId, INSTALL_MODES.NORMAL);
     const injected = await fs.readFile(build);
     await fs.remove(path.join(backupRoot(project), 'build.gradle'));
 
-    const result = spawnSync(process.execPath,
-      [cliPath, 'reset', '--yes', '--dir', project], { encoding: 'utf8' });
-    const output = `${result.stdout}\n${result.stderr}`;
-    assert.notEqual(result.status, 0);
+    const result = runReset(project);
+    assert.notEqual(result.code, 0);
     assert.equal(await fs.pathExists(manifestPath(project)), true);
     assert.deepEqual(await fs.readFile(build), injected);
-    assert.match(output, /MANIFEST_OWNERSHIP_CONFLICT/);
-    assert.doesNotMatch(output, /required backup is missing/i);
-    assert.doesNotMatch(output, /successfully completed/);
+    assert.match(result.output, /MANIFEST_OWNERSHIP_CONFLICT/);
+    assert.equal(resetResult(result.stdout).result, 'CONFLICT');
+    // The cause is shown, so the user knows which backup is gone.
+    assert.match(result.stderr, /required backup is missing: build\.gradle/);
+    assert.match(result.stderr, /Manifest was kept unchanged/);
+    assert.doesNotMatch(result.output, /Contexa was removed from this project/);
   } finally {
     await fs.remove(project);
   }

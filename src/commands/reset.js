@@ -1,11 +1,17 @@
 'use strict';
 
+// `contexa reset`: put the project back the way it was before `contexa init`.
+//
+// Only files the CLI changed are restored, from the backups it took; edits made afterwards are
+// kept (three-way restore) and overlapping ones are reported as conflicts instead of being
+// overwritten. The local PostgreSQL / Ollama services are shared with other projects, so they
+// stay unless this was the last project using them and the user agrees (or --services).
+
 const chalk = require('chalk');
-const ora = require('ora');
-const path = require('path');
 const fs = require('fs-extra');
 const inquirer = require('inquirer');
-const { Option } = require('commander');
+const ora = require('ora');
+const path = require('path');
 const {
   dockerComposeDown,
   inspectDockerLabels,
@@ -20,9 +26,10 @@ const {
 const {
   auditIssueCount, emptyAudit, performOwnedDockerCleanup, restoreProjectFiles,
 } = require('../core/reset-service');
-const { simulationEnvironment } = require('../core/simulation');
-const { TIMEOUTS } = require('../core/timeouts');
-const { assertSafeInfraDir } = require('../core/project');
+const local = require('../core/local-infra');
+const { findInstallRoot } = require('./doctor');
+
+const MODE = INSTALL_MODES.NORMAL;
 
 const RESET_RESULTS = Object.freeze({
   SUCCESS: 'SUCCESS',
@@ -31,368 +38,247 @@ const RESET_RESULTS = Object.freeze({
   PARTIAL_FAILURE: 'PARTIAL_FAILURE',
 });
 
-function assertExactInfraDir(expectedInfraDir, requestedInfraDir) {
-  if (!expectedInfraDir) {
-    const error = new Error(`RESET_INFRA_DIR_MISSING ${t('reset.error.infraDirMissing')}`);
-    error.code = 'RESET_INFRA_DIR_MISSING';
-    error.messageKey = 'reset.error.infraDirMissing';
-    error.messageArgs = [];
-    throw error;
-  }
-  const expected = path.resolve(expectedInfraDir);
-  if (requestedInfraDir && path.resolve(requestedInfraDir) !== expected) {
-    const error = new Error(`RESET_INFRA_DIR_MISMATCH ${t('reset.error.infraDirMismatch', expected)}`);
-    error.code = 'RESET_INFRA_DIR_MISMATCH';
-    error.messageKey = 'reset.error.infraDirMismatch';
-    error.messageArgs = [expected];
-    throw error;
-  }
-  if (fs.existsSync(expected) && fs.lstatSync(expected).isSymbolicLink()) {
-    const error = new Error(`RESET_INFRA_DIR_SYMLINK ${t('reset.error.infraDirSymlink', expected)}`);
-    error.code = 'RESET_INFRA_DIR_SYMLINK';
-    error.messageKey = 'reset.error.infraDirSymlink';
-    error.messageArgs = [expected];
-    throw error;
-  }
-  return expected;
-}
-
-function composeEnv(projectName, extra = {}) {
-  return {
-    ...process.env,
-    CONTEXA_PROJECT: projectName,
-    ...extra
-  };
-}
-
-function simulateComposeEnv(installationId) {
-  return simulationEnvironment(process.env, installationId);
-}
-
-function mergeAudit(target, source) {
-  for (const status of Object.keys(target)) {
-    const resources = new Set(target[status].map(item => item.resource));
-    for (const item of source[status] || []) {
-      if (resources.has(item.resource)) continue;
-      target[status].push(item);
-      resources.add(item.resource);
-    }
-  }
-}
-
-function printAudit(audit) {
-  const displayAudit = sanitizeAudit(audit);
-  console.log(chalk.cyan(`  ${t('reset.audit.title')}`));
-  for (const status of ['removed', 'restored', 'preserved', 'conflict', 'failed']) {
-    for (const item of displayAudit[status]) {
-      const suffix = item.detail ? ` - ${item.detail}` : '';
-      console.log(chalk.gray(`    - ${status}: ${item.resource}${suffix}`));
-    }
-  }
-}
-
 function sanitizeAudit(audit) {
   return JSON.parse(JSON.stringify(audit).replace(
     /((?:password|secret|credential|token)\s*[:=]\s*)[^\s",}]+/gi, '$1[REDACTED]'));
 }
 
-function printResetResult(result, mode, audit, dockerCalls) {
+function printAudit(audit, installRoot) {
+  const labels = {
+    removed: t('reset.audit.removed'),
+    restored: t('reset.audit.restored'),
+    preserved: t('reset.audit.preserved'),
+    conflict: t('reset.audit.conflict'),
+    failed: t('reset.audit.failed'),
+  };
+  for (const status of ['restored', 'removed', 'preserved', 'conflict', 'failed']) {
+    for (const item of sanitizeAudit(audit)[status]) {
+      const resource = path.isAbsolute(item.resource) ? path.relative(installRoot, item.resource) : item.resource;
+      const suffix = item.detail ? ` - ${item.detail}` : '';
+      const paint = ['conflict', 'failed'].includes(status) ? chalk.yellow : chalk.gray;
+      console.log(paint(`    - ${labels[status]}: ${resource}${suffix}`));
+    }
+  }
+}
+
+// True when the folder holds nothing but empty folders (and the named files).
+async function onlyEmptyFolders(dir, ignoredFiles = []) {
+  if (!await fs.pathExists(dir)) return true;
+  for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (!await onlyEmptyFolders(path.join(dir, entry.name))) return false;
+    } else if (!ignoredFiles.includes(entry.name)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function removeEmptyParents(file, stopDir) {
+  const stop = path.resolve(stopDir);
+  let dir = path.dirname(path.resolve(file));
+  while (dir.startsWith(stop + path.sep) && dir !== stop) {
+    if (!await fs.pathExists(dir) || (await fs.readdir(dir)).length > 0) break;
+    await fs.remove(dir);
+    dir = path.dirname(dir);
+  }
+}
+
+// One machine-readable line for scripts and tests; terminals do not need it.
+function printResetResult(result, audit) {
+  if (process.stdout.isTTY && !process.env.CONTEXA_RESET_RESULT_JSON) return;
   const safeAudit = sanitizeAudit(audit);
-  const counts = Object.fromEntries(Object.entries(safeAudit)
-    .map(([status, items]) => [status, items.length]));
+  const counts = Object.fromEntries(Object.entries(safeAudit).map(([status, items]) => [status, items.length]));
   console.log(`CONTEXA_RESET_RESULT ${JSON.stringify({
     result,
-    mode,
+    mode: MODE,
     changed: counts.removed + counts.restored,
     deleted: counts.removed,
-    dockerCalls,
     counts,
     audit: safeAudit,
   })}`);
 }
 
-function issueResult(audit) {
-  return audit.failed.length === 0 && audit.conflict.length > 0
-    ? RESET_RESULTS.CONFLICT : RESET_RESULTS.PARTIAL_FAILURE;
-}
-
-function resolveTargets(opts) {
-  const targets = {
-    simulate: !!opts.simulate,
-    infra: !opts.simulate && !!opts.infra,
-    code: !!opts.code
+// Installations made by CLI 0.1.x kept a Docker stack per project; remove it with its files.
+// Containers whose ownership cannot be verified (Docker stopped, or a compose file another
+// installation rewrote) are left alone and reported; that never blocks restoring the project.
+async function removeLegacyProjectStack(installRoot, manifest, audit) {
+  const metadata = manifest.metadata || {};
+  if (!metadata.infra || metadata.infra === 'skip' || !metadata.dockerResources) return;
+  const forget = async () => {
+    const current = await loadManifest(installRoot, MODE);
+    Object.assign(current.metadata, { infra: 'skip', dockerResources: null, composeChecksum: null, dockerLifecycleManaged: false });
+    await saveManifest(installRoot, current, MODE);
   };
-
-  if (opts.simulate) {
-    targets.code = true;
+  const spinner = ora(t('reset.legacyStack')).start();
+  try {
+    const dockerAudit = await performOwnedDockerCleanup({
+      contract: metadata.dockerResources,
+      mode: MODE,
+      installationId: metadata.installationId,
+      projectName: metadata.projectName,
+      infraDir: metadata.infraDir,
+      composeChecksum: metadata.composeChecksum,
+      env: { ...process.env, CONTEXA_PROJECT: metadata.projectName },
+    }, {
+      isCliInstalled: isDockerCliInstalled,
+      isDaemonRunning: isDockerDaemonRunning,
+      inspectLabels: inspectDockerLabels,
+      composeDown: dockerComposeDown,
+    });
+    for (const status of Object.keys(audit)) audit[status].push(...(dockerAudit[status] || []));
+    const externalAudit = await restoreExternalResources(installRoot, manifest, MODE, {
+      metadataUpdates: { infra: 'skip', dockerResources: null, composeChecksum: null, dockerLifecycleManaged: false },
+    });
+    for (const status of Object.keys(audit)) audit[status].push(...(externalAudit[status] || []));
+    spinner.succeed(t('reset.legacyStackDone'));
+  } catch (error) {
+    spinner.warn(t('reset.legacyStackKept', metadata.infraDir || '-'));
+    audit.preserved.push({ resource: metadata.infraDir || 'docker', detail: String(error.message || error).split('\n')[0] });
+    await forget();
   }
-
-  if (opts.all) {
-    targets.simulate = !!opts.simulate;
-    targets.infra = !opts.simulate;
-    targets.code = true;
-  }
-
-  return targets;
 }
 
-function hasAnyTarget(targets) {
-  return targets.simulate || targets.infra || targets.code;
+async function offerServiceRemoval(opts, remaining, interactive) {
+  const state = await local.loadState();
+  const hasServices = !!(state.postgres || (state.ollama && state.ollama.mode === 'docker'));
+  if (!hasServices) return;
+  if (remaining.length > 0) {
+    if (opts.services) {
+      console.log(chalk.yellow(`\n  ! ${t('reset.services.inUse', remaining.map(item => item.path).join(', '))}`));
+    }
+    return;
+  }
+  let remove = !!opts.services;
+  if (!remove && interactive) {
+    ({ remove } = await inquirer.prompt([{
+      type: 'confirm', name: 'remove', message: t('reset.services.confirm'), default: false,
+    }]));
+  }
+  if (!remove) {
+    console.log(chalk.gray(`\n  ${t('reset.services.kept')}`));
+    return;
+  }
+  const spinner = ora(t('reset.services.removing')).start();
+  try {
+    await local.removeLocalServices();
+    spinner.succeed(t('reset.services.removed'));
+  } catch (error) {
+    spinner.fail(t('reset.services.failed', formatError(error)));
+    process.exitCode = 1;
+  }
 }
-function printResetPlan(targets, details) {
-  console.log(chalk.cyan(`  ${t('reset.plan.title')}`));
-  if (targets.simulate) {
-    console.log(chalk.gray(`    - ${t('reset.plan.simulation')}`));
-    console.log(chalk.gray(`      ${t('reset.plan.composeDir', details.simInfraDir)}`));
+
+async function runReset(opts) {
+  const interactive = !opts.yes && process.stdin.isTTY === true && process.stdout.isTTY === true;
+  console.log(chalk.cyan(`\n  ${t('reset.title')}\n`));
+  const installRoot = await findInstallRoot(opts.dir || process.cwd());
+  const audit = emptyAudit();
+  if (!installRoot) {
+    console.log(chalk.gray(`  ${t('reset.nothing')}`));
+    printResetResult(RESET_RESULTS.NO_OWNED_INSTALLATION, audit);
+    if (opts.services) {
+      const state = await local.loadState();
+      await offerServiceRemoval(opts, Object.values(state.projects), interactive);
+    }
+    console.log('');
+    return;
   }
-  if (targets.infra) {
-    console.log(chalk.gray(`    - ${t('reset.plan.infrastructure', details.projectName)}`));
-    console.log(chalk.gray(`      ${t('reset.plan.composeDir', details.infraDir)}`));
+  let manifest;
+  try {
+    manifest = await loadManifest(installRoot, MODE);
+  } catch (error) {
+    console.error(chalk.red(`  x ${formatError(error)}`));
+    audit.conflict.push({ resource: manifestPath(installRoot, MODE), detail: formatError(error) });
+    printResetResult(RESET_RESULTS.CONFLICT, audit);
+    process.exitCode = 1;
+    return;
   }
-  if (targets.code) {
-    console.log(chalk.gray(details.simulationMode
-      ? `    - ${t('reset.plan.simulationCode')}`
-      : `    - ${t('reset.plan.projectCode')}`));
-    console.log(chalk.gray(`      ${t('reset.plan.threeWay')}`));
+
+  const files = (manifest.files || []).filter(file => file.cliApplied);
+  console.log(chalk.white(`  ${t('reset.plan', installRoot)}`));
+  for (const file of files) console.log(chalk.gray(`    - ${file.relativePath}`));
+  if (manifest.metadata && manifest.metadata.database && manifest.metadata.database.name) {
+    console.log(chalk.gray(`  ${t('reset.plan.database', manifest.metadata.database.name)}`));
   }
-  if (details.simulationMode && !targets.infra) {
-    console.log(chalk.gray(`    - ${t('reset.plan.productionPreserved')}`));
+  if (interactive) {
+    const { proceed } = await inquirer.prompt([{
+      type: 'confirm', name: 'proceed', message: t('reset.confirm'), default: true,
+    }]);
+    if (!proceed) {
+      console.log(chalk.yellow(`\n  ${t('reset.cancelled')}\n`));
+      return;
+    }
   }
+
+  let lock = null;
+  let hadIssues = false;
+  let stateDir = null;
+  try {
+    lock = await acquireInstallLock(installRoot, MODE, 'reset');
+    await removeLegacyProjectStack(installRoot, manifest, audit);
+    const spinner = ora(t('reset.restoring')).start();
+    const restore = await restoreProjectFiles(installRoot, MODE);
+    for (const status of Object.keys(audit)) audit[status].push(...(restore.audit[status] || []));
+    if (auditIssueCount(restore.audit) > 0) {
+      hadIssues = true;
+      spinner.warn(t('reset.restoredWithIssues', auditIssueCount(restore.audit)));
+    } else {
+      spinner.succeed(t('reset.restored'));
+    }
+
+    // Folders that only held a file Contexa created (src/main/resources/config) go as well, also
+    // when an interrupted reset had already removed the file and the retry finds it "original".
+    const created = files
+      .filter(file => file.generated || file.originalChecksum === null)
+      .map(file => file.relativePath);
+    if (manifest.metadata && manifest.metadata.configFile) created.push(manifest.metadata.configFile);
+    for (const item of restore.audit.removed || []) created.push(item.resource);
+    for (const resource of new Set(created)) {
+      const target = path.resolve(installRoot, resource);
+      if (!await fs.pathExists(target)) await removeEmptyParents(target, installRoot);
+    }
+
+    const finalManifest = await loadManifest(installRoot, MODE);
+    finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: sanitizeAudit(audit) };
+    const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
+    if (finalManifest.files.length === 0 && !ownsInfrastructure) {
+      const finalManifestPath = manifestPath(installRoot, MODE);
+      await fs.remove(finalManifestPath);
+      await fs.remove(backupRoot(installRoot, MODE));
+      stateDir = path.dirname(finalManifestPath);
+    } else {
+      await saveManifest(installRoot, finalManifest, MODE);
+    }
+  } finally {
+    await releaseInstallLock(lock);
+  }
+  // Checked after the lock file is gone: the folder held only the record and its backups.
+  if (stateDir && await onlyEmptyFolders(stateDir, ['.gitignore'])) await fs.remove(stateDir);
+
+  printAudit(audit, installRoot);
+  const { remaining } = await local.unregisterProject(installRoot);
+  if (hadIssues) {
+    printResetResult(audit.failed.length === 0 ? RESET_RESULTS.CONFLICT : RESET_RESULTS.PARTIAL_FAILURE, audit);
+    console.log(chalk.yellow(`\n  ! ${t('reset.issues')}`));
+    process.exitCode = 1;
+  } else {
+    printResetResult(RESET_RESULTS.SUCCESS, audit);
+    console.log(chalk.green(`\n  v ${t('reset.done')}`));
+  }
+  await offerServiceRemoval(opts, remaining, interactive);
   console.log('');
 }
 
-module.exports = function (program) {
+module.exports = function registerResetCommand(program) {
   program
     .command('reset')
     .description(t('reset.description'))
-    .option('--dir <path>', t('reset.option.dir'), process.cwd())
-    .option('-s, --simulate', t('reset.option.simulate'))
-    .addOption(new Option('--infra-dir <path>', t('reset.option.infraDir')).hideHelp())
-    .addOption(new Option('-i, --infra', t('reset.option.infra')).hideHelp())
-    .addOption(new Option('-c, --code', t('reset.option.code')).hideHelp())
-    .addOption(new Option('-a, --all', t('reset.option.all')).hideHelp())
+    .option('--dir <path>', t('init.option.dir'))
+    .option('--services', t('reset.option.services'))
     .option('-y, --yes', t('reset.option.yes'))
-    .action(async (opts) => {
-      console.log(chalk.cyan('\n  ============================================='));
-      console.log(chalk.cyan(`  ${t('reset.starting')}`));
-      console.log(chalk.cyan('  =============================================\n'));
-
-      const projectDir = path.resolve(opts.dir);
-      const installMode = opts.simulate ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
-      const resetManifestPath = manifestPath(projectDir, installMode);
-      const hasOwnedManifest = fs.existsSync(resetManifestPath);
-      const resetAudit = emptyAudit();
-      let dockerCalls = 0;
-      let resetManifest;
-      try {
-        resetManifest = await loadManifest(projectDir, installMode);
-      } catch (error) {
-        const formattedError = formatError(error);
-        console.error(chalk.red('  x ' + formattedError));
-        resetAudit.conflict.push({ resource: resetManifestPath, detail: formattedError });
-        printAudit(resetAudit);
-        printResetResult(RESET_RESULTS.CONFLICT, installMode, resetAudit, dockerCalls);
-        process.exitCode = 1;
-        return;
-      }
-      if (!hasOwnedManifest) {
-        console.log(chalk.yellow(`  i ${t('reset.noManifest.code')}`));
-        printAudit(resetAudit);
-        printResetResult(RESET_RESULTS.NO_OWNED_INSTALLATION, installMode, resetAudit, dockerCalls);
-        return;
-      }
-      const projectName = resetManifest.metadata && resetManifest.metadata.projectName;
-      let targets = resolveTargets(opts);
-      let resetHadIssues = false;
-      let infraCompleted = false;
-      const ownsManifestInfrastructure = Boolean(
-        resetManifest.metadata.infra && resetManifest.metadata.infra !== 'skip');
-
-      if (!hasAnyTarget(targets)) {
-        targets.code = true;
-        targets.infra = hasOwnedManifest
-          && resetManifest.metadata.infra
-          && resetManifest.metadata.infra !== 'skip';
-        console.log(chalk.cyan(targets.infra
-          ? `  i ${t('reset.target.autoInfraCode')}`
-          : `  i ${t('reset.target.autoCode')}`));
-      }
-
-      const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
-      if (installMode === INSTALL_MODES.SIMULATION
-          && !ownsManifestInfrastructure) {
-        targets.simulate = false;
-        infraCompleted = true;
-      }
-
-      if ((targets.infra || targets.simulate) && !projectName) {
-        const error = new Error(`RESET_PROJECT_NAME_MISSING ${t('reset.error.projectNameMissing')}`);
-        error.code = 'RESET_PROJECT_NAME_MISSING';
-        throw error;
-      }
-
-      const manifestInfraDir = resetManifest.metadata && resetManifest.metadata.infraDir;
-      const planSimInfraDir = targets.simulate
-        ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
-      const planInfraDir = targets.infra
-        ? assertExactInfraDir(manifestInfraDir, opts.infraDir) : null;
-      if (planSimInfraDir) {
-        await assertSafeInfraDir(opts.dir, planSimInfraDir, opts.infraDir);
-      }
-      if (planInfraDir && planInfraDir !== planSimInfraDir) {
-        await assertSafeInfraDir(opts.dir, planInfraDir, opts.infraDir);
-      }
-      printResetPlan(targets, {
-        projectName,
-        simInfraDir: planSimInfraDir,
-        infraDir: planInfraDir,
-        simulationMode: installMode === INSTALL_MODES.SIMULATION,
-      });
-
-      let proceed = !!opts.yes;
-      if (!proceed) {
-        const answer = await inquirer.prompt([{
-          type: 'confirm',
-          name: 'proceed',
-          message: t('reset.prompt.confirm'),
-          default: false
-        }]);
-        proceed = answer.proceed;
-      }
-      if (!proceed) {
-        console.log(chalk.yellow(`\n  ! ${t('reset.cancelled')}`));
-        console.log('');
-        return;
-      }
-
-      let resetLock = null;
-      try {
-        resetLock = await acquireInstallLock(projectDir, installMode, 'reset');
-
-        if (targets.simulate || targets.infra) {
-          const dockerLifecycleManaged = resetManifest.metadata.dockerLifecycleManaged !== false;
-          const spinner = ora(t(dockerLifecycleManaged
-            ? 'reset.stoppingContainers'
-            : 'reset.restoringFiles')).start();
-          const ownedInfraDir = planSimInfraDir || planInfraDir;
-          try {
-            if (dockerLifecycleManaged) {
-              dockerCalls += 1;
-              const dockerAudit = await performOwnedDockerCleanup({
-                contract: resetManifest.metadata && resetManifest.metadata.dockerResources,
-                mode: installMode,
-                installationId: resetManifest.metadata.installationId,
-                projectName,
-                infraDir: ownedInfraDir,
-                composeChecksum: resetManifest.metadata && resetManifest.metadata.composeChecksum,
-                env: installMode === INSTALL_MODES.SIMULATION
-                  ? simulateComposeEnv(resetManifest.metadata.installationId)
-                  : composeEnv(projectName),
-              }, {
-                isCliInstalled: isDockerCliInstalled,
-                isDaemonRunning: isDockerDaemonRunning,
-                inspectLabels: inspectDockerLabels,
-                composeDown: dockerComposeDown,
-              });
-              mergeAudit(resetAudit, dockerAudit);
-            }
-            const externalAudit = await restoreExternalResources(
-              projectDir,
-              resetManifest,
-              installMode,
-              {
-                metadataUpdates: {
-                  infra: 'skip',
-                  dockerResources: null,
-                  composeChecksum: null,
-                  dockerLifecycleManaged: false,
-                },
-              }
-            );
-            mergeAudit(resetAudit, externalAudit);
-            infraCompleted = true;
-            spinner.succeed(t(dockerLifecycleManaged
-              ? 'reset.dockerRemoved'
-              : 'reset.filesRestored'));
-          } catch (error) {
-            resetHadIssues = true;
-            resetAudit.failed.push({
-              resource: dockerLifecycleManaged ? 'docker' : 'infrastructure files',
-              detail: formatError(error),
-            });
-            spinner.fail(t(dockerLifecycleManaged
-              ? 'reset.error.dockerCleanup'
-              : 'reset.error.restore', formatError(error)));
-          }
-        }
-
-        if ((targets.simulate || targets.infra) && !infraCompleted) {
-          resetAudit.preserved.push({
-            resource: installMode === INSTALL_MODES.SIMULATION
-              ? 'simulation project files and ownership manifest'
-              : 'project files and ownership manifest',
-            detail: 'Docker cleanup did not complete; no project-managed state was changed.',
-          });
-          printAudit(resetAudit);
-          printResetResult(RESET_RESULTS.PARTIAL_FAILURE, installMode, resetAudit, dockerCalls);
-          console.log(chalk.yellow(`\n  ! ${t('reset.safeStop')}\n`));
-          process.exitCode = 1;
-          return;
-        }
-
-        if (targets.code) {
-          const spinner = ora(t('reset.restoringFiles')).start();
-          try {
-            const restoreResult = await restoreProjectFiles(projectDir, installMode);
-            mergeAudit(resetAudit, restoreResult.audit);
-            if (auditIssueCount(restoreResult.audit) > 0) {
-              resetHadIssues = true;
-              spinner.warn(t('reset.restoreIssues', auditIssueCount(restoreResult.audit)));
-            } else {
-              spinner.succeed(t('reset.filesRestored'));
-            }
-          } catch (error) {
-          spinner.fail(t('reset.error.restore', formatError(error)));
-            throw error;
-          }
-        }
-
-        const finalManifest = await loadManifest(projectDir, installMode);
-        if (infraCompleted) {
-          finalManifest.metadata.infra = 'skip';
-          finalManifest.metadata.dockerResources = null;
-          finalManifest.metadata.composeChecksum = null;
-          finalManifest.metadata.dockerLifecycleManaged = false;
-        }
-        const safeAudit = sanitizeAudit(resetAudit);
-        finalManifest.metadata.lastReset = { at: new Date().toISOString(), result: safeAudit };
-        const ownsInfrastructure = finalManifest.metadata.infra && finalManifest.metadata.infra !== 'skip';
-        if (finalManifest.files.length === 0 && !ownsInfrastructure) {
-          const finalManifestPath = manifestPath(projectDir, installMode);
-          if (fs.existsSync(finalManifestPath)) fs.removeSync(finalManifestPath);
-          const backups = backupRoot(projectDir, installMode);
-          if (fs.existsSync(backups)) fs.removeSync(backups);
-          const stateDir = path.dirname(finalManifestPath);
-          if (fs.existsSync(stateDir) && fs.readdirSync(stateDir).length === 0) fs.removeSync(stateDir);
-        } else {
-          await saveManifest(projectDir, finalManifest, installMode);
-        }
-
-        printAudit(resetAudit);
-
-        if (resetHadIssues) {
-          printResetResult(issueResult(resetAudit), installMode, resetAudit, dockerCalls);
-          console.log(chalk.yellow(`\n  ! ${t('reset.completedWithIssues')}\n`));
-          process.exitCode = 1;
-        } else {
-          printResetResult(RESET_RESULTS.SUCCESS, installMode, resetAudit, dockerCalls);
-          console.log(chalk.green(`\n  v ${t('reset.success')}\n`));
-        }
-      } finally {
-        await releaseInstallLock(resetLock);
-      }
-    });
+    .action(runReset);
 };
 
 module.exports.RESET_RESULTS = RESET_RESULTS;
-module.exports.resolveTargets = resolveTargets;
+module.exports.runReset = runReset;

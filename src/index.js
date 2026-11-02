@@ -21,27 +21,20 @@ for (let i = 0; i < argv.length; i++) {
 setLocale(detectLocale(explicitLang));
 
 const banner = `
-${chalk.cyan('  CONTEXA')}
-${chalk.gray('  ' + t('banner.tagline') + ' / ' + t('banner.subtitle'))}  ${chalk.yellow('v' + releaseManifest.cliVersion)}
+${chalk.cyan('  CONTEXA')}  ${chalk.yellow('v' + releaseManifest.cliVersion)}
+${chalk.gray('  ' + t('banner.tagline'))}
 `;
 
 program
   .name('contexa')
-  .description('Contexa CLI - AI-Native Zero Trust Security Platform')
+  .description(t('banner.tagline'))
   .version(releaseManifest.cliVersion)
-  .addOption(new Option('--lang <code>', 'Interface language (en|ko)').choices(['en', 'ko']))
-  .addHelpText('after', '\nPrimary workflows:\n' + releaseManifest.primaryCommands
-    .map(command => '  ' + command)
-    .join('\n') + '\n');
+  .addOption(new Option('--lang <code>', t('option.lang')).choices(['en', 'ko']))
+  .addHelpText('after', `\n${t('help.start')}\n  cd <your-spring-boot-project>\n  contexa init\n`);
 
 require('./commands/init')(program);
-require('./commands/mode')(program);
-require('./commands/status')(program);
-require('./commands/scan')(program);
-require('./commands/simulate')(program);
 require('./commands/doctor')(program);
 require('./commands/reset')(program);
-require('./commands/ollama')(program);
 
 async function main() {
   if (!argv.length) {
@@ -53,6 +46,11 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(chalk.red('  x ' + formatError(error)));
+  console.error(chalk.red(`\n  x ${formatError(error)}`));
+  if (error && error.hintKey) console.error(chalk.yellow(`    -> ${t(error.hintKey)}`));
+  if (error && error.detail) {
+    console.error(chalk.gray(String(error.detail).split('\n').map(line => `    ${line}`).join('\n')));
+  }
+  console.error('');
   process.exitCode = 1;
 });

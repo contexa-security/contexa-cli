@@ -5,361 +5,37 @@ const assert = require('node:assert/strict');
 const fs = require('fs-extra');
 const os = require('os');
 const path = require('path');
-const yaml = require('js-yaml');
 
 const {
-  injectYml, injectMavenDep, injectGradleDep, injectDistributedDeps, injectEnableAiSecurity,
-  generateDockerCompose,
-} = require('../src/core/injector');
-const { CONTEXA_VERSION } = require('../src/core/injector/common');
+  injectMavenDep, injectGradleDep, injectSpringAiDeps, injectEnableAiSecurity,
+} = require('../src/core/injector/build');
+const { CONTEXA_VERSION, resolveDependencyVersions } = require('../src/core/injector/common');
+const releaseManifest = require('../release-manifest.json');
 
 async function tempDir() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'ctxa-injector-'));
 }
 
-function loadYml(p) {
-  return yaml.load(fs.readFileSync(p, 'utf8'));
-}
-
-// ============================================================
-// injectYml - merged contexa.* tree (no marker block)
-// ============================================================
-
-test('injectYml: normal host overlay never claims datasource ownership', async () => {
-  const dir = await tempDir();
+// The Spring AI BOM version can be overridden with CONTEXA_SPRING_AI_VERSION; the tests check the
+// release-manifest default, so a value in the developer's environment must not leak in.
+async function withoutVersionOverrides(action) {
+  const saved = {};
+  for (const name of ['CONTEXA_SPRING_AI_VERSION', 'CONTEXA_SAMPLE_SPRING_BOOT_VERSION']) {
+    saved[name] = process.env[name];
+    delete process.env[name];
+  }
   try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow' });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.datasource, undefined);
-    assert.equal(root.contexa.security, undefined);
-    assert.equal(root.contexa.llm, undefined);
-    assert.equal(root.contexa.hcad, undefined);
-    assert.equal(root.spring && root.spring.ai, undefined);
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: rerun removes only obsolete CLI-owned v0.1.3 overlay values', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application-contexa.yml');
-    await fs.writeFile(ymlPath, [
-      'server:',
-      '  port: ${CONTEXA_SERVER_PORT:9080}',
-      'host-owned:',
-      '  marker: keep',
-      'contexa:',
-      '  security:',
-      '    zerotrust:',
-      '      mode: SHADOW',
-      '  infrastructure:',
-      '    mode: DISTRIBUTED',
-      '',
-    ].join('\n'), 'utf8');
-    const applied = await injectYml(ymlPath, {
-      infra: 'distributed',
-      managedPaths: ['security.zerotrust.mode', 'infrastructure.mode'],
-      removeLegacyNormalServerPort: true,
-    });
-    const root = loadYml(ymlPath);
-    assert.equal(root.server, undefined);
-    assert.equal(root.contexa.security, undefined);
-    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
-    assert.equal(root['host-owned'].marker, 'keep');
-    assert.deepEqual(applied.managedPaths, ['infrastructure.mode']);
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: user-owned legacy-shaped values are preserved without manifest ownership', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application-contexa.yml');
-    await fs.writeFile(ymlPath,
-      'server:\n  port: ${CONTEXA_SERVER_PORT:9080}\ncontexa:\n  security:\n    zerotrust:\n      mode: SHADOW\n', 'utf8');
-    await injectYml(ymlPath, { infra: 'distributed' });
-    const root = loadYml(ymlPath);
-    assert.equal(root.server.port, '${CONTEXA_SERVER_PORT:9080}');
-    assert.equal(root.contexa.security.zerotrust.mode, 'SHADOW');
-  } finally { await fs.remove(dir); }
-});
-test('injectYml: produces a parseable yaml with a single contexa: tree', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const text = await fs.readFile(ymlPath, 'utf8');
-    const root = yaml.load(text);
-    assert.ok(root && root.contexa, 'contexa: must exist as a top-level key');
-    const contexaOccurrences = (text.match(/^contexa\s*:/gm) || []).length;
-    assert.equal(contexaOccurrences, 1, 'contexa: must appear exactly once at top level');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: normal explicit activation leaves datasource defaults to platform Properties', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.datasource, undefined);
-    assert.ok(root.contexa.security);
-    assert.equal(root.server, undefined);
-    assert.doesNotMatch(await fs.readFile(ymlPath, 'utf8'), /contexa1234|contexa-owned-application/);
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: ENFORCE mode writes contexa.security.zerotrust.mode = ENFORCE', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'enforce', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: distributed sets contexa.infrastructure.mode and never spring.data.redis/kafka', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed' });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
-    assert.equal(root.spring, undefined, 'spring.* must not be written by CLI');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: simulate writes only isolated profile and Ollama selection under spring.*', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, {
-      mode: 'shadow',
-      enableAiSecurity: true,
-      llmProviders: ['ollama'],
-      infra: 'distributed',
-      simulate: true,
-    });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.datasource.url, '${CONTEXA_DB_URL}');
-    assert.equal(root.contexa.datasource.username, '${CONTEXA_DB_USERNAME}');
-    assert.equal(root.contexa.datasource.password, '${CONTEXA_DB_PASSWORD}');
-    assert.equal(root.contexa.iam.websocket.enabled, false);
-    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
-    assert.equal(root.contexa.infrastructure.mode, 'DISTRIBUTED');
-    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
-    assert.equal(root.contexa.llm.selection.embedding.mode, 'fixed');
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
-    assert.equal(root.spring.config.activate['on-profile'], 'contexa-sim');
-    assert.equal(root.spring.ai.model.chat, 'ollama');
-    assert.equal(root.spring.ai.model.embedding, 'ollama');
-    assert.equal(root.spring.ai.model.image, 'none');
-    assert.equal(root.spring.ai.model.moderation, 'none');
-    assert.equal(root.spring.ai.model.audio.speech, 'none');
-    assert.equal(root.spring.ai.model.audio.transcription, 'none');
-    assert.equal(root.spring.ai.ollama['base-url'], '${OLLAMA_BASE_URL}');
-    assert.equal(root.spring.ai.ollama.chat.options.model,
-      '${CONTEXA_CHAT_OLLAMA_MODEL:qwen2.5:7b}');
-    assert.equal(root.spring.ai.ollama.embedding.options.model,
-      '${CONTEXA_EMBEDDING_OLLAMA_MODEL:mxbai-embed-large}');
-    assert.equal(root.server.port, '${CONTEXA_SIMULATION_SERVER_PORT:9080}');
-    assert.equal(root.spring.datasource, undefined);
-    assert.equal(root.spring.data.redis.host, '${REDIS_HOST}');
-    assert.equal(root.spring.data.redis.port, '${REDIS_PORT}');
-    assert.equal(root.spring.kafka['bootstrap-servers'], '${KAFKA_BOOTSTRAP_SERVERS}');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: FULL preserves an existing host SecurityFilterChain ownership boundary', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, {
-      enableAiSecurity: true,
-      securityMode: 'full',
-      hostSecurityFilterChain: true,
-      llmProviders: ['openai'],
-    });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.bridge.ownership, 'HOST_OWNED');
-    assert.equal(root.contexa.datasource.isolation['contexa-owned-application'], false);
-    assert.equal(root.contexa.datasource.url, undefined);
-    assert.equal(root.contexa.datasource.username, undefined);
-    assert.equal(root.contexa.datasource.password, undefined);
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: FULL without a host chain leaves Contexa ownership to annotation defaults', async () => {
-  const tree = require('../src/core/injector/yml').buildCliContexaTree({
-    enableAiSecurity: true,
-    securityMode: 'full',
-    hostSecurityFilterChain: false,
-    llmProviders: ['openai'],
-  });
-  assert.equal(tree.bridge, undefined);
-  assert.equal(tree.datasource, undefined);
-});
-test('injectYml: never writes any spring.* key across all provider/infra combinations', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    for (const infra of ['standalone', 'distributed']) {
-      for (const providers of [['ollama'], ['openai'], ['anthropic'], ['ollama', 'openai', 'anthropic']]) {
-        await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: providers, infra });
-        const root = loadYml(ymlPath);
-        assert.equal(root.spring, undefined,
-          `spring.* leaked with infra=${infra} providers=${providers}`);
-      }
+    return await action();
+  } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value !== undefined) process.env[name] = value;
     }
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: idempotent - second call updates only the CLI-managed keys', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    const first = await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    await injectYml(ymlPath, {
-      mode: 'enforce',
-      enableAiSecurity: true,
-      llmProviders: ['ollama'],
-      managedPaths: first.managedPaths,
-    });
-    const text = await fs.readFile(ymlPath, 'utf8');
-    const root = yaml.load(text);
-    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1);
-    assert.equal(root.contexa.security.zerotrust.mode, 'ENFORCE');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: backs up existing file before modifying', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, 'server:\n  port: 8080\n');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const backupDest = path.join(dir, 'contexa', '.cli', 'bak', 'application.yml');
-    assert.ok(await fs.pathExists(backupDest));
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: merges into existing contexa: block instead of duplicating top-level key', async () => {
-  // Real-world scenario: application.yml already has contexa.infrastructure.mode
-  // and contexa.vectorstore set by the developer. CLI must merge into the same
-  // top-level contexa: tree, not produce a second one (which Spring Boot 3.x
-  // SnakeYAML rejects with DuplicateKeyException).
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, [
-      'server:',
-      '  port: 8081',
-      '',
-      'contexa:',
-      '  infrastructure:',
-      '    mode: standalone',
-      '  vectorstore:',
-      '    pgvector:',
-      '      table-name: vector_store',
-      '      dimensions: 1024',
-      '',
-      'spring:',
-      '  datasource:',
-      '    url: jdbc:postgresql://localhost:5432/host_app',
-      '',
-    ].join('\n'));
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const text = await fs.readFile(ymlPath, 'utf8');
-    const root = yaml.load(text); // must not throw
-    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1,
-      'single top-level contexa: required to avoid duplicate-key errors');
-    assert.equal(root.contexa.infrastructure.mode, 'standalone',
-      'user infrastructure.mode must be preserved (CLI does not overwrite without --distributed)');
-    assert.equal(root.contexa.vectorstore.pgvector['table-name'], 'vector_store',
-      'user vectorstore must be preserved');
-    assert.ok(root.contexa.security.zerotrust.mode, 'CLI-managed key must still be added');
-    assert.equal(root.spring.datasource.url, 'jdbc:postgresql://localhost:5432/host_app',
-      'host spring.datasource must be untouched');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: --distributed preserves a user-owned contexa.infrastructure.mode', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, 'contexa:\n  infrastructure:\n    mode: standalone\n');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'], infra: 'distributed' });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.infrastructure.mode, 'standalone');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: strips a legacy marker block from a previous CLI version', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, [
-      'server:',
-      '  port: 8080',
-      '',
-      '# --- Contexa AI Security ---',
-      'contexa:',
-      '  llm:',
-      '    chatModelPriority: ollama',
-      '# --- End Contexa ---',
-      '',
-    ].join('\n'));
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const text = await fs.readFile(ymlPath, 'utf8');
-    assert.equal(text.includes('# --- Contexa AI Security ---'), false,
-      'legacy marker block must be stripped');
-    const root = yaml.load(text);
-    assert.equal((text.match(/^contexa\s*:/gm) || []).length, 1);
-    assert.ok(root.contexa.llm.selection.chat.priority,
-      'CLI must write the new selection-API priority');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: never emits dead key contexa.jpa.hibernate.ddl-auto', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.jpa, undefined,
-      'contexa.jpa is not bound by any @ConfigurationProperties; CLI must not write it');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: emits contexa.hcad.geoip.enabled = true alongside dbPath', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.hcad.geoip.enabled, true,
-      'enabled must be true so the dbPath actually takes effect (default in core is false)');
-    assert.equal(root.contexa.hcad.geoip.dbPath, 'contexa/data/GeoLite2-City.mmdb');
-  } finally { await fs.remove(dir); }
-});
-
-test('injectYml: emits contexa.llm.selection.* (new API) instead of deprecated chatModelPriority', async () => {
-  const dir = await tempDir();
-  try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama', 'openai'] });
-    const root = loadYml(ymlPath);
-    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama,openai');
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
-    assert.equal(root.contexa.llm.chatModelPriority, undefined,
-      'deprecated key must not be re-introduced');
-  } finally { await fs.remove(dir); }
-});
+  }
+}
 
 // ============================================================
 // injectMavenDep
 // ============================================================
-
 test('injectMavenDep: inserts dependency at project-level dependencies tag', async () => {
   const dir = await tempDir();
   try {
@@ -466,7 +142,6 @@ test('injectMavenDep: captures only the CLI-added canonical coordinate', async (
 // ============================================================
 // injectGradleDep
 // ============================================================
-
 test('injectGradleDep: Groovy DSL uses single-quoted notation', async () => {
   const dir = await tempDir();
   try {
@@ -547,22 +222,50 @@ dependencies { implementation("org.springframework.boot:spring-boot-starter-web"
   } finally { await fs.remove(dir); }
 });
 
-test('injectEnableAiSecurity: writes exact SANDBOX mode to one Java main class', async () => {
+// ============================================================
+// injectEnableAiSecurity
+// ============================================================
+
+test('injectEnableAiSecurity: SANDBOX writes the bare annotation with a single import (Java)', async () => {
   const dir = await tempDir();
   try {
     const source = path.join(dir, 'src/main/java/example/Application.java');
     await fs.ensureDir(path.dirname(source));
     await fs.writeFile(source, 'package example;\n\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n\n@SpringBootApplication\npublic class Application {}\n');
     const result = await injectEnableAiSecurity(dir, { securityMode: 'sandbox', mainApplicationCandidates: [source] });
-    assert.equal(result.changed, true);
+    assert.deepEqual(result, { changed: true, filePath: source });
     const updated = await fs.readFile(source, 'utf8');
-    assert.match(updated, /import io\.contexa\.contexacommon\.annotation\.EnableAISecurity;/);
-    assert.match(updated, /import io\.contexa\.contexacommon\.security\.bridge\.SecurityMode;/);
-    assert.match(updated, /@EnableAISecurity\(mode = SecurityMode\.SANDBOX\)\n@SpringBootApplication/);
+    assert.equal(updated, [
+      'package example;',
+      '',
+      'import org.springframework.boot.autoconfigure.SpringBootApplication;',
+      'import io.contexa.contexacommon.annotation.EnableAISecurity;',
+      '',
+      '@EnableAISecurity',
+      '@SpringBootApplication',
+      'public class Application {}',
+      '',
+    ].join('\n'));
+    assert.equal(updated.includes('SecurityMode'), false, 'SANDBOX is the annotation default: no SecurityMode import');
   } finally { await fs.remove(dir); }
 });
 
-test('injectEnableAiSecurity: writes exact FULL mode to one Kotlin main class', async () => {
+test('injectEnableAiSecurity: FULL writes mode = SecurityMode.FULL with both imports (Java)', async () => {
+  const dir = await tempDir();
+  try {
+    const source = path.join(dir, 'src/main/java/example/Application.java');
+    await fs.ensureDir(path.dirname(source));
+    await fs.writeFile(source, 'package example;\n\nimport org.springframework.boot.SpringApplication;\nimport org.springframework.boot.autoconfigure.SpringBootApplication;\n\n@SpringBootApplication\npublic class Application {}\n');
+    await injectEnableAiSecurity(dir, { securityMode: 'full', mainApplicationCandidates: [source] });
+    const updated = await fs.readFile(source, 'utf8');
+    assert.match(updated, /^import io\.contexa\.contexacommon\.annotation\.EnableAISecurity;$/m);
+    assert.match(updated, /^import io\.contexa\.contexacommon\.security\.bridge\.SecurityMode;$/m);
+    assert.match(updated, /\n@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication\n/);
+    assert.equal((updated.match(/^import /gm) || []).length, 4);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectEnableAiSecurity: FULL in a Kotlin main class uses imports without semicolons', async () => {
   const dir = await tempDir();
   try {
     const source = path.join(dir, 'src/main/kotlin/example/Application.kt');
@@ -571,7 +274,35 @@ test('injectEnableAiSecurity: writes exact FULL mode to one Kotlin main class', 
     await injectEnableAiSecurity(dir, { securityMode: 'full', mainApplicationCandidates: [source] });
     const updated = await fs.readFile(source, 'utf8');
     assert.match(updated, /import io\.contexa\.contexacommon\.annotation\.EnableAISecurity\n/);
+    assert.match(updated, /import io\.contexa\.contexacommon\.security\.bridge\.SecurityMode\n/);
+    assert.equal(updated.includes(';'), false);
     assert.match(updated, /@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication/);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectEnableAiSecurity: SANDBOX in a Kotlin main class, CRLF kept, second run changes nothing', async () => {
+  const dir = await tempDir();
+  try {
+    const source = path.join(dir, 'src/main/kotlin/example/Application.kt');
+    await fs.ensureDir(path.dirname(source));
+    await fs.writeFile(source, 'package example\r\n\r\nimport org.springframework.boot.autoconfigure.SpringBootApplication\r\n\r\n@SpringBootApplication\r\nclass Application\r\n');
+    assert.equal((await injectEnableAiSecurity(dir, { securityMode: 'sandbox', mainApplicationCandidates: [source] })).changed, true);
+    const once = await fs.readFile(source, 'utf8');
+    assert.match(once, /import io\.contexa\.contexacommon\.annotation\.EnableAISecurity\r\n/);
+    assert.match(once, /\r\n@EnableAISecurity\r\n@SpringBootApplication\r\n/);
+    assert.equal(once.replace(/\r\n/g, '').includes('\n'), false, 'no bare LF introduced');
+    assert.equal((await injectEnableAiSecurity(dir, { securityMode: 'full', mainApplicationCandidates: [source] })).changed, false);
+    assert.equal(await fs.readFile(source, 'utf8'), once);
+  } finally { await fs.remove(dir); }
+});
+
+test('injectEnableAiSecurity: an unknown mode is rejected before the source is read', async () => {
+  const dir = await tempDir();
+  try {
+    await assert.rejects(
+      injectEnableAiSecurity(dir, { securityMode: 'enforce', mainApplicationCandidates: [path.join(dir, 'Missing.java')] }),
+      /Unsupported AI security mode: enforce/
+    );
   } finally { await fs.remove(dir); }
 });
 
@@ -592,114 +323,9 @@ test('injectEnableAiSecurity: multiple main candidates fail without changing eit
   } finally { await fs.remove(dir); }
 });
 
-test('injector.js does not export database initdb generation', () => {
-  const exported = require('../src/core/injector');
-  assert.equal('generateInitDbScripts' in exported, false,
-    'CLI must not own schema/seed SQL copies; contexa-iam installs them at application startup');
-});
-
 // ============================================================
-// generateDockerCompose
+// injectSpringAiDeps (selected model starters, BOM, customer-owned starters)
 // ============================================================
-
-test('generateDockerCompose: binds ports to 127.0.0.1 by default', async () => {
-  const dir = await tempDir();
-  try {
-    await generateDockerCompose(dir, { infra: 'standalone', includeOllama: true });
-    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_POSTGRES_PORT:-5432}:5432'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_OLLAMA_PORT:-11434}:11434'));
-  } finally { await fs.remove(dir); }
-});
-
-test('generateDockerCompose: container names and project name use CONTEXA_PROJECT prefix', async () => {
-  const dir = await tempDir();
-  try {
-    await generateDockerCompose(dir, { infra: 'distributed', includeOllama: true });
-    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('name: ${CONTEXA_PROJECT:-contexa}'));
-    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-postgres'));
-    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-ollama'));
-    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-redis'));
-    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-zookeeper'));
-    assert.ok(yml.includes('container_name: ${CONTEXA_PROJECT:-contexa}-kafka'));
-  } finally { await fs.remove(dir); }
-});
-
-test('generateDockerCompose: POSTGRES_PASSWORD uses env fallback, not plaintext literal', async () => {
-  const dir = await tempDir();
-  try {
-    await generateDockerCompose(dir, { infra: 'standalone' });
-    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('POSTGRES_PASSWORD: ${CONTEXA_DB_PASSWORD:-contexa1234!@#}'));
-    // Plain "POSTGRES_PASSWORD: contexa1234" without env wrapper must not appear.
-    assert.equal(/POSTGRES_PASSWORD:\s*contexa1234/.test(yml), false);
-  } finally { await fs.remove(dir); }
-});
-
-test('generateDockerCompose: does not mount docker-entrypoint initdb SQL', async () => {
-  const dir = await tempDir();
-  try {
-    await generateDockerCompose(dir, { infra: 'distributed', includeOllama: true });
-    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.equal(yml.includes('docker-entrypoint-initdb.d'), false,
-      'schema/seed data must be installed by contexa-iam at application startup');
-    assert.equal(yml.includes('./initdb'), false,
-      'CLI must not rely on generated initdb SQL copies');
-  } finally { await fs.remove(dir); }
-});
-
-test('generateDockerCompose: distributed mode adds redis/zookeeper/kafka with loopback binding', async () => {
-  const dir = await tempDir();
-  try {
-    await generateDockerCompose(dir, { infra: 'distributed' });
-    const yml = await fs.readFile(path.join(dir, 'docker-compose.yml'), 'utf8');
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_REDIS_PORT:-6379}:6379'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_ZOOKEEPER_PORT:-2181}:2181'));
-    assert.ok(yml.includes('${COMPOSE_BIND_HOST:-127.0.0.1}:${CONTEXA_KAFKA_PORT:-9092}:9092'));
-    assert.ok(yml.includes('zookeeper-log:/var/lib/zookeeper/log'));
-    assert.ok(yml.includes('zookeeper-log:\n    labels: *contexa-ownership'));
-    assert.ok(yml.includes('kafka-broker-api-versions", "--bootstrap-server", "kafka:9093"'));
-    assert.ok(!yml.includes('kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"'));
-  } finally { await fs.remove(dir); }
-});
-
-test('generateDockerCompose: backs up existing compose file before overwrite', async () => {
-  const dir = await tempDir();
-  try {
-    const composePath = path.join(dir, 'docker-compose.yml');
-    await fs.writeFile(composePath, 'services: {}\n');
-    await generateDockerCompose(dir, { infra: 'standalone' });
-    assert.ok(await fs.pathExists(composePath + '.bak'));
-    await fs.remove(composePath + '.bak');
-    await generateDockerCompose(dir, { infra: 'standalone', backupExisting: false });
-    assert.equal(await fs.pathExists(composePath + '.bak'), false);
-  } finally { await fs.remove(dir); }
-});
-
-// ============================================================
-// injectDistributedDeps (integration with build files)
-// ============================================================
-
-test('injectDistributedDeps: adds redisson + spring-kafka to Maven pom', async () => {
-  const dir = await tempDir();
-  try {
-    const pomPath = path.join(dir, 'pom.xml');
-    await fs.writeFile(pomPath, `<project><dependencies>
-  <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter</artifactId></dependency>
-</dependencies></project>`);
-    const added = await injectDistributedDeps(pomPath);
-    assert.equal(added, true);
-    const pom = await fs.readFile(pomPath, 'utf8');
-    assert.ok(pom.includes('spring-kafka'));
-    assert.ok(pom.includes('redisson'));
-  } finally { await fs.remove(dir); }
-});
-
-// ============================================================
-// injectSpringAiDeps (LLM selective dependencies & cleanups)
-// ============================================================
-const { injectSpringAiDeps } = require('../src/core/injector/build');
 
 test('injectSpringAiDeps: filters model starters based on llmProviders', async () => {
   const dir = await tempDir();
@@ -738,30 +364,7 @@ test('injectSpringAiDeps: preserves customer-owned unselected model starters', a
   } finally { await fs.remove(dir); }
 });
 
-test('injectDistributedDeps: comments and same artifact under another group are decoys', async () => {
-  const dir = await tempDir();
-  try {
-    const pomPath = path.join(dir, 'pom.xml');
-    const addedDependencies = [];
-    await fs.writeFile(pomPath, `<project>
-  <!-- org.redisson:redisson and org.springframework.kafka:spring-kafka are documentation -->
-  <dependencies>
-    <dependency><groupId>example.decoy</groupId><artifactId>spring-kafka</artifactId></dependency>
-    <dependency><groupId>example.decoy</groupId><artifactId>redisson</artifactId></dependency>
-  </dependencies>
-</project>`);
-    assert.equal(await injectDistributedDeps(pomPath, {
-      targetModule: '.',
-      addedDependencies,
-    }), true);
-    const coordinates = new Set(addedDependencies.map(item => `${item.group}:${item.artifact}`));
-    assert.equal(coordinates.has('org.springframework.kafka:spring-kafka'), true);
-    assert.equal(coordinates.has('org.redisson:redisson'), true);
-    assert.equal(coordinates.has('example.decoy:spring-kafka'), false);
-  } finally { await fs.remove(dir); }
-});
-
-test('explicit init injectors preserve every supported customer dependency and AI setting', async () => {
+test('injectSpringAiDeps: customer dependencies are kept exactly once', async () => {
   const dir = await tempDir();
   try {
     const buildPath = path.join(dir, 'build.gradle');
@@ -775,79 +378,160 @@ test('explicit init injectors preserve every supported customer dependency and A
     ];
     await fs.writeFile(buildPath, `dependencies {\n${dependencies.map(value => `    implementation '${value}'`).join('\n')}\n}`);
     await injectSpringAiDeps(buildPath, ['openai']);
-    await injectDistributedDeps(buildPath);
     const build = await fs.readFile(buildPath, 'utf8');
     dependencies.forEach(value => {
       assert.equal(build.split(value).length - 1, 1, `${value} must remain exactly once`);
     });
-
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, [
-      'spring:',
-      '  ai:',
-      '    openai:',
-      '      api-key: host-openai',
-      '    anthropic:',
-      '      api-key: host-anthropic',
-      '    ollama:',
-      '      base-url: http://host-ollama:11434',
-      'contexa:',
-      '  llm:',
-      '    chat:',
-      '      ollama:',
-      '        model: host-model',
-    ].join('\n'));
-    const result = await injectYml(ymlPath, {
-      mode: 'shadow',
-      enableAiSecurity: true,
-      llmProviders: ['openai'],
-    });
-    const root = loadYml(ymlPath);
-    assert.equal(root.spring.ai.openai['api-key'], 'host-openai');
-    assert.equal(root.spring.ai.anthropic['api-key'], 'host-anthropic');
-    assert.equal(root.spring.ai.ollama['base-url'], 'http://host-ollama:11434');
-    assert.equal(root.contexa.llm.chat.ollama.model, 'host-model');
-    assert.ok(!result.managedPaths.includes('llm.chat.ollama.model'));
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: configures fixed mode and ollama priority when ollama is selected', async () => {
+test('injectSpringAiDeps: the Spring AI BOM version is the release-manifest value (Gradle and Maven)', async () => {
+  assert.equal(releaseManifest.dependencyVersions.springAiBom, '1.1.8');
+  await withoutVersionOverrides(async () => {
+    assert.equal(resolveDependencyVersions().springAiBom, '1.1.8');
+    const dir = await tempDir();
+    try {
+      const gradlePath = path.join(dir, 'build.gradle');
+      await fs.writeFile(gradlePath, 'dependencies {\n    implementation \'org.springframework.boot:spring-boot-starter-web\'\n}\n');
+      assert.equal(await injectSpringAiDeps(gradlePath, ['ollama']), true);
+      assert.match(await fs.readFile(gradlePath, 'utf8'),
+        /implementation platform\('org\.springframework\.ai:spring-ai-bom:1\.1\.8'\)/);
+
+      const ktsPath = path.join(dir, 'build.gradle.kts');
+      await fs.writeFile(ktsPath, 'dependencies {\n    implementation("org.springframework.boot:spring-boot-starter-web")\n}\n');
+      await injectSpringAiDeps(ktsPath, ['ollama']);
+      assert.match(await fs.readFile(ktsPath, 'utf8'),
+        /implementation\(platform\("org\.springframework\.ai:spring-ai-bom:1\.1\.8"\)\)/);
+
+      const pomPath = path.join(dir, 'pom.xml');
+      await fs.writeFile(pomPath, '<project>\n    <dependencies>\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter-web</artifactId>\n        </dependency>\n    </dependencies>\n</project>\n');
+      await injectSpringAiDeps(pomPath, ['ollama']);
+      const pom = await fs.readFile(pomPath, 'utf8');
+      const management = pom.match(/<dependencyManagement>[\s\S]*<\/dependencyManagement>/);
+      assert.ok(management, 'BOM goes into dependencyManagement');
+      assert.match(management[0], /<artifactId>spring-ai-bom<\/artifactId>\s*<version>1\.1\.8<\/version>\s*<type>pom<\/type>\s*<scope>import<\/scope>/);
+    } finally { await fs.remove(dir); }
+  });
+});
+
+test('injectSpringAiDeps: anthropic gets the anthropic and ollama starters (Ollama serves embeddings)', async () => {
   const dir = await tempDir();
   try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['ollama'] });
-    const root = loadYml(ymlPath);
-    
-    assert.equal(root.contexa.llm.selection.chat.priority, 'ollama');
-    assert.equal(root.contexa.llm.selection.embedding.mode, 'fixed');
-    assert.equal(root.contexa.llm.selection.embedding.priority, 'ollama');
+    const gradlePath = path.join(dir, 'build.gradle');
+    await fs.writeFile(gradlePath, 'dependencies {\n    implementation \'org.springframework.boot:spring-boot-starter-web\'\n}\n');
+    // init passes ['anthropic', 'ollama'] for the anthropic provider (aiProviderArtifacts).
+    await injectSpringAiDeps(gradlePath, ['anthropic', 'ollama']);
+    const out = await fs.readFile(gradlePath, 'utf8');
+    assert.match(out, /implementation 'org\.springframework\.ai:spring-ai-starter-model-anthropic'/);
+    assert.match(out, /implementation 'org\.springframework\.ai:spring-ai-starter-model-ollama'/);
+    assert.match(out, /implementation 'org\.springframework\.ai:spring-ai-starter-vector-store-pgvector'/);
+    assert.equal(out.includes('spring-ai-starter-model-openai'), false);
+
+    const pomPath = path.join(dir, 'pom.xml');
+    await fs.writeFile(pomPath, '<project>\n    <dependencies>\n    </dependencies>\n</project>\n');
+    await injectSpringAiDeps(pomPath, ['anthropic', 'ollama']);
+    const pom = await fs.readFile(pomPath, 'utf8');
+    assert.match(pom, /<artifactId>spring-ai-starter-model-anthropic<\/artifactId>/);
+    assert.match(pom, /<artifactId>spring-ai-starter-model-ollama<\/artifactId>/);
+    assert.equal(pom.includes('spring-ai-starter-model-openai'), false);
+    assert.equal(await injectSpringAiDeps(pomPath, ['anthropic', 'ollama']), false, 'second run changes nothing');
   } finally { await fs.remove(dir); }
 });
 
-test('injectYml: preserves host spring.ai and user-owned contexa LLM blocks', async () => {
+// ============================================================
+// Indentation: tab-indented build files get tabs
+// ============================================================
+
+test('tab-indented Gradle build file gets tab-indented dependency lines', async () => {
   const dir = await tempDir();
   try {
-    const ymlPath = path.join(dir, 'application.yml');
-    await fs.writeFile(ymlPath, [
-      'spring:',
-      '  ai:',
-      '    openai:',
-      '      api-key: somekey',
-      '    anthropic:',
-      '      api-key: otherkey',
-      'contexa:',
-      '  llm:',
-      '    chat:',
-      '      ollama:',
-      '        model: qwen2.5:7b',
+    const gradlePath = path.join(dir, 'build.gradle');
+    await fs.writeFile(gradlePath, [
+      'plugins {',
+      "\tid 'java'",
+      "\tid 'org.springframework.boot' version '3.5.4'",
+      '}',
+      '',
+      'dependencies {',
+      "\timplementation 'org.springframework.boot:spring-boot-starter-web'",
+      "\ttestImplementation 'org.springframework.boot:spring-boot-starter-test'",
+      '}',
+      '',
     ].join('\n'));
-    
-    // Select only anthropic. Both spring.ai and pre-existing contexa.llm belong to the host app.
-    await injectYml(ymlPath, { mode: 'shadow', enableAiSecurity: true, llmProviders: ['anthropic'] });
-    const root = loadYml(ymlPath);
-    
-    assert.ok(root.spring.ai.anthropic);
-    assert.ok(root.spring.ai.openai);
-    assert.equal(root.contexa.llm.chat.ollama.model, 'qwen2.5:7b');
+    assert.equal(await injectGradleDep(gradlePath), true);
+    assert.equal(await injectSpringAiDeps(gradlePath, ['ollama']), true);
+    const out = await fs.readFile(gradlePath, 'utf8');
+    const added = out.split('\n').filter(line => /ai\.ctxa|org\.springframework\.ai/.test(line));
+    assert.equal(added.length, 4, out);
+    for (const line of added) assert.match(line, /^\timplementation[ (]/, `tab indented: ${JSON.stringify(line)}`);
+    assert.equal(/^ +\S/m.test(out), false, 'no space-indented line introduced');
+  } finally { await fs.remove(dir); }
+});
+
+test('space-indented Gradle build file keeps space indentation', async () => {
+  const dir = await tempDir();
+  try {
+    const gradlePath = path.join(dir, 'build.gradle.kts');
+    await fs.writeFile(gradlePath, 'dependencies {\n    implementation("org.springframework.boot:spring-boot-starter-web")\n}\n');
+    await injectGradleDep(gradlePath);
+    const out = await fs.readFile(gradlePath, 'utf8');
+    assert.match(out, /^ {4}implementation\("ai\.ctxa:spring-boot-starter-contexa:/m);
+    assert.equal(out.includes('\t'), false);
+  } finally { await fs.remove(dir); }
+});
+
+test('tab-indented Maven pom gets tab-indented dependencies and BOM', async () => {
+  const dir = await tempDir();
+  try {
+    const pomPath = path.join(dir, 'pom.xml');
+    await fs.writeFile(pomPath, [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<project>',
+      '\t<modelVersion>4.0.0</modelVersion>',
+      '\t<artifactId>tabs</artifactId>',
+      '\t<dependencies>',
+      '\t\t<dependency>',
+      '\t\t\t<groupId>org.springframework.boot</groupId>',
+      '\t\t\t<artifactId>spring-boot-starter-web</artifactId>',
+      '\t\t</dependency>',
+      '\t</dependencies>',
+      '</project>',
+      '',
+    ].join('\n'));
+    assert.equal(await injectMavenDep(pomPath), true);
+    assert.equal(await injectSpringAiDeps(pomPath, ['openai']), true);
+    const out = await fs.readFile(pomPath, 'utf8');
+    assert.match(out, /\n\t\t<\/dependency>\n\t\t<dependency>\n\t\t\t<groupId>ai\.ctxa<\/groupId>\n\t\t\t<artifactId>spring-boot-starter-contexa<\/artifactId>\n\t\t\t<version>[^<]+<\/version>\n\t\t<\/dependency>\n/);
+    assert.match(out, /\n\t\t<dependency>\n\t\t\t<groupId>org\.springframework\.ai<\/groupId>\n\t\t\t<artifactId>spring-ai-starter-model-openai<\/artifactId>\n\t\t<\/dependency>\n/);
+    assert.match(out, /\n\t<dependencyManagement>\n\t\t<dependencies>\n\t\t\t<dependency>\n\t\t\t\t<groupId>org\.springframework\.ai<\/groupId>/);
+    assert.equal(/^ {2,}</m.test(out), false, `no space-indented element introduced:\n${out}`);
+    assert.match(out, /\n\t<\/dependencies>\n/, 'closing tag keeps its own indentation');
+  } finally { await fs.remove(dir); }
+});
+
+test('Maven: every inserted element is indented like its neighbours, also in new dependency blocks', async () => {
+  const dir = await tempDir();
+  try {
+    const pomPath = path.join(dir, 'pom.xml');
+    await fs.writeFile(pomPath, [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<project>',
+      '    <modelVersion>4.0.0</modelVersion>',
+      '    <artifactId>spaces</artifactId>',
+      '    <dependencyManagement>',
+      '    </dependencyManagement>',
+      '</project>',
+      '',
+    ].join('\n'));
+    assert.equal(await injectMavenDep(pomPath), true);
+    assert.equal(await injectSpringAiDeps(pomPath, ['ollama']), true);
+    const lines = (await fs.readFile(pomPath, 'utf8')).split('\n');
+    const indentOf = tag => lines.filter(line => line.trim() === tag).map(line => line.length - line.trimStart().length);
+    assert.deepEqual([...new Set(indentOf('<dependencyManagement>'))], [4]);
+    assert.deepEqual([...new Set(indentOf('</dependencyManagement>'))], [4]);
+    assert.deepEqual(indentOf('<dependencies>'), [8, 4], 'managed dependencies, then the project dependencies');
+    assert.deepEqual(indentOf('</dependencies>'), [8, 4]);
+    assert.deepEqual(indentOf('<dependency>'), [12, 8, 8, 8], 'the BOM, then the starter and the two Spring AI starters');
+    assert.deepEqual(indentOf('</dependency>'), [12, 8, 8, 8]);
   } finally { await fs.remove(dir); }
 });

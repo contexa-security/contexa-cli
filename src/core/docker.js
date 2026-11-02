@@ -49,10 +49,28 @@ function dockerTry(args, opts = {}) {
   return spawnSync('docker', args, { ...boundedOptions(opts), shell: false });
 }
 
-// Run `docker compose <args>` in the given working directory. Same array-arg
-// safety guarantee as dockerSync. cwd is required because compose is always
-// scoped to a specific directory in this CLI.
+// Which Compose is available: the `docker compose` plugin (v2), or the standalone
+// `docker-compose` (v1) that Debian/Ubuntu's docker.io package installs instead. Resolved once.
+let composeFlavor;
+function composeKind() {
+  if (composeFlavor !== undefined) return composeFlavor;
+  const plugin = spawnSync('docker', ['compose', 'version'], { stdio: 'ignore', timeout: TIMEOUTS.dockerCliProbeMs * 3, shell: false });
+  if (!plugin.error && plugin.status === 0) {
+    composeFlavor = 'plugin';
+  } else {
+    const standalone = spawnSync('docker-compose', ['version'], { stdio: 'ignore', timeout: TIMEOUTS.dockerCliProbeMs * 3, shell: false });
+    composeFlavor = !standalone.error && standalone.status === 0 ? 'standalone' : null;
+  }
+  return composeFlavor;
+}
+
+// Run `docker compose <args>` (or `docker-compose <args>`) in the given working directory. Same
+// array-arg safety guarantee as dockerSync. cwd is required because compose is always scoped to
+// a specific directory in this CLI.
 function dockerCompose(args, opts = {}) {
+  if (composeKind() === 'standalone') {
+    return spawnSync('docker-compose', args, { ...boundedOptions(opts), shell: false });
+  }
   return spawnSync('docker', ['compose', ...args], { ...boundedOptions(opts), shell: false });
 }
 
@@ -110,6 +128,7 @@ module.exports = {
   dockerSync,
   dockerTry,
   dockerCompose,
+  composeKind,
   DEFAULT_DOCKER_TIMEOUT_MS,
   isDockerCliInstalled,
   isDockerDaemonRunning,

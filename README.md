@@ -1,240 +1,140 @@
 # Contexa CLI
 
-AI-Native Zero Trust Security CLI for Spring Boot projects.
-
-`contexa-cli` adds the Contexa starter dependency and the minimum Contexa
-configuration needed by a Spring Boot application. The default installation path
-is intentionally simple:
+Adds [Contexa](https://docs.ctxa.ai/) to a Spring Boot 3.5 application and gets it running.
 
 ```bash
+cd your-spring-boot-project
 contexa init
 ```
 
-The command opens a guided setup. General users do not need to memorize long
-flags. Advanced flags exist for CI, scripted installs, and platform teams.
+That is the whole installation. `contexa init` asks one question (which AI model to use), shows
+what it will change, prepares a local database and AI model, changes the project, checks that the
+dependencies download, and offers to start the application to confirm it works.
 
 ---
 
-## Install
+## Install the CLI
 
-Linux / macOS / Git Bash / WSL:
+Linux / macOS:
 
 ```bash
 curl -fsSL https://install.ctxa.ai | sh
 ```
 
-Windows PowerShell 5.1 or later:
+Windows (PowerShell):
 
 ```powershell
 irm https://install.ctxa.ai/install.ps1 | iex
 ```
 
-Both installers download the binary, verify it against the SHA-256 digest
-published next to it on GitHub Releases, and refuse to install on mismatch.
+The installer verifies the signed release and its checksum before it replaces anything. Prebuilt
+binaries exist for Linux x64, macOS Apple Silicon and Windows x64.
 
-Supported prebuilt binaries:
+## Requirements
 
-- Linux x64
-- macOS ARM64
-- Windows x64
-
-Intel Macs, Linux ARM64, and other platforms must build from source.
-
----
-
-## Quick Start
-
-Run inside a Spring Boot project root:
-
-```bash
-contexa init
-```
-
-The CLI selects its language from `--lang`, `CONTEXA_LANG`, or the host locale,
-and uses the recommended quick path by default. The guided setup asks only
-whether AI security should be enabled now. If enabled, it then asks for the AI
-provider and whether it may add `@EnableAISecurity` to the main Spring Boot
-class.
-
-If you choose starter-only setup, changes stay small:
-
-- Adds `ai.ctxa:spring-boot-starter-contexa`.
-- Leaves every host `application.yml`, `.yaml`, `.properties`, and profile file
-  byte-identical.
-- Does not inject `spring.ai.*`.
-- Does not add provider dependencies unless AI security is explicitly selected.
-- Does not modify Java source unless the user explicitly allows it.
-- Does not start Docker or create infrastructure unless simulation/distributed
-  infrastructure is explicitly selected.
-
-Non-interactive `contexa init --yes` uses the safe starter-only defaults. In interactive mode, AI security is enabled only after the wizard asks and the user accepts.
-
-After initialization:
-
-```bash
-contexa status
-contexa doctor
-```
-
----
-
-## Language
-
-The CLI ships in English and Korean.
-
-```bash
-contexa --lang ko init
-contexa --lang en init
-```
-
-You can also set `CONTEXA_LANG=ko` or `CONTEXA_LANG=en`.
-
----
-
-## What `contexa init` Changes
-
-`contexa init` detects Maven or Gradle and then applies the selected changes.
-Before writing files, the CLI prints the planned changes.
-
-Basic starter-only setup:
-
-- Build file: adds the Contexa Spring Boot starter.
-- Host application configuration: no change. Defaults are owned by Contexa
-  properties and auto-configuration.
-- Runtime schema and seed data: handled by Contexa auto-configuration when the
-  application starts, not by copied SQL files in the CLI.
-
-AI security setup, only when selected in the wizard:
-
-- Adds provider dependencies for the chosen provider.
-- Writes only Contexa-owned AI settings.
-- Optionally adds `@EnableAISecurity` when the user approves.
-- API keys remain in environment variables or user-owned application settings.
-
-Infrastructure setup, only when selected:
-
-- `--simulate`: creates an isolated local simulation stack.
-- `--distributed`: creates a PoC/demo distributed stack.
-- Production deployments should use a proper infrastructure process such as
-  Kubernetes or Helm.
-
----
-
-## Commands
-
-The four primary workflows are:
-
-```bash
-contexa init                 # normal installation
-contexa reset                # restore normal installation changes
-contexa init --simulate      # isolated simulation installation
-contexa reset --simulate     # remove only isolated simulation changes
-```
-
-`status`, `doctor`, and `scan` are optional support commands. They are not
-required installation steps. The machine-readable command and version contract
-is `release-manifest.json`.
-
-### Advanced Automation
-
-The following flags are for CI, scripted installs, or platform teams. They are
-not required for normal installation.
-
-| Flag | Purpose |
+| What | Why |
 |---|---|
-| `--yes` | Skip prompts and use safe defaults. |
-| `--enable-ai-security` | Explicitly enable AI security during init. |
-| `--provider <openai\|anthropic\|ollama\|none>` | Select an AI provider for explicit AI setup. |
-| `--auto-annotate` | Add `@EnableAISecurity` to the main Spring Boot class. |
-| `--distributed` | Generate distributed PoC/demo infrastructure. |
-| `--simulate` | Generate isolated simulation infrastructure. |
-| `--no-docker` | With infrastructure setup, generate compose files but do not start containers. |
+| Java 17 or newer | Spring Boot 3 and Contexa |
+| A Spring Boot **3.5.x** application | Contexa 0.1.0 does not start on 3.4 and older, and does not support Spring Boot 4 yet. `contexa init` stops before changing anything if it finds another version |
+| Docker (Docker Desktop on Windows/macOS) | Runs the local PostgreSQL with pgvector. Not needed with `--db-url` |
+| Ollama, or an OpenAI / Anthropic API key | The AI model. Without a running Ollama, Contexa starts one in Docker |
 
-For automation, run `contexa init --help` and use only the flags your CI flow needs.
-
-The normal installation entry point remains:
-
-```bash
-contexa init
-```
+No project yet? Run `contexa init` in an empty folder: it creates a small Spring Boot 3.5
+application with Contexa and sample sign-in accounts. (start.spring.io only creates Spring Boot 4
+projects now.)
 
 ---
 
-## Configuration
+## What `contexa init` does
 
-Contexa defaults are owned by the starter and auto-configuration. The CLI avoids
-writing long operational defaults into a customer application.
+In your project:
 
-Common environment variables:
+- Adds `ai.ctxa:spring-boot-starter-contexa`, the Spring AI BOM, the model starter and the PgVector
+  starter to the build file (Maven, Gradle Groovy or Kotlin DSL, also inside multi-module builds).
+- Adds `@EnableAISecurity` to the `@SpringBootApplication` class:
+  - your application declares a `SecurityFilterChain` → `@EnableAISecurity` (your sign-in stays;
+    if it signs in with Spring Boot's default user, which the starter would turn off, that user
+    `user` is kept with a password made once and kept in `~/.contexa/credentials.properties`;
+    Contexa evaluates the signed-in requests);
+  - otherwise → `@EnableAISecurity(mode = SecurityMode.FULL)` (Contexa provides the sign-in and the
+    admin console).
+- Writes Contexa's settings to `src/main/resources/config/application.yml`. Spring Boot reads that
+  file by itself, so your own `application.yml` / `application.properties` stay unchanged. Keys you
+  already set yourself are never written there.
 
-| Variable | Purpose |
+On this computer (shared by all your projects):
+
+- A PostgreSQL with pgvector in Docker (`contexa-local-postgres`, on a free port such as 55432),
+  with a database of its own for each project.
+- Ollama: the one already running on your computer, or one started in Docker. The models are
+  downloaded once.
+- When Contexa provides the sign-in: a local mail inbox (Mailpit) that receives the one-time
+  sign-in codes, so the second sign-in step works without a mail server, and a password for the
+  admin-console account `admin`, kept in `~/.contexa/credentials.properties` (outside the project)
+  and shown at the end. Contexa creates the account when the application first starts; the
+  example application created in an empty folder uses the sample accounts (`admin` / `1111`).
+
+Contexa starts in **SHADOW** mode: it analyses and records requests but blocks nothing yet. Change
+`contexa.security.zerotrust.mode` to `ENFORCE` (or switch it in the admin console) once you have
+reviewed its decisions.
+
+Running `contexa init` again is safe; it checks what is in place and adds only what is missing.
+
+### Options
+
+Everything is asked interactively; options are for scripts and CI.
+
+| Option | Meaning |
 |---|---|
-| `CONTEXA_DB_URL` / `DB_URL` | Contexa JDBC URL |
-| `CONTEXA_DB_USERNAME` / `DB_USERNAME` | Contexa DB username |
-| `CONTEXA_DB_PASSWORD` / `DB_PASSWORD` | Contexa DB password |
-| `OPENAI_API_KEY` | OpenAI API key, if OpenAI is selected |
-| `ANTHROPIC_API_KEY` | Anthropic API key, if Anthropic is selected |
-| `OLLAMA_BASE_URL` | Ollama endpoint, if Ollama is selected |
+| `--provider <ollama\|openai\|anthropic>` | AI model provider (default `ollama`) |
+| `--yes` | Do not ask; use the defaults |
+| `--dir <path>` | Project folder (default: current folder) |
+| `--db-url <jdbc-url>` | Use your own PostgreSQL (with pgvector) instead of the local one; the password comes from `CONTEXA_DB_PASSWORD` |
+| `--db-username <name>` | User for `--db-url` (default `contexa`) |
+| `--lang <en\|ko>` | Language of the CLI (also `CONTEXA_LANG`) |
 
-For production, set `CONTEXA_DB_*` explicitly and do not rely on demo defaults.
-API keys must not be committed to source control.
+API keys for OpenAI and Anthropic come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, or are asked
+for and kept in `~/.contexa/credentials.properties` — never in your project.
 
 ---
 
-## Reset Safety
-
-`contexa init` records a manifest of files it changed. `contexa reset` uses that
-manifest and backups to restore only CLI-created or CLI-modified files. It does
-not broadly delete user-owned source or settings.
-
-Simulation reset:
+## Other commands
 
 ```bash
-contexa reset --simulate
+contexa doctor   # checks everything Contexa needs and tells how to fix what is missing
+contexa reset    # removes Contexa from the project again
 ```
 
-Project reset:
-
-```bash
-contexa reset
-```
+`contexa reset` restores exactly the files `contexa init` changed, from the backups it took.
+Changes you made afterwards are kept; where they overlap with Contexa's changes the file is left
+as it is and reported. The local services stay for your other projects; when no project uses them
+any more, `contexa reset` offers to remove them (or use `contexa reset --services`).
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Resolution |
+| You see | Do this |
 |---|---|
-| `contexa: command not found` after install | Open a new terminal, then run `which contexa` or `Get-Command contexa`. |
-| `application.yml is not valid YAML` | Fix the indicated YAML line and rerun `contexa init`. The previous file is backed up. |
-| Docker is not installed | Docker is only needed when simulation or distributed infrastructure is selected. Install Docker and rerun `contexa init`, or use your own infrastructure. |
-| Docker daemon is not running | Start Docker Desktop or the Docker service. With infrastructure setup, `--no-docker` can generate compose files without starting containers. |
-| Ollama model pull failed | This matters only when Ollama is selected. Pull the model manually with `docker exec contexa-ollama ollama pull <model>`, then rerun the app. |
-| Schema or seed data is missing | Confirm the application includes `spring-boot-starter-contexa`, points `contexa.datasource.*` at the Contexa database, and starts with Contexa IAM seed enabled or unset. |
+| `contexa: command not found` right after installing | Run the `export PATH=...` line the installer printed, or open a new terminal |
+| `SPRING_BOOT_UNSUPPORTED` / `SPRING_BOOT_TOO_OLD` | Contexa needs Spring Boot 3.5.x. Change the version to 3.5.x, or start from `contexa init` in an empty folder |
+| `DOCKER_MISSING` / `DOCKER_STOPPED` | Install or start Docker Desktop, or use `--db-url` with your own PostgreSQL |
+| `OLLAMA_MISSING` | Install Ollama from https://ollama.com/download, or use `--provider openai` |
+| `STARTER_UNAVAILABLE` | Your build cannot download the Contexa starter; check its network/proxy or repository settings |
+| You need the admin-console password | It was shown at the end of `contexa init` and is the value of `contexa.iam.seed.admin.password` in `~/.contexa/credentials.properties`. Contexa creates the account `admin` when the application starts as the same user on the same computer |
+| The application does not start | Run `contexa doctor` |
 
 ---
 
-## From Source
+## Developing the CLI
 
 ```bash
 git clone https://github.com/contexa-security/contexa-cli
 cd contexa-cli
-npm install
+npm ci
 npm test
 node src/index.js init
 ```
-
----
-
-## Security Notes
-
-- Set real database credentials before production use.
-- Keep API keys in environment variables or a secret manager.
-- Do not commit generated demo credentials.
-- Use SHADOW or observation modes until operational monitoring is sufficient.
-- Switch to ENFORCE only after review by the operator.
-
----
 
 ## License
 

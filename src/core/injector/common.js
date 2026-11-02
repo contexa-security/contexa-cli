@@ -2,12 +2,9 @@
 
 // Shared constants and tiny helpers used across the injector submodules.
 // Kept minimal on purpose: anything bigger belongs in its domain module
-// (yml/build/compose/standalone).
+// (config/build).
 
-const path = require('path');
-const fs = require('fs-extra');
 const releaseManifest = require('../../../release-manifest.json');
-const { backupRoot, INSTALL_MODES } = require('../manifest');
 
 const CONTEXA_GROUP_ID = releaseManifest.starter.groupId;
 const CONTEXA_ARTIFACT_ID = releaseManifest.starter.artifactId;
@@ -17,8 +14,7 @@ const DEPENDENCY_VERSION_DEFAULTS = Object.freeze({
 });
 const DEPENDENCY_VERSION_ENV = Object.freeze({
   springAiBom: 'CONTEXA_SPRING_AI_VERSION',
-  redisson: 'CONTEXA_REDISSON_VERSION',
-  springStateMachine: 'CONTEXA_SPRING_STATEMACHINE_VERSION',
+  sampleSpringBoot: 'CONTEXA_SAMPLE_SPRING_BOOT_VERSION',
 });
 const DEPENDENCY_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]*$/;
 const SPRING_AI_PROVIDER_ARTIFACTS = Object.freeze({
@@ -56,43 +52,6 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-async function backupFile(filePath, options = {}) {
-  const mode = typeof options === 'string' ? options : options.mode;
-  const installMode = mode === INSTALL_MODES.SIMULATION
-    ? INSTALL_MODES.SIMULATION : INSTALL_MODES.NORMAL;
-  let currentDir = path.dirname(filePath);
-  let projectRoot = null;
-  
-  for (let depth = 0; depth < 10; depth++) {
-    if (await fs.pathExists(path.join(currentDir, 'build.gradle')) ||
-        await fs.pathExists(path.join(currentDir, 'build.gradle.kts')) ||
-        await fs.pathExists(path.join(currentDir, 'pom.xml')) ||
-        await fs.pathExists(path.join(currentDir, 'settings.gradle'))) {
-      projectRoot = currentDir;
-      break;
-    }
-    const parent = path.resolve(currentDir, '..');
-    if (parent === currentDir) break;
-    currentDir = parent;
-  }
-  
-  if (!projectRoot) {
-    projectRoot = path.dirname(filePath);
-  }
-
-  const relativePath = path.relative(projectRoot, filePath);
-  const backupDest = path.join(backupRoot(projectRoot, installMode), relativePath);
-  
-  // Preserve the initial clean state. If backup already exists, do not overwrite it.
-  if (await fs.pathExists(backupDest)) {
-    return backupDest;
-  }
-  
-  await fs.ensureDir(path.dirname(backupDest));
-  await fs.copy(filePath, backupDest, { overwrite: false });
-  return backupDest;
-}
-
 module.exports = {
   CONTEXA_GROUP_ID,
   CONTEXA_ARTIFACT_ID,
@@ -101,5 +60,4 @@ module.exports = {
   resolveDependencyVersions,
   springAiProviderArtifacts,
   escapeRegex,
-  backupFile,
 };

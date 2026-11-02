@@ -110,10 +110,12 @@ async function acquireInstallLock(projectDir, mode = INSTALL_MODES.NORMAL, opera
         if (readError.code === 'ENOENT') continue;
       }
       if (owner && processIsRunning(Number(owner.pid))) {
-        const active = new Error(`Another contexa ${operation} is already running for this project's ${normalizedMode} state (PID ${owner.pid})`);
+        // The message names what the other process runs (a reset blocks an init too).
+        const running = owner.operation || operation;
+        const active = new Error(`Another contexa ${running} is already running for this project's ${normalizedMode} state (PID ${owner.pid})`);
         active.code = 'INIT_ALREADY_RUNNING';
         active.messageKey = 'init.error.alreadyRunning';
-        active.messageArgs = [operation, normalizedMode, owner.pid];
+        active.messageArgs = [running, normalizedMode, owner.pid];
         throw active;
       }
 
@@ -1509,6 +1511,7 @@ module.exports = {
   stateRoot,
   manifestPath,
   installLockPath,
+  processIsRunning,
   backupRoot,
   appliedRoot,
   loadManifest,

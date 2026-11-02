@@ -1,168 +1,250 @@
 'use strict';
 
+// `contexa doctor`: is everything the application needs for Contexa in place? Each line is a
+// check that would otherwise surface as a startup failure, with the fix next to it.
+
 const chalk = require('chalk');
-const { spawnSync } = require('child_process');
-const http = require('http');
+const fs = require('fs-extra');
+const net = require('net');
+const path = require('path');
+const yaml = require('js-yaml');
 const { t } = require('../core/i18n');
-const { isDockerCliInstalled, isDockerDaemonRunning } = require('../core/docker');
-const { isPortBound } = require('../core/preflight');
-const { DEFAULT_OLLAMA_CHAT_MODEL, normalizeProviders } = require('../core/provider');
+const releaseManifest = require('../../release-manifest.json');
+const { detectSpringProject } = require('../core/detector');
+const { bootSupport, javaMajorVersion } = require('../core/init-application');
+const { INSTALL_MODES, loadManifest, manifestPath } = require('../core/manifest');
 const {
-  DEFAULT_INFRASTRUCTURE_PORTS,
-  SIMULATION_PORTS,
-  configuredPort,
-} = require('../core/infrastructure');
-const { TIMEOUTS } = require('../core/timeouts');
+  CONFIG_DIR_FILE, FALLBACK_FILE, FALLBACK_IMPORT, isContexaSettings, providerKey,
+} = require('../core/injector/config');
+const { hasCredential, credentialsPath } = require('../core/credentials');
+const local = require('../core/local-infra');
+const { runCommandText } = require('../core/build-tool');
 
-function checkOllamaModels(port) {
-  return new Promise((resolve) => {
-    const options = {
-      hostname: '127.0.0.1',
-      port: port,
-      path: '/api/tags',
-      method: 'GET',
-      timeout: TIMEOUTS.httpHealthProbeMs
-    };
+// The folder holding Contexa's installation record: this one or a parent (a module of a
+// multi-module build was given).
+async function findInstallRoot(dir) {
+  let current = path.resolve(dir);
+  for (let depth = 0; depth < 6; depth++) {
+    if (await fs.pathExists(manifestPath(current, INSTALL_MODES.NORMAL))) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
 
-    const req = http.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const models = (json.models || []).map(m => m.name);
-          resolve({ reachable: true, models });
-        } catch {
-          resolve({ reachable: true, models: [] });
-        }
-      });
-    });
-
-    req.on('error', () => resolve({ reachable: false, models: [] }));
-    req.on('timeout', () => { req.destroy(); resolve({ reachable: false, models: [] }); });
-    req.end();
+function resolvePlaceholder(value, environment = process.env) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\$\{([A-Za-z0-9_.-]+)(?::([^}]*))?\}/g, (match, name, fallback) => {
+    if (environment[name] !== undefined && environment[name] !== '') return environment[name];
+    return fallback === undefined ? match : fallback;
   });
 }
 
-module.exports = function (program) {
+function readYamlValue(file, dottedKey) {
+  try {
+    for (const document of yaml.loadAll(fs.readFileSync(file, 'utf8'))) {
+      let node = document;
+      for (const part of dottedKey.split('.')) {
+        if (!node || typeof node !== 'object') { node = undefined; break; }
+        node = node[part];
+      }
+      if (node !== undefined && node !== null && typeof node !== 'object') return String(node);
+    }
+  } catch { /* unreadable: reported by the settings check */ }
+  return null;
+}
+
+function readPropertiesValue(file, dottedKey) {
+  try {
+    const match = fs.readFileSync(file, 'utf8').match(
+      new RegExp(`^\\s*${dottedKey.replace(/[.-]/g, '\\$&')}\\s*[=:]\\s*(.*)$`, 'm'));
+    return match ? match[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// The effective value of a key, looking where Spring would: Contexa's settings file first
+// (it has precedence), then the application's own files.
+function configValue(settingsFile, hostFiles, dottedKey) {
+  const candidates = [settingsFile, ...hostFiles].filter(Boolean);
+  for (const file of candidates) {
+    const value = file.endsWith('.properties') ? readPropertiesValue(file, dottedKey) : readYamlValue(file, dottedKey);
+    if (value !== null) return resolvePlaceholder(value);
+  }
+  return null;
+}
+
+function tcpReachable(host, port, timeoutMs = 3000) {
+  return new Promise(resolve => {
+    const socket = net.connect({ host, port });
+    const done = result => { socket.destroy(); resolve(result); };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+function parseJdbcUrl(url) {
+  const match = String(url || '').match(/^jdbc:postgresql:\/\/([^:/?]+)(?::(\d+))?\/([^?]+)/);
+  return match ? { host: match[1], port: Number(match[2] || 5432), database: match[3] } : null;
+}
+
+async function runDoctor(opts) {
+  const results = [];
+  const add = (status, label, detail, fix) => results.push({ status, label, detail, fix });
+  const dir = path.resolve(opts.dir || process.cwd());
+  console.log(chalk.cyan(`\n  Contexa doctor (CLI ${releaseManifest.cliVersion})\n`));
+
+  const installRoot = await findInstallRoot(dir);
+  const project = await detectSpringProject(dir, { probeDocker: false });
+  if (!project.isSpring) {
+    add('fail', t('doctor.project'), t('doctor.project.none'), t('doctor.project.fix'));
+    return print(results);
+  }
+  add('ok', t('doctor.project'), `${project.projectName} (${project.buildTool === 'maven' ? 'Maven' : 'Gradle'})`);
+
+  const boot = project.springBootVersion;
+  const support = bootSupport(boot);
+  if (support === 'unknown') add('warn', 'Spring Boot', t('doctor.boot.unknown'));
+  else if (support === 'supported') add('ok', 'Spring Boot', boot);
+  else add('fail', 'Spring Boot', boot, t('doctor.boot.fix'));
+
+  const java = javaMajorVersion();
+  if (java === null) add('fail', 'Java', t('doctor.java.missing'), t('doctor.java.fix'));
+  else if (java < 17) add('warn', 'Java', String(java), t('doctor.java.fix'));
+  else add('ok', 'Java', String(java));
+
+  if (!project.hasContexta && !project.hasEnableAiSecurity && !installRoot) {
+    // Nothing of Contexa here yet: one line instead of a failure per missing piece.
+    add('fail', 'Contexa', t('doctor.notSetUp'), t('doctor.runInit'));
+    print(results);
+    console.log('');
+    return results;
+  }
+  if (!project.hasContexta) {
+    add('fail', t('doctor.starter'), t('doctor.starter.missing'), t('doctor.runInit'));
+  } else {
+    add('ok', t('doctor.starter'), `${releaseManifest.starter.artifactId}:${project.contextaVersion || '?'}`);
+  }
+  if (!project.hasEnableAiSecurity) add('fail', '@EnableAISecurity', t('doctor.annotation.missing'), t('doctor.runInit'));
+  else add('ok', '@EnableAISecurity', t(project.hasHostSecurityFilterChain ? 'doctor.annotation.app' : 'doctor.annotation.contexa'));
+
+  // config/application.yml is Contexa's only when Contexa wrote it; an application that keeps its
+  // own file there has Contexa's settings in application-contexa.yml.
+  const configDirFile = path.join(project.projectDir, CONFIG_DIR_FILE);
+  const fallbackFile = path.join(project.projectDir, FALLBACK_FILE);
+  let settingsFile = null;
+  if (isContexaSettings(await fs.readFile(configDirFile, 'utf8').catch(() => ''))) settingsFile = configDirFile;
+  else if (await fs.pathExists(fallbackFile)) settingsFile = fallbackFile;
+  const hostFiles = project.applicationConfigPaths.filter(file => /application\.(?:yml|yaml|properties)$/.test(file))
+    .concat(project.configDirPaths || []);
+  if (settingsFile && settingsFile.endsWith('application-contexa.yml')) {
+    const imported = hostFiles.concat(
+      ['application.yml', 'application.yaml', 'application.properties']
+        .map(name => path.join(project.projectDir, 'src', 'main', 'resources', 'config', name)))
+      .some(file => fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(FALLBACK_IMPORT));
+    if (!imported) {
+      add('fail', t('doctor.settings'), t('doctor.settings.notLoaded', path.relative(dir, settingsFile)), t('doctor.runInit'));
+      settingsFile = null;
+    }
+  }
+  if (settingsFile) add('ok', t('doctor.settings'), path.relative(dir, settingsFile));
+  else if (!results.some(result => result.label === t('doctor.settings'))) {
+    add('warn', t('doctor.settings'), t('doctor.settings.none'), t('doctor.runInit'));
+  }
+
+  const manifest = installRoot ? await loadManifest(installRoot, INSTALL_MODES.NORMAL).catch(() => null) : null;
+  const metadata = (manifest && manifest.metadata) || {};
+
+  // Database
+  const url = configValue(settingsFile, hostFiles, 'contexa.datasource.url');
+  if (!url || url.includes('${')) {
+    add('fail', t('doctor.database'), t('doctor.database.missing'), t('doctor.runInit'));
+  } else {
+    const target = parseJdbcUrl(url);
+    const reachable = target ? await tcpReachable(target.host, target.port) : false;
+    if (reachable) {
+      add('ok', t('doctor.database'), url);
+    } else {
+      const container = local.containerState(local.POSTGRES_CONTAINER);
+      const fix = container.exists && !container.running
+        ? t('doctor.database.startContainer', local.POSTGRES_CONTAINER)
+        : metadata.localServices && metadata.localServices.postgres
+          ? t('doctor.database.rerunInit')
+          : t('doctor.database.fix');
+      add('fail', t('doctor.database'), t('doctor.database.unreachable', url), fix);
+    }
+  }
+  const password = configValue(settingsFile, hostFiles, 'contexa.datasource.password');
+  if (password && password.includes('${CONTEXA_DB_PASSWORD}')) {
+    add('fail', t('doctor.databasePassword'), t('doctor.databasePassword.missing'), t('doctor.databasePassword.fix'));
+  }
+
+  // AI provider
+  const priority = (configValue(settingsFile, hostFiles, 'contexa.llm.selection.chat.priority') || metadata.provider || '').split(',')[0].trim();
+  const provider = ['ollama', 'openai', 'anthropic'].includes(priority) ? priority : null;
+  if (!provider) {
+    add('warn', t('doctor.ai'), t('doctor.ai.unknown'));
+  } else {
+    const needsOllama = provider === 'ollama' || provider === 'anthropic'
+      || configValue(settingsFile, hostFiles, 'contexa.llm.selection.embedding.priority') === 'ollama';
+    if (needsOllama) {
+      const baseUrl = configValue(settingsFile, hostFiles, 'contexa.llm.chat.ollama.base-url') || local.NATIVE_OLLAMA_URL;
+      const models = await local.ollamaModels(baseUrl);
+      if (!models) {
+        add('fail', 'Ollama', t('doctor.ollama.unreachable', baseUrl), t('doctor.ollama.fix'));
+      } else {
+        const wanted = [
+          provider === 'ollama' ? configValue(settingsFile, hostFiles, 'contexa.llm.chat.ollama.model') || 'qwen3:8b' : null,
+          configValue(settingsFile, hostFiles, 'contexa.llm.embedding.ollama.model') || 'mxbai-embed-large',
+        ].filter(Boolean);
+        const missing = wanted.filter(model => !local.hasModel(models, model));
+        if (missing.length) add('fail', 'Ollama', t('doctor.ollama.models', missing.join(', ')), t('doctor.runInit'));
+        else add('ok', 'Ollama', `${baseUrl} (${wanted.join(', ')})`);
+      }
+    }
+    const key = providerKey(provider);
+    if (key) {
+      const configured = configValue(settingsFile, hostFiles, key.property);
+      if ((configured && !configured.includes('${')) || process.env[key.env] || await hasCredential(key.property)) {
+        add('ok', t('doctor.apiKey', provider), t('doctor.apiKey.found'));
+      } else {
+        add('fail', t('doctor.apiKey', provider), t('doctor.apiKey.missing'), t('doctor.apiKey.fix', key.env, credentialsPath()));
+      }
+    }
+  }
+
+  if (!installRoot) add('warn', t('doctor.record'), t('doctor.record.none'));
+  print(results);
+  if (!results.some(result => result.status === 'fail')) {
+    console.log(chalk.white(`\n  ${t('doctor.ready')}`));
+    for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`    ${line}`));
+  }
+  console.log('');
+  return results;
+}
+
+function print(results) {
+  for (const result of results) {
+    const mark = result.status === 'ok' ? chalk.green('v') : result.status === 'warn' ? chalk.yellow('!') : chalk.red('x');
+    const detail = result.detail ? chalk.gray(` ${result.detail}`) : '';
+    console.log(`  ${mark} ${result.label}:${detail}`);
+    if (result.fix) console.log(chalk.yellow(`      -> ${result.fix}`));
+  }
+  if (results.some(result => result.status === 'fail')) process.exitCode = 1;
+  return results;
+}
+
+module.exports = function registerDoctorCommand(program) {
   program
     .command('doctor')
     .description(t('doctor.description'))
-    .option('--provider <name>', t('doctor.option.provider'))
-    .option('--include-ollama', t('doctor.option.ollama'))
-    .option('--infra', t('doctor.option.infra'))
-    .option('--simulate', t('doctor.option.simulate'))
-    .action(async (opts) => {
-      console.log(chalk.cyan('\n  ============================================='));
-      console.log(chalk.cyan(`  ${t('doctor.title')}`));
-      console.log(chalk.cyan('  =============================================\n'));
-
-      let overallPass = true;
-      const providersToCheck = normalizeProviders(opts.provider, {
-        includeOllama: opts.includeOllama,
-        simulate: opts.simulate,
-      });
-      const needsDocker = !!(opts.infra || opts.simulate);
-      const needsOllama = providersToCheck.includes('ollama');
-
-      // 1. Java 17 Check
-      try {
-        const javaResult = spawnSync('java', ['-version'], {
-          encoding: 'utf8',
-          windowsHide: true,
-          timeout: TIMEOUTS.javaCommandProbeMs,
-        });
-        if (javaResult.error || javaResult.status !== 0) {
-          throw javaResult.error || new Error('java -version failed');
-        }
-        const javaVerOutput = `${javaResult.stdout || ''}\n${javaResult.stderr || ''}`;
-        const match = javaVerOutput.match(/version "(.*?)"/);
-        const version = match ? match[1] : 'unknown';
-        const isJava17 = version.startsWith('17') || parseInt(version.split('.')[0], 10) >= 17;
-
-        if (isJava17) {
-          console.log(`  [${chalk.green('OK')}] ${t('doctor.java.ok', version)}`);
-        } else {
-          overallPass = false;
-          console.log(`  [${chalk.red('FAIL')}] ${t('doctor.java.unsupported', version)}`);
-          console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.java.fix')}`);
-        }
-      } catch {
-        overallPass = false;
-        console.log(`  [${chalk.red('FAIL')}] ${t('doctor.java.missing')}`);
-        console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.java.fix')}`);
-      }
-
-      // 2. Docker CLI and Daemon (only when infrastructure checks are requested)
-      if (needsDocker) {
-        if (!isDockerCliInstalled()) {
-          overallPass = false;
-          console.log(`  [${chalk.red('FAIL')}] ${t('doctor.docker.missing')}`);
-          console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.docker.install')}`);
-        } else if (!isDockerDaemonRunning()) {
-          overallPass = false;
-          console.log(`  [${chalk.red('FAIL')}] ${t('doctor.docker.stopped')}`);
-          console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.docker.start')}`);
-        } else {
-          console.log(`  [${chalk.green('OK')}] ${t('doctor.docker.ok')}`);
-        }
-      } else {
-        console.log(`  [${chalk.gray('SKIP')}] ${t('doctor.docker.skip')}`);
-      }
-
-      // 3. PostgreSQL Port Collision (Default 5432 and simulation 25432)
-      if (needsDocker) {
-        const isPostgresPortBound = await isPortBound(DEFAULT_INFRASTRUCTURE_PORTS.postgres);
-        const isSimPostgresPortBound = await isPortBound(SIMULATION_PORTS.postgres);
-        if (isPostgresPortBound || isSimPostgresPortBound) {
-          console.log(`  [${chalk.yellow('WARN')}] ${t('doctor.postgres.busy', DEFAULT_INFRASTRUCTURE_PORTS.postgres, SIMULATION_PORTS.postgres)}`);
-          console.log(`    ${chalk.gray(t('doctor.note'))} ${t('doctor.postgres.noReuse')}`);
-        } else {
-          console.log(`  [${chalk.green('OK')}] ${t('doctor.postgres.free')}`);
-        }
-      } else {
-        console.log(`  [${chalk.gray('SKIP')}] ${t('doctor.postgres.skip')}`);
-      }
-
-      // 4. Ollama and LLM Models (11434 and simulation 31434)
-      if (needsOllama) {
-        const ollamaPort = configuredPort('CONTEXA_OLLAMA_PORT', DEFAULT_INFRASTRUCTURE_PORTS.ollama);
-        const ollamaSimPort = SIMULATION_PORTS.ollama;
-
-        let ollamaStatus = await checkOllamaModels(ollamaPort);
-        if (!ollamaStatus.reachable) {
-          ollamaStatus = await checkOllamaModels(ollamaSimPort);
-        }
-
-        if (ollamaStatus.reachable) {
-          console.log(`  [${chalk.green('OK')}] ${t('doctor.ollama.ok')}`);
-          const requiredChatModel = process.env.OLLAMA_CHAT_MODEL || DEFAULT_OLLAMA_CHAT_MODEL;
-          const hasChatModel = ollamaStatus.models.some(m => m.startsWith(requiredChatModel.split(':')[0]));
-
-          if (hasChatModel) {
-            console.log(`  [${chalk.green('OK')}] ${t('doctor.ollama.model.ok', requiredChatModel)}`);
-          } else {
-            overallPass = false;
-            console.log(`  [${chalk.red('FAIL')}] ${t('doctor.ollama.model.missing', requiredChatModel)}`);
-            console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.ollama.model.fix', requiredChatModel)}`);
-          }
-        } else {
-          overallPass = false;
-          console.log(`  [${chalk.red('FAIL')}] ${t('doctor.ollama.missing', ollamaPort, ollamaSimPort)}`);
-          console.log(`    ${chalk.yellow('[FIX]')} ${t('doctor.ollama.fix')}`);
-        }
-      } else {
-        console.log(`  [${chalk.gray('SKIP')}] ${t('doctor.ollama.skip')}`);
-      }
-
-      console.log('');
-      if (overallPass) {
-        console.log(chalk.green(`  v ${t('doctor.success')}\n`));
-      } else {
-        console.log(chalk.red(`  x ${t('doctor.fail')}\n`));
-        const error = new Error(`DOCTOR_CHECK_FAILED ${t('doctor.fail')}`);
-        error.code = 'DOCTOR_CHECK_FAILED';
-        throw error;
-      }
-    });
+    .option('--dir <path>', t('init.option.dir'))
+    .action(runDoctor);
 };
+module.exports.runDoctor = runDoctor;
+module.exports.findInstallRoot = findInstallRoot;
+module.exports.resolvePlaceholder = resolvePlaceholder;
+module.exports.parseJdbcUrl = parseJdbcUrl;
