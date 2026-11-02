@@ -642,7 +642,11 @@ function printDone(context) {
   if (context.external) console.log(chalk.yellow(`    - ${t('init.done.dbPassword', context.external.url)}`));
   console.log(chalk.white(`\n  ${t('init.done.run')}`));
   // A folder below the current one reads best as a relative path, anything else as absolute.
-  const below = relative(process.cwd(), installRoot);
+  // Both sides as real paths, so a symbolic link in either (macOS /var) does not hide the relation.
+  const real = dir => {
+    try { return (require('fs').realpathSync.native || require('fs').realpathSync)(dir); } catch { return dir; }
+  };
+  const below = relative(real(process.cwd()), real(installRoot));
   const runDir = below.startsWith('..') ? installRoot : below;
   if (runDir !== '.') console.log(chalk.cyan(`    cd ${runDir}`));
   for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`    ${line}`));

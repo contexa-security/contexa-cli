@@ -677,3 +677,18 @@ test('Spring Boot default user is left alone when the application has users, OAu
     assert.doesNotMatch(result.stdout, /default user/, `${path.basename(project)}: no message`);
   }
 });
+
+test('a project reached through a symbolic link and through its real path is one project (F-53)', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-link-');
+  const project = await createGradleProject(sandbox.root, 'linked-app');
+  const link = path.join(sandbox.root, 'linked-app-link');
+  await fs.symlink(project, link, process.platform === 'win32' ? 'junction' : 'dir');
+  const viaLink = await init(link, sandbox);
+  assert.equal(viaLink.code, 0, viaLink.output);
+  const config = await fs.readFile(path.join(project, CONFIG_FILE));
+  const viaRealPath = await init(project, sandbox);
+  assert.equal(viaRealPath.code, 0, viaRealPath.output);
+  assert.deepEqual(await fs.readFile(path.join(project, CONFIG_FILE)), config, 'the same database, the same settings');
+  assert.equal(Object.keys((await fs.readJson(localStatePath(sandbox))).projects).length, 1);
+});
+

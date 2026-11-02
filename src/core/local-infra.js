@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const fs = require('fs-extra');
 const http = require('http');
 const net = require('net');
+const nodeFs = require('fs');
 const path = require('path');
 const { composeKind, dockerCompose, dockerTry, isDockerCliInstalled, isDockerDaemonRunning } = require('./docker');
 const { processIsRunning } = require('./manifest');
@@ -137,8 +138,16 @@ async function withStateLock(work) {
   }
 }
 
+// One key per project folder, however it was reached: through --dir, from inside the folder, or
+// through a symbolic link (macOS keeps temporary folders behind /var -> /private/var). Without the
+// real path, the same project could get a second database (F-53).
 function canonicalProjectKey(projectDir) {
-  const resolved = path.resolve(projectDir);
+  let resolved = path.resolve(projectDir);
+  try {
+    resolved = (nodeFs.realpathSync.native || nodeFs.realpathSync)(resolved);
+  } catch {
+    // The folder is gone (a project removed by hand); its resolved path is the key it had.
+  }
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
