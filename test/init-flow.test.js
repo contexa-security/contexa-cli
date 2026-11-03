@@ -77,6 +77,67 @@ test('Spring Boot 4 project: exit 1, SPRING_BOOT_UNSUPPORTED, no file changed an
   assert.equal(await fs.pathExists(localStatePath(sandbox)), false, 'nothing was prepared on the computer either');
 });
 
+test('Spring Boot 3.5 build file that still names Spring Boot 4 starters: exit 1, BOOT4_DEPENDENCIES, nothing prepared', async t => {
+  // The plugin version was changed from 4.x back to 3.5.4 and the starter names were left as they were.
+  const sandbox = await sandboxFor(t, 'ctxa-flow-boot4names-');
+  const project = await createGradleProject(sandbox.root, 'boot4names');
+  await fs.outputFile(path.join(project, 'build.gradle'), [
+    'plugins {',
+    "    id 'java'",
+    "    id 'org.springframework.boot' version '3.5.4'",
+    "    id 'io.spring.dependency-management' version '1.1.7'",
+    '}',
+    '',
+    'repositories {',
+    '    mavenCentral()',
+    '}',
+    '',
+    'dependencies {',
+    "    implementation 'org.springframework.boot:spring-boot-starter-webmvc'",
+    "    runtimeOnly 'org.postgresql:postgresql'",
+    "    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'",
+    '}',
+    '',
+  ].join('\n'));
+  const before = await snapshotDirectory(project);
+  const result = await init(project, sandbox);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.stderr, /BOOT4_DEPENDENCIES/);
+  assert.match(result.stderr, /spring-boot-starter-webmvc -> spring-boot-starter-web/);
+  assert.match(result.stderr, /spring-boot-starter-webmvc-test -> spring-boot-starter-test/);
+  assert.doesNotMatch(result.output, /Contexa is set up|Local services are running/);
+  assert.deepEqual(await snapshotDirectory(project), before);
+  assert.equal(await fs.pathExists(localStatePath(sandbox)), false, 'nothing was prepared on the computer either');
+});
+
+test('boot4OnlyStarters: names Spring Boot 4 starters in Gradle and Maven build files, not the ones of 3.5', async t => {
+  const { boot4OnlyStarters } = require('../src/core/init-application');
+  const sandbox = await sandboxFor(t, 'ctxa-flow-boot4scan-');
+  const gradle = path.join(sandbox.root, 'a.gradle');
+  await fs.outputFile(gradle, [
+    "implementation 'org.springframework.boot:spring-boot-starter-web'",
+    "implementation 'org.springframework.boot:spring-boot-starter-security'",
+    "testImplementation 'org.springframework.boot:spring-boot-starter-test'",
+    "implementation 'org.springframework.boot:spring-boot-starter-webmvc'",
+    "testImplementation 'org.springframework.boot:spring-boot-starter-security-test'",
+    "testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'",
+  ].join('\n'));
+  assert.deepEqual(boot4OnlyStarters(gradle), [
+    'spring-boot-starter-webmvc -> spring-boot-starter-web',
+    'spring-boot-starter-security-test -> spring-boot-starter-test',
+    'spring-boot-starter-webmvc-test -> spring-boot-starter-test',
+  ]);
+  const maven = path.join(sandbox.root, 'pom.xml');
+  await fs.outputFile(maven, '<dependencies><dependency><groupId>org.springframework.boot</groupId>'
+    + '<artifactId>spring-boot-starter-webmvc</artifactId></dependency>'
+    + '<dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies>');
+  assert.deepEqual(boot4OnlyStarters(maven), ['spring-boot-starter-webmvc -> spring-boot-starter-web']);
+  const clean = path.join(sandbox.root, 'clean.gradle');
+  await fs.outputFile(clean, "implementation 'org.springframework.boot:spring-boot-starter-web'\n");
+  assert.deepEqual(boot4OnlyStarters(clean), []);
+  assert.deepEqual(boot4OnlyStarters(path.join(sandbox.root, 'missing.gradle')), []);
+});
+
 test('Spring Boot 2 project: exit 1, SPRING_BOOT_TOO_OLD, no file changed', async t => {
   const sandbox = await sandboxFor(t, 'ctxa-flow-boot2-');
   const project = await createGradleProject(sandbox.root, 'boot2', { bootVersion: '2.7.18' });
@@ -201,6 +262,37 @@ test('init then reset: the project is byte-for-byte the original and no trace is
   assert.equal(again.code, 0, again.output);
   assert.equal(resetResult(again.stdout).result, 'NO_OWNED_INSTALLATION');
   assert.deepEqual(await snapshotDirectory(project), before);
+});
+
+test('the screen after init lists what changed, what to do now in numbered steps, every value of the database, and where to read more', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-done-');
+  const project = await createGradleProject(sandbox.root, 'shop');
+  const installed = await init(project, sandbox);
+  assert.equal(installed.code, 0, installed.output);
+  const screen = installed.stdout.slice(installed.stdout.indexOf('Contexa is set up.'));
+  const order = ['What changed in your project', 'What to do now', 'What was set up on this computer', 'More information',
+    'Something not working? Run: contexa doctor'].map(heading => screen.indexOf(heading));
+  assert.ok(order.every(position => position >= 0), `every part is there: ${order}`);
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'the parts come in the order a person needs them');
+  // what changed
+  assert.match(screen, /- build\.gradle: the Contexa starter and the Spring AI dependencies/);
+  assert.match(screen, /- src\/main\/java\/example\/SampleApplication\.java: @EnableAISecurity\(mode = FULL\)/);
+  assert.match(screen, /- src\/main\/resources\/config\/application\.yml: the Contexa settings/);
+  // what to do now: numbered, in order, with the account and the code
+  const steps = screen.match(/^\s+\d\. .*$/gm).map(line => line.trim());
+  assert.match(steps[0], /^1\. Start your application as usual:/);
+  assert.match(steps[1], /^2\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
+  assert.match(steps[2], /^3\. Sign in with the admin account: user admin, password [A-Za-z0-9]{16} \(kept in /);
+  assert.match(steps[3], /^4\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
+  // the database: name, address, user and password
+  assert.match(screen, /Database\s+contexa_shop at jdbc:postgresql:\/\/127\.0\.0\.1:55432\/contexa_shop/);
+  assert.match(screen, /user contexa, password contexa/);
+  assert.match(screen, /AI model\s+Ollama at .*: chat qwen3:8b, embeddings mxbai-embed-large/);
+  assert.match(screen, /Passwords\s+kept in .*credentials\.properties, outside your project/);
+  // where to read more
+  assert.match(screen, /Website\s+https:\/\/ctxa\.ai\b/);
+  assert.match(screen, /Docs\s+https:\/\/docs\.ctxa\.ai\/en\//);
+  assert.match(screen, /Live demo\s+https:\/\/demo\.ctxa\.ai\b/);
 });
 
 test('running init again is idempotent: project files stay byte-identical', async t => {
@@ -332,10 +424,10 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   const kept = (await fs.readFile(credentials, 'utf8')).match(/^spring\.security\.user\.password=\{noop\}([A-Za-z0-9]{16})$/m);
   assert.ok(kept, 'the password is kept with the {noop} prefix');
   assert.match(result.stdout, /keep Spring Boot's default user user, which the starter would turn off, with a password kept in /);
-  assert.match(result.stdout, new RegExp(`Your sign-in stays with your application: account user, password ${kept[1]} \\(kept in `));
+  assert.match(result.stdout, new RegExp(`Sign in with your application's account: user user, password ${kept[1]} \\(kept in `));
   const again = await init(project, sandbox);
   assert.equal(again.code, 0, again.output);
-  assert.match(again.stdout, new RegExp(`account user, password ${kept[1]} `));
+  assert.match(again.stdout, new RegExp(`user user, password ${kept[1]} `));
   assert.equal((await fs.readFile(credentials, 'utf8')).match(/spring\.security\.user\.password=/g).length, 1);
   assert.equal((await loadManifest(project)).metadata.securityMode, 'sandbox');
 });
@@ -435,7 +527,8 @@ test('--db-url uses that PostgreSQL: no local database, password from CONTEXA_DB
   assert.equal(result.code, 0, result.output);
   assert.match(result.stdout, /- use your PostgreSQL jdbc:postgresql:\/\/db\.example\.invalid:5432\/contexa/);
   assert.match(result.stdout,
-    /Set CONTEXA_DB_PASSWORD \(the password for jdbc:postgresql:\/\/db\.example\.invalid:5432\/contexa\) before starting the application\./);
+    /1\. Set the environment variable CONTEXA_DB_PASSWORD to the password of app on jdbc:postgresql:\/\/db\.example\.invalid:5432\/contexa \(Contexa does not store it\)\./);
+  assert.match(result.stdout, /Database\s+your own PostgreSQL jdbc:postgresql:\/\/db\.example\.invalid:5432\/contexa, user app; the password is not stored/);
   const settings = readConfig(project);
   assert.equal(settings.contexa.datasource.url, `\${CONTEXA_DB_URL:${url}}`);
   assert.equal(settings.contexa.datasource.username, '${CONTEXA_DB_USERNAME:app}');
@@ -488,18 +581,18 @@ test('the closing hint shows cd relative below the current folder, absolute else
   const below = await createGradleProject(sandbox.root, 'below');
   const relative = await runCli(['init', '--yes', '--dir', below], { cwd: sandbox.root, env: cliEnv(sandbox) });
   assert.equal(relative.code, 0, relative.output);
-  assert.match(relative.stdout, /^ {4}cd below$/m);
-  assert.match(relative.stdout, /^ {4}gradle bootRun$/m);
+  assert.match(relative.stdout, /^ {9}cd below$/m);
+  assert.match(relative.stdout, /^ {9}gradle bootRun$/m);
 
   const inside = await runCli(['init', '--yes'], { cwd: below, env: cliEnv(sandbox) });
   assert.equal(inside.code, 0, inside.output);
-  assert.doesNotMatch(inside.stdout, /^ {4}cd /m);
+  assert.doesNotMatch(inside.stdout, /^ {9}cd /m);
 
   const sibling = path.join(sandbox.root, 'sibling');
   await fs.ensureDir(sibling);
   const elsewhere = await runCli(['init', '--yes', '--dir', below], { cwd: sibling, env: cliEnv(sandbox) });
   assert.equal(elsewhere.code, 0, elsewhere.output);
-  assert.ok(elsewhere.stdout.split(/\r?\n/).includes(`    cd ${below}`), elsewhere.stdout);
+  assert.ok(elsewhere.stdout.split(/\r?\n/).includes(`         cd ${below}`), elsewhere.stdout);
 });
 
 // --- Java 17 on a computer whose text encoding is not UTF-8 ------------------------------------
@@ -611,7 +704,8 @@ test('FULL in an existing application: an admin-console password kept outside th
   const kept = (await fs.readFile(credentials, 'utf8')).match(/^contexa\.iam\.seed\.admin\.password=([A-Za-z0-9]{16})$/m);
   assert.ok(kept, 'a 16-character password is kept in the credentials file');
   const password = kept[1];
-  assert.match(first.stdout, new RegExp(`Admin console: /contexa/admin on your application, account admin, password ${password} \\(kept in `));
+  assert.match(first.stdout, new RegExp(`Sign in with the admin account: user admin, password ${password} \\(kept in `));
+  assert.match(first.stdout, /Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
   assert.equal(readConfig(project).spring.config.import, 'optional:file:${user.home}/.contexa/credentials.properties');
   const projectFiles = await snapshotDirectory(project);
   for (const entry of projectFiles.filter(item => item.type === 'file')) {

@@ -21,13 +21,33 @@ function resolveTag(tag) {
   return SUPPORTED.includes(m[1]) ? m[1] : null;
 }
 
-// Auto-detect from CLI arg, then env vars, then OS default. CLI arg wins.
-function detectLocale(explicit) {
+// The language of the computer's user interface. A Korean Windows sets none of the LANG variables, so
+// without this the CLI spoke English to every Windows user (it reads the same setting the system uses).
+function systemLocale() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale;
+  } catch {
+    return null;
+  }
+}
+
+// Auto-detect from CLI arg, then env vars, then the computer's language. CLI arg wins.
+function detectLocale(explicit, system = systemLocale) {
   return resolveTag(explicit)
       || resolveTag(process.env.CONTEXA_LANG)
       || resolveTag(process.env.LC_ALL)
       || resolveTag(process.env.LANG)
+      || resolveTag(lookup(system))
       || DEFAULT_LOCALE;
+}
+
+// A computer whose language cannot be read is not an error: the CLI speaks English then.
+function lookup(read) {
+  try {
+    return read();
+  } catch {
+    return null;
+  }
 }
 
 function setLocale(code) {

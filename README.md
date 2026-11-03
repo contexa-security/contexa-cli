@@ -91,7 +91,7 @@ Everything is asked interactively; options are for scripts and CI.
 | `--dir <path>` | Project folder (default: current folder) |
 | `--db-url <jdbc-url>` | Use your own PostgreSQL (with pgvector) instead of the local one; the password comes from `CONTEXA_DB_PASSWORD` |
 | `--db-username <name>` | User for `--db-url` (default `contexa`) |
-| `--lang <en\|ko>` | Language of the CLI (also `CONTEXA_LANG`) |
+| `--lang <en\|ko>` | Language of the CLI. Without it the CLI uses `CONTEXA_LANG`, then `LC_ALL` / `LANG`, then the language of the computer (a Korean Windows gets Korean), then English. There is no question about it during the setup |
 
 API keys for OpenAI and Anthropic come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, or are asked
 for and kept in `~/.contexa/credentials.properties` — never in your project.
@@ -118,6 +118,7 @@ any more, `contexa reset` offers to remove them (or use `contexa reset --service
 |---|---|
 | `contexa: command not found` right after installing | Run the `export PATH=...` line the installer printed, or open a new terminal |
 | `SPRING_BOOT_UNSUPPORTED` / `SPRING_BOOT_TOO_OLD` | Contexa needs Spring Boot 3.5.x. Change the version to 3.5.x, or start from `contexa init` in an empty folder |
+| `BOOT4_DEPENDENCIES` | The build file is on Spring Boot 3.5 but still names Spring Boot 4 starters (`spring-boot-starter-webmvc` is `spring-boot-starter-web` in 3.5; `spring-boot-starter-webmvc-test` and every other `...-test` starter is `spring-boot-starter-test`). The message lists each replacement |
 | `DOCKER_MISSING` / `DOCKER_STOPPED` | Install or start Docker Desktop, or use `--db-url` with your own PostgreSQL |
 | `OLLAMA_MISSING` | Install Ollama from https://ollama.com/download, or use `--provider openai` |
 | `STARTER_UNAVAILABLE` | Your build cannot download the Contexa starter; check its network/proxy or repository settings |

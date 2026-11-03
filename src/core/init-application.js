@@ -182,6 +182,31 @@ function bootSupport(version) {
   return 'supported';
 }
 
+// Starters that exist only since Spring Boot 4 (renamed or new there), with the name they have in 3.5. A build
+// file that went back from Boot 4 to 3.5 by changing the plugin version alone still names them, cannot resolve
+// them, and init would only find out at the dependency check, after the local services and the models (several GB)
+// were prepared. They are found before anything is changed.
+function boot4OnlyStarters(buildFilePath) {
+  let text;
+  try {
+    text = fs.readFileSync(buildFilePath, 'utf8');
+  } catch {
+    return [];
+  }
+  const found = new Map();
+  const names = [
+    ...text.matchAll(/org\.springframework\.boot:(spring-boot-starter-[a-z0-9-]+)/g),
+    ...text.matchAll(/<artifactId>\s*(spring-boot-starter-[a-z0-9-]+)\s*<\/artifactId>/g),
+  ].map(match => match[1]);
+  for (const name of names) {
+    if (name === 'spring-boot-starter-webmvc') found.set(name, 'spring-boot-starter-web');
+    else if (name !== 'spring-boot-starter-test' && /^spring-boot-starter-[a-z0-9-]+-test$/.test(name)) {
+      found.set(name, 'spring-boot-starter-test');
+    }
+  }
+  return [...found].map(([from, to]) => `${from} -> ${to}`);
+}
+
 function checkProject(project, java = javaMajorVersion()) {
   const warnings = [];
   const version = project.springBootVersion;
@@ -189,6 +214,10 @@ function checkProject(project, java = javaMajorVersion()) {
     const support = bootSupport(version);
     if (support === 'too-new') throw initError('SPRING_BOOT_UNSUPPORTED', 'init.error.boot4', version);
     if (support === 'too-old') throw initError('SPRING_BOOT_TOO_OLD', 'init.error.bootOld', version);
+    const boot4Names = boot4OnlyStarters(project.buildFilePath);
+    if (boot4Names.length > 0) {
+      throw initError('BOOT4_DEPENDENCIES', 'init.error.boot4Dependencies', version, boot4Names.join(', '));
+    }
   } else {
     warnings.push(t('init.warn.bootUnknown'));
   }
@@ -621,26 +650,33 @@ async function ensureStateIgnored(installRoot) {
 // --- 6. done ---------------------------------------------------------------------------------
 
 function printDone(context) {
-  const { project, installRoot, apiKey, securityMode } = context;
+  const { project, installRoot, mainClass, configPlan, apiKey, securityMode, bootDefaultUser, administrator, external,
+    provider, models, database, mailUi, ollamaUrl } = context;
+  const rel = file => relative(installRoot, file);
+  const heading = key => console.log(chalk.white(`\n  ${t(key)}`));
+  const bullet = text => console.log(chalk.gray(`    - ${text}`));
+  const row = (labelKey, text) => console.log(`    ${chalk.white(t(labelKey).padEnd(12))}${text}`);
+  const address = 'http://localhost:8080';
+  const label = { ollama: 'Ollama', openai: 'OpenAI', anthropic: 'Anthropic' }[provider] || provider;
+
   console.log(chalk.green(`\n  ${t('init.done.title')}`));
-  console.log(chalk.gray(`    - ${t('init.done.mode')}`));
-  console.log(chalk.gray(`    - ${t(securityMode === 'full' ? 'init.done.signInContexa' : 'init.done.signInApp')}`));
-  if (context.bootDefaultUser) {
-    const { username, password } = context.bootDefaultUser;
-    console.log(chalk.white(`    - ${t('init.done.bootUser', username, password, credentialsPath())}`));
+
+  // What the installer changed: the three files of the project, nothing hidden.
+  heading('init.done.changed');
+  bullet(t('init.done.changed.build', rel(project.buildFilePath)));
+  if (!project.hasEnableAiSecurity) {
+    bullet(t(securityMode === 'full' ? 'init.done.changed.annotationFull' : 'init.done.changed.annotationSandbox',
+      rel(mainClass)));
   }
-  if (securityMode === 'full') {
-    console.log(chalk.gray(`    - ${context.mailUi ? t('init.done.mailbox', context.mailUi) : t('init.done.mailMissing')}`));
-    if (project.createdSample) {
-      console.log(chalk.gray(`    - ${t('init.done.sampleAccounts', 'http://localhost:8080/contexa/admin')}`));
-    } else if (context.administrator) {
-      const { username, password } = context.administrator;
-      console.log(chalk.white(`    - ${t('init.done.adminAccount', '/contexa/admin', username, password, credentialsPath())}`));
-    }
-  }
-  if (apiKey && apiKey.source === 'entered') console.log(chalk.gray(`    - ${t('init.done.apiKey', credentialsPath())}`));
-  if (context.external) console.log(chalk.yellow(`    - ${t('init.done.dbPassword', context.external.url)}`));
-  console.log(chalk.white(`\n  ${t('init.done.run')}`));
+  bullet(t('init.done.changed.config', rel(configPlan.filePath)));
+  if (configPlan.importTarget) bullet(t('init.done.changed.import', rel(configPlan.importTarget)));
+
+  // What the person does now, in order, each step one line; the account with its password is part of the step.
+  heading('init.done.next');
+  let number = 0;
+  const step = text => console.log(chalk.white(`    ${++number}. ${text}`));
+  if (external) step(t('init.done.step.dbPassword', external.username, external.url));
+  step(t('init.done.run'));
   // A folder below the current one reads best as a relative path, anything else as absolute.
   // Both sides as real paths, so a symbolic link in either (macOS /var) does not hide the relation.
   const real = dir => {
@@ -648,8 +684,59 @@ function printDone(context) {
   };
   const below = relative(real(process.cwd()), real(installRoot));
   const runDir = below.startsWith('..') ? installRoot : below;
-  if (runDir !== '.') console.log(chalk.cyan(`    cd ${runDir}`));
-  for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`    ${line}`));
+  if (runDir !== '.') console.log(chalk.cyan(`         cd ${runDir}`));
+  for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`         ${line}`));
+  if (securityMode === 'full') {
+    if (project.createdSample || administrator) {
+      step(t('init.done.step.console', `${address}/contexa/admin`));
+      if (project.createdSample) {
+        step(t('init.done.step.signInSample'));
+      } else {
+        step(t('init.done.step.signInAdmin', administrator.username, administrator.password, credentialsPath()));
+      }
+    } else {
+      step(t('init.done.step.signInOwnFull'));
+    }
+    step(mailUi ? t('init.done.step.code', mailUi) : t('init.done.step.codeMail'));
+  } else if (bootDefaultUser) {
+    step(t('init.done.step.signInBoot', bootDefaultUser.username, bootDefaultUser.password, credentialsPath()));
+  } else {
+    step(t('init.done.step.signInOwn'));
+  }
+
+  // What was set up on this computer, with every value a person might look for. Nothing here has to be typed
+  // anywhere: the settings file of the project already holds it.
+  heading('init.done.ready');
+  if (external) {
+    row('init.done.label.database', t('init.done.ready.databaseExternal', external.url, external.username));
+  } else if (database) {
+    row('init.done.label.database', t('init.done.ready.database', database.database, database.url));
+    row('', t('init.done.ready.databaseLogin', database.username, database.password));
+    row('', chalk.gray(t('init.done.ready.databaseNote')));
+  }
+  if (provider === 'ollama') {
+    row('init.done.label.model', t('init.done.ready.modelOllama', ollamaUrl || 'http://127.0.0.1:11434', models.chat,
+      models.embedding));
+  } else {
+    const keyWhere = !apiKey || !apiKey.source ? '-'
+      : apiKey.source === 'environment' ? t('init.done.apiKey.env', apiKey.env)
+        : apiKey.source === 'application' ? t('init.done.apiKey.app')
+          : t('init.done.apiKey.file', credentialsPath());
+    row('init.done.label.model', t('init.done.ready.modelHosted', label, keyWhere, models.embedding,
+      ollamaUrl || 'http://127.0.0.1:11434'));
+  }
+  if (securityMode === 'full' && mailUi) row('init.done.label.inbox', t('init.done.ready.inbox', mailUi));
+  row('init.done.label.mode', t('init.done.mode'));
+  row('init.done.label.sign', t(securityMode === 'full' ? 'init.done.signInContexa' : 'init.done.signInApp'));
+  if (administrator || bootDefaultUser || (apiKey && ['entered', 'saved'].includes(apiKey.source))) {
+    row('init.done.label.passwords', t('init.done.ready.passwords', credentialsPath()));
+  }
+
+  heading('init.done.links');
+  row('init.done.label.site', 'https://ctxa.ai');
+  row('init.done.label.docs', t('init.done.links.docsUrl'));
+  row('init.done.label.demo', 'https://demo.ctxa.ai');
+
   console.log(chalk.gray(`\n  ${t('init.done.doctor')}`));
   console.log(chalk.gray(`  ${t('init.done.reset')}`));
 }
@@ -746,6 +833,8 @@ async function executeInit(opts) {
   const prepared = await prepareLocalServices(plan, project, installRoot, provider, models);
   const database = external || prepared.database;
   context.mailUi = prepared.endpoints.mail ? prepared.endpoints.mail.uiUrl : null;
+  context.database = database;
+  context.ollamaUrl = prepared.endpoints.ollamaBaseUrl || null;
   if (apiKey.source === 'entered') await saveCredential(apiKey.property, apiKey.value);
   if (administrator && !administrator.saved) await saveCredential(ADMIN_PASSWORD_PROPERTY, administrator.password);
   if (bootDefaultUser && !bootDefaultUser.saved) {
@@ -796,4 +885,4 @@ async function executeInit(opts) {
   console.log('');
 }
 
-module.exports = { executeInit, checkProject, bootSupport, javaMajorVersion };
+module.exports = { executeInit, checkProject, bootSupport, boot4OnlyStarters, javaMajorVersion };

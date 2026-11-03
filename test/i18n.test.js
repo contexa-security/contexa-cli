@@ -61,8 +61,42 @@ test('detectLocale: parses ko_KR.UTF-8 style tags', () => {
   assert.equal(i18n.detectLocale('en-US'), 'en');
 });
 
+// The environment of the test machine must not decide: no variable, and the computer's language given by hand.
+function withoutLanguageVariables(action) {
+  const names = ['CONTEXA_LANG', 'LC_ALL', 'LANG'];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  names.forEach(name => delete process.env[name]);
+  try {
+    return action();
+  } finally {
+    names.forEach(name => {
+      if (previous[name] === undefined) delete process.env[name]; else process.env[name] = previous[name];
+    });
+  }
+}
+
 test('detectLocale: unsupported tag falls back to default', () => {
-  assert.equal(i18n.detectLocale('fr'), 'en');
+  withoutLanguageVariables(() => {
+    assert.equal(i18n.detectLocale('fr', () => null), 'en');
+  });
+});
+
+test('detectLocale: a computer set to Korean gets Korean without any variable (a Korean Windows has no LANG)', () => {
+  withoutLanguageVariables(() => {
+    assert.equal(i18n.detectLocale(null, () => 'ko-KR'), 'ko');
+    assert.equal(i18n.detectLocale(undefined, () => 'ko'), 'ko');
+  });
+});
+
+test('detectLocale: --lang and the variables win over the computer\'s language; an unsupported language stays English', () => {
+  withoutLanguageVariables(() => {
+    assert.equal(i18n.detectLocale('en', () => 'ko-KR'), 'en');
+    process.env.LANG = 'en_US.UTF-8';
+    assert.equal(i18n.detectLocale(null, () => 'ko-KR'), 'en');
+    delete process.env.LANG;
+    assert.equal(i18n.detectLocale(null, () => 'ja-JP'), 'en');
+    assert.equal(i18n.detectLocale(null, () => { throw new Error('no Intl'); }), 'en', 'a failing lookup is not an error');
+  });
 });
 
 test('setLocale: rejects unsupported codes', () => {
