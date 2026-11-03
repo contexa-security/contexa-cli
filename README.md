@@ -51,13 +51,16 @@ In your project:
 
 - Adds `ai.ctxa:spring-boot-starter-contexa`, the Spring AI BOM, the model starter and the PgVector
   starter to the build file (Maven, Gradle Groovy or Kotlin DSL, also inside multi-module builds).
-- Adds `@EnableAISecurity` to the `@SpringBootApplication` class:
-  - your application declares a `SecurityFilterChain` → `@EnableAISecurity` (your sign-in stays;
-    if it signs in with Spring Boot's default user, which the starter would turn off, that user
-    `user` is kept with a password made once and kept in `~/.contexa/credentials.properties`;
-    Contexa evaluates the signed-in requests);
-  - otherwise → `@EnableAISecurity(mode = SecurityMode.FULL)` (Contexa provides the sign-in and the
-    admin console).
+- Adds `@EnableAISecurity` to the `@SpringBootApplication` class, after showing who will own
+  sign-in (see [Who owns sign-in](#who-owns-sign-in)):
+  - your application declares a `SecurityFilterChain` → `@EnableAISecurity` (existing system,
+    HOST_OWNED: your sign-in stays; if it signs in with Spring Boot's default user, which the
+    starter would turn off, that user `user` is kept with a password made once and kept in
+    `~/.contexa/credentials.properties`);
+  - otherwise → `@EnableAISecurity(mode = SecurityMode.FULL)` (new system, CONTEXA_OWNED: Contexa
+    provides the sign-in);
+  - `--ownership host|contexa` decides instead, for example for an application that signs users in
+    on its own without Spring Security.
 - Writes Contexa's settings to `src/main/resources/config/application.yml`. Spring Boot reads that
   file by itself, so your own `application.yml` / `application.properties` stay unchanged. Keys you
   already set yourself are never written there.
@@ -68,17 +71,36 @@ On this computer (shared by all your projects):
   with a database of its own for each project.
 - Ollama: the one already running on your computer, or one started in Docker. The models are
   downloaded once.
-- When Contexa provides the sign-in: a local mail inbox (Mailpit) that receives the one-time
-  sign-in codes, so the second sign-in step works without a mail server, and a password for the
-  admin-console account `admin`, kept in `~/.contexa/credentials.properties` (outside the project)
-  and shown at the end. Contexa creates the account when the application first starts; the
-  example application created in an empty folder uses the sample accounts (`admin` / `1111`).
+- A local mail inbox (Mailpit) that receives Contexa's one-time codes (the second sign-in step when
+  Contexa provides the sign-in, the additional verification of a CHALLENGE when your application
+  keeps it), so they work without a mail server.
+- A password for the admin-console account `admin`, kept in `~/.contexa/credentials.properties`
+  (outside the project) and shown at the end. Contexa creates the account when the application
+  first starts. When your application keeps sign-in, this is Contexa's own administrator for the
+  console, apart from your application's accounts. The example application created in an empty
+  folder uses the sample accounts (`admin` / `1111`).
 
 Contexa starts in **SHADOW** mode: it analyses and records requests but blocks nothing yet. Change
 `contexa.security.zerotrust.mode` to `ENFORCE` (or switch it in the admin console) once you have
 reviewed its decisions.
 
 Running `contexa init` again is safe; it checks what is in place and adds only what is missing.
+
+### Who owns sign-in
+
+Before it changes anything, `contexa init` shows which of the two ownerships it chose and why:
+
+| | Existing system (SANDBOX, HOST_OWNED) | New system (FULL, CONTEXA_OWNED) |
+|---|---|---|
+| Chosen when | your application declares a `SecurityFilterChain` | it declares none |
+| Sign-in, sessions, cookies, URL rules | your application, as now (Contexa only reads who signed in) | Contexa (sign-in page, passkey, one-time code) |
+| Risk decisions and their enforcement on every path (block screen, additional verification, agent gate) | Contexa | Contexa, the same |
+| Contexa console `/contexa/admin` | Contexa's own administrator account, apart from your users | Contexa's administrator account |
+
+With your application keeping sign-in, a CHALLENGE sends the user to Contexa's additional
+verification (`/contexa/step-up`: a passkey, or a one-time code by mail); your application's sign-in
+and session stay as they were. Choosing the new system for an application that declares its own
+chain stops that chain from being used, and the CLI says so.
 
 ### Options
 
@@ -87,6 +109,7 @@ Everything is asked interactively; options are for scripts and CI.
 | Option | Meaning |
 |---|---|
 | `--provider <ollama\|openai\|anthropic>` | AI model provider (default `ollama`) |
+| `--ownership <host\|contexa>` | Who owns sign-in: `host` (your application keeps it) or `contexa` (Contexa provides it). Without it the CLI decides from your `SecurityFilterChain` |
 | `--yes` | Do not ask; use the defaults |
 | `--dir <path>` | Project folder (default: current folder) |
 | `--db-url <jdbc-url>` | Use your own PostgreSQL (with pgvector) instead of the local one; the password comes from `CONTEXA_DB_PASSWORD` |

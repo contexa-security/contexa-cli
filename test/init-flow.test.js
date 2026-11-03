@@ -486,7 +486,9 @@ test('a read-only build file: FILE_NOT_WRITABLE, rolled back, nothing changed', 
 
 // --- choices that shape the settings -----------------------------------------------------------
 
-test('an application with its own SecurityFilterChain gets SANDBOX: bare annotation, no mail inbox', async t => {
+// Ownership design S-2 (2026-11-03): under HOST_OWNED a CHALLENGE is answered by Contexa's step-up, whose one-time code
+// needs a mailbox as Contexa's own sign-in does under FULL; the plan says who owns what before anything changes.
+test('an application with its own SecurityFilterChain gets SANDBOX: bare annotation, the ownership explained, a mail inbox', async t => {
   const sandbox = await sandboxFor(t, 'ctxa-flow-sandbox-');
   const project = await createGradleProject(sandbox.root, 'secured', { security: true });
   const result = await init(project, sandbox);
@@ -495,7 +497,12 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.match(main, /\n@EnableAISecurity\n@SpringBootApplication/);
   assert.match(main, /^import io\.contexa\.contexacommon\.annotation\.EnableAISecurity;$/m);
   assert.equal(main.includes('SecurityMode'), false);
-  assert.equal(readConfig(project).spring.mail, undefined, 'no mail settings in SANDBOX mode');
+  assert.deepEqual(readConfig(project).spring.mail,
+    { host: '${CONTEXA_MAIL_HOST:127.0.0.1}', port: '${CONTEXA_MAIL_PORT:51025}' },
+    'the step-up codes of HOST_OWNED need the mailbox too');
+  assert.match(result.stdout, /Existing system: your application keeps its sign-in \(SANDBOX, HOST_OWNED\)/);
+  assert.match(result.stdout, /Why: your application declares its own Spring Security chain/);
+  assert.match(result.stdout, /contexa init --ownership contexa/);
   // F-50: Spring Boot's default user stays (the starter's OAuth2 classes and Contexa's password
   // encoder would leave the application without it), with a password kept outside the project.
   assert.deepEqual(readConfig(project).spring.security, { user: { name: 'user' } });
@@ -505,10 +512,22 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.ok(kept, 'the password is kept with the {noop} prefix');
   assert.match(result.stdout, /keep Spring Boot's default user user, which the starter would turn off, with a password kept in /);
   assert.match(result.stdout, new RegExp(`Sign in with your application's account: user user, password ${kept[1]} \\(kept in `));
+  // Ownership design S-3: Contexa's console keeps its own administrator under HOST_OWNED, apart from the application's
+  // accounts, so the account is made here as under FULL and the steps say where it signs in.
+  const admin = (await fs.readFile(credentials, 'utf8')).match(/^contexa\.iam\.seed\.admin\.password=([A-Za-z0-9]{16})$/m);
+  assert.ok(admin, 'the console administrator password is kept in the credentials file');
+  assert.match(result.stdout, /- make a password for the admin-console account admin and keep it in /);
+  const steps = result.stdout.match(/^\s+\d\. .*$/gm).map(line => line.trim());
+  assert.match(steps.join('\n'), /\d\. Sign in with your application's account: user user/);
+  assert.match(steps.join('\n'), /\d\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin {2}\(http:\/\/localhost:8080 is the default address/);
+  assert.match(steps.join('\n'), new RegExp(`\\d\\. Sign in to the console with Contexa's administrator, not an account of your application: user admin, password ${admin[1]} \\(kept in `));
+  assert.equal(result.stdout.includes('{1}'), false, 'every placeholder is filled');
   const again = await init(project, sandbox);
   assert.equal(again.code, 0, again.output);
   assert.match(again.stdout, new RegExp(`user user, password ${kept[1]} `));
+  assert.match(again.stdout, new RegExp(`user admin, password ${admin[1]} `));
   assert.equal((await fs.readFile(credentials, 'utf8')).match(/spring\.security\.user\.password=/g).length, 1);
+  assert.equal((await fs.readFile(credentials, 'utf8')).match(/contexa\.iam\.seed\.admin\.password=/g).length, 1);
   assert.equal((await loadManifest(project)).metadata.securityMode, 'sandbox');
 });
 
@@ -808,11 +827,13 @@ test('FULL in an existing application: an admin-console password kept outside th
   assert.doesNotMatch(owned.stdout, /admin-console|Admin console/);
   assert.equal((readConfig(own).spring || {}).config, undefined);
 
-  // The application keeps its own sign-in (SANDBOX): no admin-console account from Contexa.
+  // The application keeps its own sign-in (SANDBOX): the console still signs in Contexa's administrator (ownership
+  // design S-3, 2026-11-03), the same account and password as under FULL.
   const secured = await createGradleProject(sandbox.root, 'secured-app', { security: true });
   const sandboxed = await init(secured, sandbox);
   assert.equal(sandboxed.code, 0, sandboxed.output);
-  assert.doesNotMatch(sandboxed.stdout, /admin-console|Admin console/);
+  assert.match(sandboxed.stdout, /- use the admin-console password kept in /);
+  assert.match(sandboxed.stdout, /Sign in to the console with Contexa's administrator, not an account of your application: user admin/);
 });
 
 test('Spring Boot default user is left alone when the application has users, OAuth2 or spring.security.user.* of its own', async t => {

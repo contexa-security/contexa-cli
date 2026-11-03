@@ -66,6 +66,7 @@ const { checkDependencies, runCommandText } = require('./build-tool');
 const { hasCredential, readCredential, saveCredential, credentialsPath } = require('./credentials');
 const { sampleTarget, createSampleProject } = require('./sample-project');
 const { runApplication } = require('./app-runner');
+const { resolveOwnership, ownershipLines } = require('./ownership');
 
 const MODE = INSTALL_MODES.NORMAL;
 
@@ -283,13 +284,14 @@ async function chooseProvider(opts, previous, interactive) {
   return provider;
 }
 
-// The admin-console account when Contexa provides the sign-in of an existing application (the
-// example application has the sample accounts). Contexa creates it at the first start from
-// contexa.iam.seed.admin.password; the password is made once and kept with the API keys, outside
-// the project, so a deployment without that file never gets this account. An application that
-// configures Contexa's seed accounts itself is left to its own settings.
-async function planAdministrator(project, securityMode) {
-  if (securityMode !== 'full' || project.createdSample) return null;
+// The admin-console account (the example application has the sample accounts). Contexa creates it
+// at the first start from contexa.iam.seed.admin.password; the password is made once and kept with
+// the API keys, outside the project, so a deployment without that file never gets this account.
+// Under FULL it signs in to Contexa; under HOST_OWNED the console signs in Contexa's administrators
+// only, apart from the application's accounts. An application that configures Contexa's seed
+// accounts itself is left to its own settings.
+async function planAdministrator(project) {
+  if (project.createdSample) return null;
   for (const key of project.hostConfigKeys) {
     if (key.startsWith('contexa.iam.seed.admin.') || key === 'contexa.iam.seed.accounts.enabled') return null;
   }
@@ -355,7 +357,8 @@ async function resolveLocalServices(opts, provider, interactive, securityMode) {
     const plan = await local.planLocalServices({
       needOllama: usesOllama(provider),
       needPostgres: !external,
-      wantMail: securityMode === 'full',
+      // Contexa's one-time codes need a mailbox: its sign-in under FULL, the step-up of a CHALLENGE under HOST_OWNED.
+      wantMail: true,
     });
     if (plan.problems.length === 0) return { plan, external };
     const problem = plan.problems[0];
@@ -446,6 +449,12 @@ function printPlan(context) {
   if (!project.hasEnableAiSecurity) {
     out(t(securityMode === 'full' ? 'init.plan.annotationFull' : 'init.plan.annotationSandbox',
       relative(installRoot, mainClass)));
+  }
+  if (context.ownership) {
+    // Who owns sign-in, why, and who does what, before anything changes.
+    console.log(chalk.white(`  ${t('ownership.title')}`));
+    for (const line of ownershipLines(context.ownership)) out(line);
+    for (const warning of context.ownership.warnings) console.log(chalk.yellow(`    ! ${t(warning)}`));
   }
   const configKey = editedSinceLastInit(context.existing, installRoot, configPlan.filePath) ? 'init.plan.configKept'
     : fs.existsSync(configPlan.filePath) ? 'init.plan.configUpdate' : 'init.plan.config';
@@ -706,7 +715,7 @@ function printDone(context) {
   for (const line of runCommandText(project).split('\n')) console.log(chalk.cyan(`         ${line}`));
   if (securityMode === 'full') {
     if (project.createdSample || administrator) {
-      step(t('init.done.step.console', `${address}/contexa/admin`));
+      step(t('init.done.step.console', `${address}/contexa/admin`, address));
       if (project.createdSample) {
         step(t('init.done.step.signInSample'));
       } else {
@@ -716,10 +725,16 @@ function printDone(context) {
       step(t('init.done.step.signInOwnFull'));
     }
     step(mailUi ? t('init.done.step.code', mailUi) : t('init.done.step.codeMail'));
-  } else if (bootDefaultUser) {
-    step(t('init.done.step.signInBoot', bootDefaultUser.username, bootDefaultUser.password, credentialsPath()));
   } else {
-    step(t('init.done.step.signInOwn'));
+    if (bootDefaultUser) {
+      step(t('init.done.step.signInBoot', bootDefaultUser.username, bootDefaultUser.password, credentialsPath()));
+    } else {
+      step(t('init.done.step.signInOwn'));
+    }
+    if (administrator) {
+      step(t('init.done.step.console', `${address}/contexa/admin`, address));
+      step(t('init.done.step.signInAdminHost', administrator.username, administrator.password, credentialsPath()));
+    }
   }
 
   // What was set up on this computer, with every value a person might look for. Nothing here has to be typed
@@ -743,7 +758,7 @@ function printDone(context) {
     row('init.done.label.model', t('init.done.ready.modelHosted', label, keyWhere, models.embedding,
       ollamaUrl || 'http://127.0.0.1:11434'));
   }
-  if (securityMode === 'full' && mailUi) row('init.done.label.inbox', t('init.done.ready.inbox', mailUi));
+  if (mailUi) row('init.done.label.inbox', t('init.done.ready.inbox', mailUi));
   row('init.done.label.mode', t('init.done.mode'));
   row('init.done.label.sign', t(securityMode === 'full' ? 'init.done.signInContexa' : 'init.done.signInApp'));
   if (administrator || bootDefaultUser || (apiKey && ['entered', 'saved'].includes(apiKey.source))) {
@@ -801,8 +816,9 @@ async function executeInit(opts) {
 
   const mainClass = await chooseMainClass(project, installRoot, interactive);
   // The application keeps sign-in when it declares its own SecurityFilterChain (Contexa's
-  // SANDBOX default); otherwise Contexa provides sign-in (FULL).
-  const securityMode = project.hasHostSecurityFilterChain ? 'sandbox' : 'full';
+  // SANDBOX default); otherwise Contexa provides sign-in (FULL). --ownership decides instead.
+  const ownership = resolveOwnership(project, opts.ownership);
+  const securityMode = ownership.securityMode;
 
   let provider = await chooseProvider(opts, existing && existing.metadata && existing.metadata.provider, interactive);
   let resolved = await resolveLocalServices(opts, provider, interactive, securityMode);
@@ -812,7 +828,7 @@ async function executeInit(opts) {
   }
   const { plan, external } = resolved;
   const apiKey = await ensureApiKey(provider, project, interactive);
-  const administrator = await planAdministrator(project, securityMode);
+  const administrator = await planAdministrator(project);
   const bootDefaultUser = await planBootDefaultUser(project, securityMode);
   const models = ollamaModels();
 
@@ -832,7 +848,7 @@ async function executeInit(opts) {
   }
 
   const context = {
-    installRoot, project, mainClass, securityMode, configPlan, provider,
+    installRoot, project, mainClass, securityMode, ownership, configPlan, provider,
     services: plan, external, models, apiKey, missingModels, existing, administrator, bootDefaultUser,
   };
   printPlan(context);
