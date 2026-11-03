@@ -119,6 +119,7 @@ any more, `contexa reset` offers to remove them (or use `contexa reset --service
 | `contexa: command not found` right after installing | Run the `export PATH=...` line the installer printed, or open a new terminal |
 | `SPRING_BOOT_UNSUPPORTED` / `SPRING_BOOT_TOO_OLD` | Contexa needs Spring Boot 3.5.x. Change the version to 3.5.x, or start from `contexa init` in an empty folder |
 | `BOOT4_DEPENDENCIES` | The build file is on Spring Boot 3.5 but still names Spring Boot 4 starters (`spring-boot-starter-webmvc` is `spring-boot-starter-web` in 3.5; `spring-boot-starter-webmvc-test` and every other `...-test` starter is `spring-boot-starter-test`). The message lists each replacement |
+| `NO_APPLICATION` / `CONTEXA_SOURCE` | The build has Spring Boot modules but none of them is an application: they are libraries (bootJar turned off) or have no class with `@SpringBootApplication`, or the folder is the source code of Contexa itself. In a terminal `contexa init` offers to create the sample application in `contexa-demo` below the folder; run it in your application's folder (or with `--dir <that folder>`) to set up your own application |
 | `DOCKER_MISSING` / `DOCKER_STOPPED` | Install or start Docker Desktop, or use `--db-url` with your own PostgreSQL |
 | `OLLAMA_MISSING` | Install Ollama from https://ollama.com/download, or use `--provider openai` |
 | `STARTER_UNAVAILABLE` | Your build cannot download the Contexa starter; check its network/proxy or repository settings |

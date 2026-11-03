@@ -286,11 +286,14 @@ test('detector: selects one Spring module and safely rejects ambiguous module ro
     'plain/build.gradle': "plugins { id 'java' }\n",
     'app/build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' }\n",
   });
+  // two applications: each has a class of its own that starts one
   const ambiguous = await makeTempProject({
     'settings.gradle.kts': "rootProject.name = \"root\"\ninclude(\"app-a\", \"app-b\")\n",
     'build.gradle.kts': 'plugins { base }\n',
     'app-a/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
     'app-b/build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+    'app-a/src/main/java/a/AppA.java': 'package a;\n@org.springframework.boot.autoconfigure.SpringBootApplication\npublic class AppA {}\n',
+    'app-b/src/main/java/b/AppB.java': 'package b;\n@SpringBootApplication\npublic class AppB {}\n',
   });
   try {
     const selected = await detectSpringProject(single, { probeDocker: false });
@@ -303,6 +306,93 @@ test('detector: selects one Spring module and safely rejects ambiguous module ro
     await fs.remove(single);
     await fs.remove(ambiguous);
   }
+});
+
+// The structure of the source of Contexa itself: the root applies the Spring Boot plugin to every module and turns
+// bootJar off, the libraries keep a start class that a project generator wrote, and the starter module turns the
+// runnable jar on again for the standalone image. It is not an application that uses Contexa (the report: "This build
+// has several Spring Boot applications. Which one should get Contexa?" with the library modules in the list).
+const LIBRARY_APPLICATION_CLASS = 'package lib;\n@SpringBootApplication\npublic class LibApplication {}\n';
+const LIBRARY_BUILD = "bootJar.enabled = false\njar.enabled = true\ndependencies {\n"
+  + "    compileOnly 'org.springframework.boot:spring-boot-starter-security'\n}\n";
+
+test('detector: the source of Contexa itself is not an application, and no module of it is offered', async () => {
+  const dir = await makeTempProject({
+    'settings.gradle': "rootProject.name = 'contexa'\ninclude('contexa-core','contexa-iam','contexa-identity','spring-boot-starter-contexa')\n",
+    'build.gradle': "plugins {\n    id 'java'\n    id 'org.springframework.boot' version '3.5.4'\n}\nbootJar.enabled = false\n"
+      + "subprojects {\n    apply plugin: 'org.springframework.boot'\n    bootJar {\n        enabled = false\n    }\n}\n",
+    'contexa-core/build.gradle': LIBRARY_BUILD,
+    'contexa-iam/build.gradle': LIBRARY_BUILD,
+    'contexa-iam/src/main/java/lib/LibApplication.java': LIBRARY_APPLICATION_CLASS,
+    'contexa-identity/build.gradle': LIBRARY_BUILD,
+    'contexa-identity/src/main/java/lib/LibApplication.java': LIBRARY_APPLICATION_CLASS,
+    'spring-boot-starter-contexa/build.gradle': "dependencies {\n    api 'org.springframework.boot:spring-boot-starter-security'\n}\n"
+      + "bootJar.enabled = true\njar.enabled = true\n",
+    'spring-boot-starter-contexa/src/main/java/lib/StarterApplication.java': LIBRARY_APPLICATION_CLASS,
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, false);
+    assert.equal(result.contexaSource, true);
+    assert.deepEqual(result.ambiguousModules, [], 'no question about which module');
+    assert.equal(result.noApplication.length, 5, 'the root and the four modules');
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: a build whose Spring Boot modules are all libraries has no application, even with start classes left in them', async () => {
+  const dir = await makeTempProject({
+    'settings.gradle': "rootProject.name = 'platform'\ninclude 'model', 'client'\n",
+    'build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' apply false }\n",
+    'model/build.gradle': "plugins { id 'org.springframework.boot' }\n" + LIBRARY_BUILD,
+    'model/src/main/java/lib/LibApplication.java': LIBRARY_APPLICATION_CLASS,
+    'client/build.gradle': "plugins { id 'org.springframework.boot' }\ntasks.named('bootJar') {\n    enabled = false\n}\n"
+      + "dependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }\n",
+    'client/src/main/java/lib/ClientApplication.java': LIBRARY_APPLICATION_CLASS,
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, false);
+    assert.equal(result.contexaSource, false);
+    assert.deepEqual(result.ambiguousModules, []);
+    assert.deepEqual(result.noApplication.map(module => path.basename(module)), ['client', 'model']);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: of a library and an application the application is the one; a root that applies the plugin to everyone is no second one', async () => {
+  const dir = await makeTempProject({
+    'settings.gradle': "rootProject.name = 'shop'\ninclude 'domain', 'web'\n",
+    'build.gradle': "plugins { id 'org.springframework.boot' version '3.5.4' }\nbootJar.enabled = false\n",
+    'domain/build.gradle': LIBRARY_BUILD,
+    'domain/src/main/java/lib/LibApplication.java': LIBRARY_APPLICATION_CLASS,
+    'web/build.gradle': "plugins { id 'org.springframework.boot' }\ndependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }\n",
+    'web/src/main/java/shop/ShopApplication.java': 'package shop;\n@SpringBootApplication\npublic class ShopApplication {}\n',
+  });
+  try {
+    const result = await detectSpringProject(dir, { probeDocker: false });
+    assert.equal(result.isSpring, true);
+    assert.deepEqual(result.ambiguousModules, []);
+    assert.equal(result.buildFilePath, path.join(dir, 'web', 'build.gradle'));
+    assert.equal(result.mainApplicationCandidates.length, 1);
+  } finally {
+    await fs.remove(dir);
+  }
+});
+
+test('detector: bootJar turned off is read in every spelling, and the last statement wins', () => {
+  const { bootJarDisabled } = require('../src/core/detector');
+  assert.equal(bootJarDisabled('bootJar.enabled = false'), true);
+  assert.equal(bootJarDisabled('bootJar { enabled = false }'), true);
+  assert.equal(bootJarDisabled("tasks.named('bootJar') {\n  enabled = false\n}"), true);
+  assert.equal(bootJarDisabled('tasks.bootJar { enabled = false }'), true);
+  assert.equal(bootJarDisabled('// bootJar.enabled = false\n'), false, 'a comment is not a statement');
+  assert.equal(bootJarDisabled('bootJar { mainClass = "x" }'), false);
+  assert.equal(bootJarDisabled(''), false);
+  assert.equal(bootJarDisabled('bootJar.enabled = false\nbootJar.enabled = true'), false, 'turned on again');
+  assert.equal(bootJarDisabled('bootJar.enabled = true\nbootJar.enabled = false'), true);
 });
 
 test('detector: Gradle custom projectDir mapping selects the mapped Spring module only', async () => {

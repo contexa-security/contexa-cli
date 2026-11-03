@@ -77,6 +77,83 @@ test('Spring Boot 4 project: exit 1, SPRING_BOOT_UNSUPPORTED, no file changed an
   assert.equal(await fs.pathExists(localStatePath(sandbox)), false, 'nothing was prepared on the computer either');
 });
 
+// A build like the source of Contexa itself: every module applies the Spring Boot plugin and turns bootJar off, the
+// libraries keep a start class that a project generator wrote, and the starter module is the standalone image.
+async function createContexaSourceLikeBuild(parent, name, { withStarter = true } = {}) {
+  const dir = path.join(parent, name);
+  const startClass = 'package lib;\n@SpringBootApplication\npublic class LibApplication {}\n';
+  const library = "bootJar.enabled = false\njar.enabled = true\ndependencies {\n    compileOnly 'org.springframework.boot:spring-boot-starter-security'\n}\n";
+  const modules = ['contexa-core', 'contexa-iam', ...(withStarter ? ['spring-boot-starter-contexa'] : [])];
+  await fs.outputFile(path.join(dir, 'settings.gradle'), `rootProject.name = '${name}'\ninclude(${modules.map(m => `'${m}'`).join(', ')})\n`);
+  await fs.outputFile(path.join(dir, 'build.gradle'),
+    "plugins {\n    id 'java'\n    id 'org.springframework.boot' version '3.5.4'\n}\nbootJar.enabled = false\n"
+    + "subprojects {\n    apply plugin: 'org.springframework.boot'\n    bootJar {\n        enabled = false\n    }\n}\n");
+  for (const module of modules) {
+    const standalone = module === 'spring-boot-starter-contexa';
+    await fs.outputFile(path.join(dir, module, 'build.gradle'), standalone ? `${library}bootJar.enabled = true\n` : library);
+    await fs.outputFile(path.join(dir, module, 'src', 'main', 'java', 'lib', 'LibApplication.java'), startClass);
+  }
+  return dir;
+}
+
+test('the source of Contexa itself: no question about which module, the way on is said, nothing changed', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-contexasource-');
+  const source = await createContexaSourceLikeBuild(sandbox.root, 'contexa');
+  const before = await snapshotDirectory(source);
+  const result = await init(source, sandbox);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.stderr, /CONTEXA_SOURCE/);
+  assert.match(result.stderr, /source code of Contexa itself/);
+  assert.match(result.stderr, /contexa init in the folder of your application, or in an empty folder/);
+  assert.doesNotMatch(result.output, /Which one should get Contexa|MODULE_AMBIGUOUS/);
+  assert.deepEqual(await snapshotDirectory(source), before);
+  assert.equal(await fs.pathExists(localStatePath(sandbox)), false, 'nothing was prepared on the computer either');
+});
+
+test('a build whose Spring Boot modules are all libraries: NO_APPLICATION, nothing changed', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-noapp-');
+  const library = await createContexaSourceLikeBuild(sandbox.root, 'platform', { withStarter: false });
+  const before = await snapshotDirectory(library);
+  const result = await init(library, sandbox);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.stderr, /NO_APPLICATION/);
+  assert.match(result.stderr, /contexa-core, contexa-iam/);
+  assert.doesNotMatch(result.output, /Which one should get Contexa|MODULE_AMBIGUOUS/);
+  assert.deepEqual(await snapshotDirectory(library), before);
+});
+
+test('in a terminal the source of Contexa is told, the sample application is offered below it, and the source stays as it was', async t => {
+  const { findApplication } = require('../src/core/init-application');
+  const inquirer = require('inquirer');
+  const sandbox = await sandboxFor(t, 'ctxa-flow-offer-');
+  const source = await createContexaSourceLikeBuild(sandbox.root, 'contexa');
+  const before = await snapshotDirectory(source);
+  const asked = [];
+  const original = inquirer.prompt;
+  inquirer.prompt = async questions => {
+    asked.push(...questions);
+    return { create: true };
+  };
+  const printed = [];
+  const log = console.log;
+  console.log = (...parts) => printed.push(parts.join(' '));
+  let found;
+  try {
+    found = await findApplication({ dir: source }, true);
+  } finally {
+    inquirer.prompt = original;
+    console.log = log;
+  }
+  assert.equal(asked.length, 1, 'one question only: whether to create the sample');
+  assert.match(asked[0].message, /Create a sample Spring Boot application with Contexa in .*contexa-demo\?/);
+  assert.match(printed.join('\n'), /source code of Contexa itself/);
+  assert.equal(found.installRoot, path.join(source, 'contexa-demo'));
+  assert.equal(found.project.createdSample, true);
+  const after = await snapshotDirectory(source);
+  assert.deepEqual(after.filter(entry => !entry.path.startsWith('contexa-demo')), before, 'the files of the source are as they were');
+  assert.ok(after.some(entry => entry.path.startsWith('contexa-demo')), 'the sample is below it');
+});
+
 test('Spring Boot 3.5 build file that still names Spring Boot 4 starters: exit 1, BOOT4_DEPENDENCIES, nothing prepared', async t => {
   // The plugin version was changed from 4.x back to 3.5.4 and the starter names were left as they were.
   const sandbox = await sandboxFor(t, 'ctxa-flow-boot4names-');
@@ -190,6 +267,9 @@ test('a build file that is not Spring Boot, and an ambiguous multi-module build,
   for (const name of ['a', 'b']) {
     await fs.outputFile(path.join(multi, name, 'build.gradle'),
       "plugins { id 'org.springframework.boot' }\ndependencies { implementation 'org.springframework.boot:spring-boot-starter-web' }\n");
+    // an application: a class of its own that starts one
+    await fs.outputFile(path.join(multi, name, 'src', 'main', 'java', name, `App${name}.java`),
+      `package ${name};\n@SpringBootApplication\npublic class App${name} {}\n`);
   }
   const multiBefore = await snapshotDirectory(multi);
   const ambiguous = await init(multi, sandbox);

@@ -103,6 +103,12 @@ async function detectProject(dir) {
   }
 }
 
+// The modules of a build as a short list for a message: the first few by name, the rest as a count.
+function moduleList(dir, modules, limit = 6) {
+  const names = modules.map(module => relative(dir, module));
+  return names.length <= limit ? names.join(', ') : `${names.slice(0, limit).join(', ')} +${names.length - limit}`;
+}
+
 async function findApplication(opts, interactive) {
   let dir = path.resolve(opts.dir || process.cwd());
   let project = await detectProject(dir);
@@ -121,12 +127,24 @@ async function findApplication(opts, interactive) {
     project = await detectProject(module);
   }
 
+  // A build with Spring Boot modules of which none is an application (a library build, or the source of Contexa
+  // itself): there is nothing to attach Contexa to. Said plainly, with the way on; in a terminal the sample
+  // application is offered, in a script it is not made without being asked.
+  if (project.noApplication) {
+    const key = project.contexaSource ? 'contexaSource' : 'noApplication';
+    const modules = moduleList(dir, project.noApplication);
+    if (!interactive) {
+      throw initError(project.contexaSource ? 'CONTEXA_SOURCE' : 'NO_APPLICATION', `init.error.${key}`, modules);
+    }
+    console.log(chalk.yellow(`  ${t(`init.${key}.info`, modules)}`));
+  }
+
   if (!project.isSpring) {
-    if (project.buildTool) {
+    if (project.buildTool && !project.noApplication) {
       throw initError('SPRING_BOOT_REQUIRED', 'init.error.notSpringBoot', relative(dir, project.buildFilePath));
     }
     const target = await sampleTarget(dir);
-    console.log(chalk.yellow(`  ${t('init.sample.none')}`));
+    if (!project.noApplication) console.log(chalk.yellow(`  ${t('init.sample.none')}`));
     let create = !interactive;
     if (interactive) {
       ({ create } = await inquirer.prompt([{
@@ -885,4 +903,4 @@ async function executeInit(opts) {
   console.log('');
 }
 
-module.exports = { executeInit, checkProject, bootSupport, boot4OnlyStarters, javaMajorVersion };
+module.exports = { executeInit, findApplication, checkProject, bootSupport, boot4OnlyStarters, javaMajorVersion };

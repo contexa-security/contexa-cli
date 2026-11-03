@@ -24,7 +24,7 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
     applicationConfigPaths: [], configDirPaths: [], mainApplicationCandidates: [], hasDocker: false,
     gradleRootDir: null, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false,
     hostDefinesUsers: false, hostSecurityAlternative: null,
-    ambiguousModules: [], springBootVersion: null, springBootVersionSource: null,
+    ambiguousModules: [], noApplication: null, contexaSource: false, springBootVersion: null, springBootVersionSource: null,
     hostOwnsDatabase: false, hostDatabaseReason: null, hostConfigKeys: new Set(),
   };
 
@@ -32,7 +32,29 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
   const moduleCandidates = await discoverModuleCandidates(rootDir);
   const allCandidates = [localCandidate, ...moduleCandidates].filter(Boolean);
   const distinctCandidates = [...new Map(allCandidates.map(item => [path.resolve(item.dir), item])).values()];
-  const springModules = distinctCandidates.filter(item => item.hasSpringBoot);
+  let springModules = distinctCandidates.filter(item => item.hasSpringBoot);
+  // The source of Contexa itself is a build with a module of the starter's own name. Contexa is not attached to
+  // Contexa, whatever its modules look like.
+  if (distinctCandidates.some(item => path.basename(item.dir) === CONTEXA_ARTIFACT_ID)) {
+    result.noApplication = springModules.map(item => item.dir).sort();
+    result.contexaSource = true;
+    return finishDetection(result, rootDir, opts);
+  }
+  // Which of several modules is an application is told by a class of its own that starts one, in a module whose
+  // build still makes a runnable jar. A library module applies the Spring Boot plugin (with bootJar turned off) or
+  // depends on starters all the same, may keep a start class that a project generator wrote, and a multi-module root
+  // often applies the plugin to every module. A build whose Spring Boot modules are all libraries has no application.
+  if (springModules.length > 1) {
+    const applications = [];
+    for (const item of springModules) {
+      if (!item.bootJarDisabled && await hasApplicationClass(item.dir)) applications.push(item);
+    }
+    if (applications.length === 0) {
+      result.noApplication = springModules.map(item => item.dir).sort();
+      return finishDetection(result, rootDir, opts);
+    }
+    springModules = applications;
+  }
   let candidate = null;
   if (springModules.length === 1) candidate = springModules[0];
   else if (springModules.length > 1) {
@@ -368,7 +390,7 @@ async function readBuildCandidate(dir) {
   const contextaDependency = model.dependencies.find(coordinate =>
     coordinate.group === CONTEXA_GROUP_ID && coordinate.artifact === CONTEXA_ARTIFACT_ID);
   return {
-    dir, buildTool: 'gradle', buildFilePath: gradlePath, hasSpringBoot,
+    dir, buildTool: 'gradle', buildFilePath: gradlePath, hasSpringBoot, bootJarDisabled: bootJarDisabled(source),
     hasSpringSecurityCore: model.dependencies.some(coordinate =>
       (coordinate.group === 'org.springframework.boot'
         && coordinate.artifact === 'spring-boot-starter-security')
@@ -430,6 +452,46 @@ async function inventoryConfiguration(result, projectDir) {
     if (!isContexaSettings(await readIfExists(file))) result.configDirPaths.push(file);
   }
   result.configDirPaths.sort();
+}
+
+// A Gradle module that turns the runnable jar off (bootJar.enabled = false, bootJar { enabled = false }, or the same
+// for tasks.named('bootJar')) is a library. The last statement in the file wins, so a module that turns it off for
+// everything and on for itself is an application.
+function bootJarDisabled(source) {
+  const code = stripCodeComments(source);
+  const patterns = [
+    /\bbootJar\s*\.\s*enabled\s*=\s*(true|false)\b/g,
+    /\bbootJar\s*\{[^{}]*?\benabled\s*=\s*(true|false)\b/g,
+    /['"]bootJar['"]\s*\)\s*\{[^{}]*?\benabled\s*=\s*(true|false)\b/g,
+  ];
+  const statements = [];
+  for (const pattern of patterns) {
+    for (const match of code.matchAll(pattern)) statements.push({ at: match.index, off: match[1] === 'false' });
+  }
+  statements.sort((a, b) => a.at - b.at);
+  return statements.length > 0 && statements[statements.length - 1].off;
+}
+
+// Whether a module has a class that starts a Spring Boot application (@SpringBootApplication in Java or Kotlin).
+async function hasApplicationClass(moduleDir) {
+  const roots = [
+    { dir: path.join(moduleDir, 'src/main/java'), extension: '.java' },
+    { dir: path.join(moduleDir, 'src/main/kotlin'), extension: '.kt' },
+  ];
+  for (const root of roots) {
+    if (!await fs.pathExists(root.dir)) continue;
+    for (const file of await listSourceFiles(root.dir, root.extension)) {
+      let source;
+      try { source = await fs.readFile(file, 'utf8'); } catch { continue; }
+      if (!source.includes('SpringBootApplication')) continue;
+      const code = stripCommentsAndStrings(source);
+      if (/@SpringBootApplication\b/.test(code)
+          || /@org\.springframework\.boot\.autoconfigure\.SpringBootApplication\b/.test(code)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 async function inventoryApplicationSources(result, projectDir) {
@@ -533,4 +595,5 @@ module.exports = {
   detectHostDatabase,
   collectHostConfigKeys,
   catalogBootVersion,
+  bootJarDisabled,
 };
