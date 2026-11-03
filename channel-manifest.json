@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "channel": "snapshot",
-  "releaseTag": "v0.2.0",
-  "cliVersion": "0.2.0",
+  "releaseTag": "v0.2.1",
+  "cliVersion": "0.2.1",
   "starterVersion": "0.1.1",
-  "sourceCommit": "ffc509ff0d32baf37eb83f3995195fb70075343c",
-  "releaseManifestSha256": "634304bc5a22cb944e513ccec9a245170a607c159bf672f7179ec30331d59c39"
+  "sourceCommit": "41e57db06823c7f70941a70b4aca85cb5eda6cc6",
+  "releaseManifestSha256": "5eb646ece1cec9a5d6bb41a19390954435d6b67eafc700f39d7d8ef2290293c5"
 }
