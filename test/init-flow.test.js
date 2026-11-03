@@ -699,7 +699,7 @@ test('doctor lists every check on an installed project (an unreachable database 
       CONTEXA_OLLAMA_BASE_URL: 'http://127.0.0.1:9',
     }),
   });
-  assert.match(result.stdout, /Contexa doctor \(CLI 0\.2\.0\)/);
+  assert.match(result.stdout, new RegExp(`Contexa doctor \\(CLI ${releaseManifest.cliVersion.replace(/\./g, '\\.')}\\)`));
   assert.match(result.stdout, /v Project: doctor-app \(Gradle\)/);
   assert.match(result.stdout, /v Spring Boot: 3\.5\.4/);
   assert.match(result.stdout, /v Java: 17/);

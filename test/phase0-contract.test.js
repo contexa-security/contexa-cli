@@ -77,7 +77,8 @@ async function createSpringFixture(prefix) {
 
 test('Phase 0 release and primary-command contract has one canonical source', () => {
   assert.equal(releaseManifest.cliVersion, packageJson.version);
-  assert.equal(releaseManifest.cliVersion, '0.2.0');
+  // The version is raised in package.json and in the manifest together; the release stops at a mismatch.
+  assert.equal(releaseManifest.cliVersion, require('../package.json').version);
   assert.equal(releaseManifest.releaseTag, 'v' + releaseManifest.cliVersion);
   assert.equal(releaseManifest.schemaVersion, 2);
   assert.equal(releaseManifest.channel, 'snapshot');
@@ -241,7 +242,7 @@ test('CLI version and no-argument first run match the release contract', () => {
   assert.equal(version.stdout.trim(), releaseManifest.cliVersion);
   const firstRun = cli([]);
   assert.equal(firstRun.code, 0, firstRun.stderr);
-  assert.match(firstRun.stdout, /CONTEXA\s+v0\.2\.0/);
+  assert.match(firstRun.stdout, new RegExp(`CONTEXA\\s+v${releaseManifest.cliVersion.replace(/\./g, '\\.')}`));
   assert.match(firstRun.stdout, /Usage: contexa/);
   for (const command of releaseManifest.primaryCommands) {
     const name = command.replace(/^contexa /, '');
