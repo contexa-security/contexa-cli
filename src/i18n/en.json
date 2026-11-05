@@ -84,7 +84,7 @@
 
   "init.plan.title": "Contexa will:",
   "init.plan.project": "In your project",
-  "init.plan.build": "add the Contexa starter and Spring AI dependencies to {0}",
+  "init.plan.build": "add the Contexa starter, Spring Security and Spring AI dependencies to {0}",
   "init.plan.annotationSandbox": "add @EnableAISecurity to {0} (your application keeps its own sign-in)",
   "init.plan.annotationFull": "add @EnableAISecurity(mode = FULL) to {0} (Contexa provides sign-in)",
   "init.plan.config": "create {0} with the Contexa settings",
@@ -220,6 +220,8 @@
   "doctor.starter": "Contexa starter",
   "doctor.starter.missing": "not in the build file",
   "doctor.annotation.missing": "not on the application class",
+  "doctor.security.missing": "not in the build file, and @EnableAISecurity applies security through it",
+  "doctor.security.fix": "add org.springframework.boot:spring-boot-starter-security, or run contexa init",
   "doctor.annotation.app": "present (your application owns sign-in)",
   "doctor.annotation.contexa": "present",
   "doctor.runInit": "Run: contexa init",

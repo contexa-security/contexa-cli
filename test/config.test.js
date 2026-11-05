@@ -80,6 +80,26 @@ test('openai: OpenAI chat and embeddings, api-key placeholder and the credential
   assert.equal(CREDENTIALS_IMPORT, 'optional:file:${user.home}/.contexa/credentials.properties');
 });
 
+// Contexa follows the application's embedding model and never sets it, so the installation names
+// the model in a file the application can read.
+test('openai: the embedding model is named in the settings', () => {
+  const settings = settingsFor({ provider: 'openai', ollamaBaseUrl: null });
+  assert.equal(settings.spring.ai.openai.embedding.options.model, 'text-embedding-3-small');
+});
+
+test('openai: an embedding model the application already chose is left to it', () => {
+  const settings = settingsFor({
+    provider: 'openai',
+    ollamaBaseUrl: null,
+    hostConfigKeys: new Set(['spring.ai.openai.embedding.options.model']),
+  });
+  assert.equal(settings.spring.ai.openai.embedding, undefined);
+});
+
+test('ollama: no OpenAI embedding setting', () => {
+  assert.equal(settingsFor({ provider: 'ollama' }).spring?.ai?.openai, undefined);
+});
+
 test('anthropic: Anthropic chat with Ollama fallback and Ollama embeddings', () => {
   const settings = settingsFor({ provider: 'anthropic' });
   assert.equal(settings.contexa.llm.selection.chat.priority, 'anthropic,ollama');
@@ -109,7 +129,7 @@ test('keys the application already sets are never written', () => {
   assert.equal(settings.contexa.datasource.url, undefined);
   assert.equal(settings.contexa.datasource.username, '${CONTEXA_DB_USERNAME:contexa}');
   assert.equal(settings.contexa.security, undefined);
-  assert.equal(settings.spring.ai, undefined);
+  assert.equal(settings.spring.ai.openai['api-key'], undefined);
   // Spring Boot imports what every file lists, so the application's own import does not stop this one.
   assert.equal(settings.spring.config.import, CREDENTIALS_IMPORT);
   assert.equal(settings.spring.mail.host, undefined);

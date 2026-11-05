@@ -44,6 +44,7 @@ const {
   injectGradleDep,
   injectMavenDep,
   injectSpringAiDeps,
+  injectSecurityStarter,
   injectEnableAiSecurity,
 } = require('./injector/build');
 const {
@@ -525,10 +526,11 @@ async function applyProjectChanges(context) {
       ? await injectMavenDep(project.buildFilePath, options)
       : await injectGradleDep(project.buildFilePath, options);
     const aiAdded = await injectSpringAiDeps(project.buildFilePath, aiProviderArtifacts(provider), options);
-    if (starterAdded || aiAdded) {
+    const securityAdded = await injectSecurityStarter(project.buildFilePath, options);
+    if (starterAdded || aiAdded || securityAdded) {
       await recordChange(installRoot, project.buildFilePath, { kind: 'build-file', reason: 'Contexa dependencies' }, MODE);
     }
-    spinner.succeed(t(starterAdded || aiAdded ? 'init.step.buildDone' : 'init.step.buildPresent',
+    spinner.succeed(t(starterAdded || aiAdded || securityAdded ? 'init.step.buildDone' : 'init.step.buildPresent',
       relative(installRoot, project.buildFilePath)));
 
     if (!project.hasEnableAiSecurity) {

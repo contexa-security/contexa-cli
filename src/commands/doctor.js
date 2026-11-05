@@ -130,6 +130,9 @@ async function runDoctor(opts) {
   }
   if (!project.hasEnableAiSecurity) add('fail', '@EnableAISecurity', t('doctor.annotation.missing'), t('doctor.runInit'));
   else add('ok', '@EnableAISecurity', t(project.hasHostSecurityFilterChain ? 'doctor.annotation.app' : 'doctor.annotation.contexa'));
+  if (project.hasEnableAiSecurity && !project.hasSpringSecurityCore) {
+    add('fail', 'Spring Security', t('doctor.security.missing'), t('doctor.security.fix'));
+  }
 
   // config/application.yml is Contexa's only when Contexa wrote it; an application that keeps its
   // own file there has Contexa's settings in application-contexa.yml.

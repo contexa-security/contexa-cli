@@ -5,7 +5,9 @@
 //   1. Add the Contexa starter (spring-boot-starter-contexa). Idempotent.
 //   2. Add the Spring AI BOM, the selected model starters and the PgVector store starter that
 //      @EnableAISecurity needs. Dependencies the project already declares are never touched.
-//   3. Add @EnableAISecurity to the single @SpringBootApplication class.
+//   3. Add spring-boot-starter-security: the starter alone changes nothing in an application, and
+//      @EnableAISecurity, added here, is the decision to apply security.
+//   4. Add @EnableAISecurity to the single @SpringBootApplication class.
 //
 // Gradle insertion targets the *top-level* dependencies block, never the one inside
 // buildscript / subprojects / pluginManagement. New lines follow the file's own indentation.
@@ -20,6 +22,8 @@ const {
   springAiProviderArtifacts,
 } = require('./common');
 const { parseMavenModel, parseGradleModel, hasCoordinate } = require('../build-model');
+const SECURITY_GROUP_ID = 'org.springframework.boot';
+const SECURITY_ARTIFACT_ID = 'spring-boot-starter-security';
 const CONTEXA_SNAPSHOT_REPOSITORY =
   'https://central.sonatype.com/repository/maven-snapshots/';
 
@@ -266,6 +270,43 @@ async function injectGradleDep(gradlePath, options = {}) {
   }
   return true;
 }
+// Only what reaches the running application counts: a test or compile-only declaration leaves it
+// without Spring Security, and @EnableAISecurity would refuse to start.
+function appliesSpringSecurity(dependency) {
+  const named = (dependency.group === SECURITY_GROUP_ID && dependency.artifact === SECURITY_ARTIFACT_ID)
+    || (dependency.group === 'org.springframework.security' && dependency.artifact === 'spring-security-config');
+  return named && !/^(?:test|provided|compileOnly)/i.test(dependency.configuration || '');
+}
+
+// Spring Boot gives the version, as it does for the application's other starters.
+async function injectSecurityStarter(buildPath, options = {}) {
+  if (!buildPath || !await fs.pathExists(buildPath)) return false;
+  const content = await fs.readFile(buildPath, 'utf8');
+  const isMaven = buildPath.endsWith('.xml');
+  const model = isMaven ? parseMavenModel(content) : parseGradleModel(content);
+  if (model.dependencies.some(appliesSpringSecurity)) return false;
+  if (isMaven) {
+    if (model.dependenciesCloseIndex === -1) {
+      throw new Error('Maven injection impossible: pom.xml has no dependencies section.');
+    }
+    const dep =
+      `        <dependency>\n` +
+      `            <groupId>${SECURITY_GROUP_ID}</groupId>\n` +
+      `            <artifactId>${SECURITY_ARTIFACT_ID}</artifactId>\n` +
+      `        </dependency>\n`;
+    await fs.writeFile(buildPath,
+      insertBeforeClosingTag(content, model.dependenciesCloseIndex, adaptIndent(content, dep)));
+  } else {
+    const line = buildPath.endsWith('.kts')
+      ? `    implementation("${SECURITY_GROUP_ID}:${SECURITY_ARTIFACT_ID}")`
+      : `    implementation '${SECURITY_GROUP_ID}:${SECURITY_ARTIFACT_ID}'`;
+    await fs.writeFile(buildPath, insertIntoTopLevelDependencies(content, [line]));
+  }
+  captureAddedDependencies(options, [canonicalDependency(
+    SECURITY_GROUP_ID, SECURITY_ARTIFACT_ID, isMaven ? 'compile' : 'implementation', null, options.targetModule)]);
+  return true;
+}
+
 async function injectSpringAiDeps(buildPath, llmProviders = ['openai', 'anthropic'], options = {}) {
   if (!buildPath || !await fs.pathExists(buildPath)) return false;
   const content = await fs.readFile(buildPath, 'utf8');
@@ -502,6 +543,7 @@ function maskSourceNonCode(source) {
 }
 
 module.exports = {
+  injectSecurityStarter,
   injectMavenDep,
   injectGradleDep,
   injectSpringAiDeps,

@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 
 const {
-  injectMavenDep, injectGradleDep, injectSpringAiDeps, injectEnableAiSecurity,
+  injectMavenDep, injectGradleDep, injectSpringAiDeps, injectEnableAiSecurity, injectSecurityStarter,
 } = require('../src/core/injector/build');
 const { CONTEXA_VERSION, resolveDependencyVersions } = require('../src/core/injector/common');
 const releaseManifest = require('../release-manifest.json');
@@ -137,6 +137,95 @@ test('injectMavenDep: captures only the CLI-added canonical coordinate', async (
       targetModule: 'apps/api',
     }]);
   } finally { await fs.remove(dir); }
+});
+
+// ============================================================
+// injectSecurityStarter
+// ============================================================
+async function securityStarterOn(name, content, options) {
+  const dir = await tempDir();
+  try {
+    const buildPath = path.join(dir, name);
+    await fs.writeFile(buildPath, content);
+    const changed = await injectSecurityStarter(buildPath, options);
+    return { changed, out: await fs.readFile(buildPath, 'utf8') };
+  } finally { await fs.remove(dir); }
+}
+
+test('injectSecurityStarter: Groovy DSL declares it and leaves the version to Spring Boot', async () => {
+  const { changed, out } = await securityStarterOn('build.gradle', `dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}`);
+  assert.equal(changed, true);
+  assert.match(out, /implementation 'org\.springframework\.boot:spring-boot-starter-security'\n/);
+});
+
+test('injectSecurityStarter: Kotlin DSL uses parenthesized double-quoted notation', async () => {
+  const { out } = await securityStarterOn('build.gradle.kts', `dependencies {
+    implementation("org.springframework.boot:spring-boot-starter-web")
+}`);
+  assert.match(out, /implementation\("org\.springframework\.boot:spring-boot-starter-security"\)/);
+});
+
+test('injectSecurityStarter: Maven adds a dependency without a version', async () => {
+  const { changed, out } = await securityStarterOn('pom.xml', `<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+    </dependencies>
+</project>`);
+  assert.equal(changed, true);
+  assert.match(out, /<artifactId>spring-boot-starter-security<\/artifactId>\n\s*<\/dependency>/);
+});
+
+test('injectSecurityStarter: an application that declares it is left as it is', async () => {
+  const source = `dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+}`;
+  const { changed, out } = await securityStarterOn('build.gradle', source);
+  assert.equal(changed, false);
+  assert.equal(out, source);
+});
+
+test('injectSecurityStarter: Spring Security configuration declared directly counts', async () => {
+  const { changed } = await securityStarterOn('build.gradle', `dependencies {
+    implementation 'org.springframework.security:spring-security-config'
+}`);
+  assert.equal(changed, false);
+});
+
+// @EnableAISecurity would refuse to start: these do not reach the running application.
+for (const configuration of ['testImplementation', 'compileOnly']) {
+  test(`injectSecurityStarter: a ${configuration} declaration does not count`, async () => {
+    const { changed, out } = await securityStarterOn('build.gradle', `dependencies {
+    ${configuration} 'org.springframework.boot:spring-boot-starter-security'
+}`);
+    assert.equal(changed, true);
+    assert.match(out, /\n\s*implementation 'org\.springframework\.boot:spring-boot-starter-security'/);
+  });
+}
+
+test('injectSecurityStarter: a Maven test scope does not count', async () => {
+  const { changed } = await securityStarterOn('pom.xml', `<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>`);
+  assert.equal(changed, true);
+});
+
+test('injectSecurityStarter: the addition is recorded with the others', async () => {
+  const addedDependencies = [];
+  await securityStarterOn('build.gradle', `dependencies {
+}`, { addedDependencies, targetModule: '.' });
+  assert.deepEqual(addedDependencies.map(item => item.artifact), ['spring-boot-starter-security']);
+  assert.equal(addedDependencies[0].version, null);
 });
 
 // ============================================================

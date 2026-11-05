@@ -27,6 +27,10 @@ const ADMIN_PASSWORD_PROPERTY = 'contexa.iam.seed.admin.password';
 // with a {noop} prefix: Contexa's delegating password encoder cannot check a password without one.
 const APP_USER_PASSWORD_PROPERTY = 'spring.security.user.password';
 const USER_CONFIG_DIR_FILES = ['application.yml', 'application.yaml', 'application.properties'];
+// Spring AI's own default is a model of an earlier generation with the same vector size. Contexa
+// follows the application's model and never sets it, so the installation names this one here, in
+// a file the application can read and change.
+const OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
 
 // First line of every file Contexa writes; tells its own file from the application's.
 const SETTINGS_MARKER = '# Contexa settings, written by `contexa init`.';
@@ -125,6 +129,7 @@ function buildContexaSettings(options) {
   put('contexa.llm.selection.chat.priority', chatPriority);
   put('contexa.llm.selection.embedding.mode', 'fixed');
   put('contexa.llm.selection.embedding.priority', embeddingPriority);
+  if (embeddingPriority === 'openai') put('spring.ai.openai.embedding.options.model', OPENAI_EMBEDDING_MODEL);
   if (ollamaBaseUrl) {
     put('contexa.llm.chat.ollama.base-url', `\${CONTEXA_OLLAMA_BASE_URL:${ollamaBaseUrl}}`);
     put('contexa.llm.chat.ollama.model', chatModel);

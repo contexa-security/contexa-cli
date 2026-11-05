@@ -49,8 +49,10 @@ projects now.)
 
 In your project:
 
-- Adds `ai.ctxa:spring-boot-starter-contexa`, the Spring AI BOM, the model starter and the PgVector
-  starter to the build file (Maven, Gradle Groovy or Kotlin DSL, also inside multi-module builds).
+- Adds `ai.ctxa:spring-boot-starter-contexa`, `spring-boot-starter-security`, the Spring AI BOM, the
+  model starter and the PgVector starter to the build file (Maven, Gradle Groovy or Kotlin DSL, also
+  inside multi-module builds). The Contexa starter alone changes nothing in an application:
+  `@EnableAISecurity` is the decision to apply security, and Spring Security is what applies it.
 - Adds `@EnableAISecurity` to the `@SpringBootApplication` class, after showing who will own
   sign-in (see [Who owns sign-in](#who-owns-sign-in)):
   - your application declares a `SecurityFilterChain` → `@EnableAISecurity` (existing system,

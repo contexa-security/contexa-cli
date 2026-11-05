@@ -84,7 +84,7 @@
 
   "init.plan.title": "Contexa가 할 일:",
   "init.plan.project": "프로젝트에서",
-  "init.plan.build": "{0}에 Contexa starter와 Spring AI 의존성 추가",
+  "init.plan.build": "{0}에 Contexa starter, Spring Security, Spring AI 의존성 추가",
   "init.plan.annotationSandbox": "{0}에 @EnableAISecurity 추가 (로그인은 지금처럼 앱이 담당)",
   "init.plan.annotationFull": "{0}에 @EnableAISecurity(mode = FULL) 추가 (Contexa가 로그인 제공)",
   "init.plan.config": "Contexa 설정 파일 {0} 생성",
@@ -220,6 +220,8 @@
   "doctor.starter": "Contexa starter",
   "doctor.starter.missing": "빌드 파일에 없음",
   "doctor.annotation.missing": "앱 클래스에 없음",
+  "doctor.security.missing": "빌드 파일에 없음. @EnableAISecurity는 Spring Security로 보안을 적용합니다",
+  "doctor.security.fix": "org.springframework.boot:spring-boot-starter-security를 추가하거나 contexa init을 실행하세요",
   "doctor.annotation.app": "있음 (로그인은 앱이 담당)",
   "doctor.annotation.contexa": "있음",
   "doctor.runInit": "실행: contexa init",
