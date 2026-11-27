@@ -431,6 +431,42 @@ test('detector: identifies host-owned Java and Kotlin SecurityFilterChain beans'
   }
 });
 
+test('detector: reads the security mode of an @EnableAISecurity already in the application', async () => {
+  const build = "plugins { id 'org.springframework.boot' version '3.5.4' }\n";
+  const main = annotation => `package example;\n${annotation}\n@SpringBootApplication\npublic class App {}\n`;
+  const projects = {
+    bare: await makeTempProject({ 'build.gradle': build, 'src/main/java/example/App.java': main('@EnableAISecurity') }),
+    full: await makeTempProject({
+      'build.gradle': build,
+      'src/main/java/example/App.java': main('@EnableAISecurity(\n    mode = SecurityMode.FULL)'),
+    }),
+    sandbox: await makeTempProject({
+      'build.gradle': build,
+      'src/main/java/example/App.java': main('@io.contexa.contexacommon.annotation.EnableAISecurity(mode = SecurityMode.SANDBOX)'),
+    }),
+    kotlin: await makeTempProject({
+      'build.gradle.kts': 'plugins { id("org.springframework.boot") version "3.5.4" }\n',
+      'src/main/kotlin/example/App.kt': 'package example\n@EnableAISecurity(mode = SecurityMode.FULL)\n@SpringBootApplication\nclass App\n',
+    }),
+    commented: await makeTempProject({
+      'build.gradle': build,
+      'src/main/java/example/App.java': main('// @EnableAISecurity(mode = SecurityMode.FULL)\n@EnableAISecurity'),
+    }),
+    none: await makeTempProject({ 'build.gradle': build, 'src/main/java/example/App.java': main('') }),
+  };
+  try {
+    const mode = async name => (await detectSpringProject(projects[name], { probeDocker: false })).enableAiSecurityMode;
+    assert.equal(await mode('bare'), 'sandbox');
+    assert.equal(await mode('full'), 'full');
+    assert.equal(await mode('sandbox'), 'sandbox');
+    assert.equal(await mode('kotlin'), 'full');
+    assert.equal(await mode('commented'), 'sandbox', 'a commented-out annotation does not count');
+    assert.equal(await mode('none'), null);
+  } finally {
+    for (const dir of Object.values(projects)) await fs.remove(dir);
+  }
+});
+
 // --- multi-module roots, Spring Boot version, host database, host config keys ----------------
 
 async function withProject(layout, action) {

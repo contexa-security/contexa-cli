@@ -129,7 +129,7 @@ async function runDoctor(opts) {
     add('ok', t('doctor.starter'), `${releaseManifest.starter.artifactId}:${project.contextaVersion || '?'}`);
   }
   if (!project.hasEnableAiSecurity) add('fail', '@EnableAISecurity', t('doctor.annotation.missing'), t('doctor.runInit'));
-  else add('ok', '@EnableAISecurity', t(project.hasHostSecurityFilterChain ? 'doctor.annotation.app' : 'doctor.annotation.contexa'));
+  else add('ok', '@EnableAISecurity', t(project.enableAiSecurityMode === 'full' ? 'doctor.annotation.contexa' : 'doctor.annotation.app'));
   if (project.hasEnableAiSecurity && !project.hasSpringSecurityCore) {
     add('fail', 'Spring Security', t('doctor.security.missing'), t('doctor.security.fix'));
   }

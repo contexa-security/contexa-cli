@@ -308,13 +308,20 @@ test('init then reset: the project is byte-for-byte the original and no trace is
   assert.ok(build.includes(`ai.ctxa:spring-boot-starter-contexa:${releaseManifest.starter.version}`));
   assert.match(build, /spring-ai-bom:1\.1\.8/);
   assert.match(build, /spring-ai-starter-model-ollama/);
-  assert.match(await fs.readFile(path.join(project, MAIN_CLASS), 'utf8'),
-    /@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication/);
+  // Without --mode the CLI always installs SANDBOX, also for an application without a security chain of its own.
+  const main = await fs.readFile(path.join(project, MAIN_CLASS), 'utf8');
+  assert.match(main, /\n@EnableAISecurity\n@SpringBootApplication/);
+  assert.equal(main.includes('SecurityMode'), false);
+  assert.match(installed.stdout, /SANDBOX \(default\): Contexa is kept apart from your application/);
+  assert.match(installed.stdout, /Why: no --mode was given, so the default SANDBOX is used/);
+  assert.match(installed.stdout, /Contexa puts an isolation chain in place that lets every request through/);
+  assert.match(installed.stdout, /declare one ContexaSubjectResolver bean, or put a ContexaSubject in the request attribute ctxa\.subject/);
   const settings = readConfig(project);
   assert.equal(settings.contexa.datasource.url, '${CONTEXA_DB_URL:jdbc:postgresql://127.0.0.1:55432/contexa_shop}');
   assert.equal(settings.contexa.datasource.isolation['contexa-owned-application'], true);
   assert.equal(settings.contexa.llm.selection.chat.priority, 'ollama');
-  assert.equal(settings.spring.mail.port, '${CONTEXA_MAIL_PORT:51025}', 'FULL mode gets the local inbox');
+  assert.equal(settings.spring.mail.port, '${CONTEXA_MAIL_PORT:51025}', 'the console codes need the local inbox in SANDBOX too');
+  assert.equal(settings.spring.security, undefined, 'no Spring Boot user for an application that the isolation chain keeps open');
   assert.deepEqual(await fs.readFile(path.join(project, 'src/main/resources/application.yml'), 'utf8'),
     'server:\n  port: 9080\nhost-owned:\n  marker: keep\n');
   assert.equal(await fs.readFile(path.join(project, 'contexa', '.gitignore'), 'utf8'),
@@ -323,7 +330,7 @@ test('init then reset: the project is byte-for-byte the original and no trace is
   const manifest = await loadManifest(project);
   assert.equal(manifest.transaction.status, 'COMMITTED');
   assert.equal(manifest.metadata.provider, 'ollama');
-  assert.equal(manifest.metadata.securityMode, 'full');
+  assert.equal(manifest.metadata.securityMode, 'sandbox');
   const state = await fs.readJson(localStatePath(sandbox));
   assert.deepEqual(Object.values(state.projects).map(item => item.database), ['contexa_shop']);
 
@@ -356,14 +363,16 @@ test('the screen after init lists what changed, what to do now in numbered steps
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'the parts come in the order a person needs them');
   // what changed
   assert.match(screen, /- build\.gradle: the Contexa starter and the Spring AI dependencies/);
-  assert.match(screen, /- src\/main\/java\/example\/SampleApplication\.java: @EnableAISecurity\(mode = FULL\)/);
+  assert.match(screen, /- src\/main\/java\/example\/SampleApplication\.java: @EnableAISecurity, your application keeps its own sign-in/);
   assert.match(screen, /- src\/main\/resources\/config\/application\.yml: the Contexa settings/);
-  // what to do now: numbered, in order, with the account and the code
+  // what to do now: numbered, in order, with the account and the code (SANDBOX, the default: the console still asks
+  // for the code after the password)
   const steps = screen.match(/^\s+\d\. .*$/gm).map(line => line.trim());
   assert.match(steps[0], /^1\. Start your application as usual:/);
-  assert.match(steps[1], /^2\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
-  assert.match(steps[2], /^3\. Sign in with the admin account: user admin, password [A-Za-z0-9]{16} \(kept in /);
-  assert.match(steps[3], /^4\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
+  assert.match(steps[1], /^2\. Sign in the way your application always does\./);
+  assert.match(steps[2], /^3\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
+  assert.match(steps[3], /^4\. Sign in to the console with Contexa's administrator, not an account of your application: user admin, password [A-Za-z0-9]{16} \(kept in /);
+  assert.match(steps[4], /^5\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
   // the database: name, address, user and password
   assert.match(screen, /Database\s+contexa_shop at jdbc:postgresql:\/\/127\.0\.0\.1:55432\/contexa_shop/);
   assert.match(screen, /user contexa, password contexa/);
@@ -415,11 +424,43 @@ test('an empty folder gets the sample application, which is then set up', async 
   assert.match(pom, /<artifactId>spring-boot-starter-contexa<\/artifactId>/);
   assert.match(pom, /<artifactId>spring-ai-bom<\/artifactId>\s*<version>1\.1\.8<\/version>/);
   const main = await fs.readFile(path.join(empty, 'src/main/java/com/example/empty/EmptyApplication.java'), 'utf8');
+  // The sample is Contexa's own trial application with no sign-in of its own: without an option it gets FULL, so
+  // Contexa's sign-in gives it users to decide on.
   assert.match(main, /@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication/);
+  assert.match(result.stdout, /FULL: Contexa is your application's main security/);
+  assert.match(result.stdout, /Why: this is the sample application the CLI made in an empty folder to try Contexa, so FULL is the default/);
+  assert.match(result.stdout, /contexa init --mode sandbox/);
   assert.match(await fs.readFile(path.join(empty, 'src/main/resources/application.properties'), 'utf8'),
     /^contexa\.iam\.seed\.accounts\.enabled=true$/m);
   assert.ok(await fs.pathExists(path.join(empty, CONFIG_FILE)));
+  assert.equal((readConfig(empty).spring || {}).security, undefined);
   assert.match(result.stdout, /\.[\\/]mvnw spring-boot:run/);
+  assert.match(result.stdout, /Sign-in\s+Contexa provides the sign-in page and the admin console\./);
+  const steps = result.stdout.match(/^\s+\d\. .*$/gm).map(line => line.trim());
+  assert.match(steps[1], /^2\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
+  assert.match(steps[2], /^3\. Sign in: user admin, password 1111 \(sample account\)\./);
+  assert.match(steps[3], /^4\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
+  assert.equal((await loadManifest(empty)).metadata.securityMode, 'full');
+});
+
+test('the sample application with --mode sandbox is kept apart: bare annotation, its accounts sign in to the console', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-sample-sandbox-');
+  const empty = path.join(sandbox.root, 'empty');
+  await fs.ensureDir(empty);
+  const result = await init(empty, sandbox, ['--mode', 'sandbox']);
+  assert.equal(result.code, 0, result.output);
+  const main = await fs.readFile(path.join(empty, 'src/main/java/com/example/empty/EmptyApplication.java'), 'utf8');
+  assert.match(main, /\n@EnableAISecurity\n@SpringBootApplication/);
+  assert.equal(main.includes('SecurityMode'), false);
+  assert.match(result.stdout, /SANDBOX \(default\): Contexa is kept apart from your application/);
+  assert.match(result.stdout, /Why: you chose it \(--mode\)\./);
+  assert.equal((readConfig(empty).spring || {}).security, undefined);
+  const steps = result.stdout.match(/^\s+\d\. .*$/gm).map(line => line.trim());
+  assert.match(steps[1], /^2\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin/);
+  assert.match(steps[2], /^3\. Sign in: user admin, password 1111 \(sample account\)\./);
+  assert.match(steps[3], /^4\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
+  assert.doesNotMatch(result.stdout, /Sign in the way your application always does/);
+  assert.equal((await loadManifest(empty)).metadata.securityMode, 'sandbox');
 });
 
 test('a folder with other files gets the sample in contexa-demo and keeps its own files', async t => {
@@ -486,9 +527,9 @@ test('a read-only build file: FILE_NOT_WRITABLE, rolled back, nothing changed', 
 
 // --- choices that shape the settings -----------------------------------------------------------
 
-// Ownership design S-2 (2026-11-03): under HOST_OWNED a CHALLENGE is answered by Contexa's step-up, whose one-time code
-// needs a mailbox as Contexa's own sign-in does under FULL; the plan says who owns what before anything changes.
-test('an application with its own SecurityFilterChain gets SANDBOX: bare annotation, the ownership explained, a mail inbox', async t => {
+// Under SANDBOX a CHALLENGE is answered by Contexa's step-up and the console asks for a code after the password; both
+// need a mailbox as Contexa's own sign-in does under FULL. The plan says what the mode means before anything changes.
+test('an application with its own SecurityFilterChain gets SANDBOX: bare annotation, the mode explained, a mail inbox', async t => {
   const sandbox = await sandboxFor(t, 'ctxa-flow-sandbox-');
   const project = await createGradleProject(sandbox.root, 'secured', { security: true });
   const result = await init(project, sandbox);
@@ -499,10 +540,12 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.equal(main.includes('SecurityMode'), false);
   assert.deepEqual(readConfig(project).spring.mail,
     { host: '${CONTEXA_MAIL_HOST:127.0.0.1}', port: '${CONTEXA_MAIL_PORT:51025}' },
-    'the step-up codes of HOST_OWNED need the mailbox too');
-  assert.match(result.stdout, /Existing system: your application keeps its sign-in \(SANDBOX, HOST_OWNED\)/);
-  assert.match(result.stdout, /Why: your application declares its own Spring Security chain/);
-  assert.match(result.stdout, /contexa init --ownership contexa/);
+    'the step-up and console codes of SANDBOX need the mailbox too');
+  assert.match(result.stdout, /SANDBOX \(default\): Contexa is kept apart from your application; its sign-in, authorization and security settings stay as they are/);
+  assert.match(result.stdout, /Why: no --mode was given, so the default SANDBOX is used/);
+  assert.match(result.stdout, /contexa init --mode full/);
+  assert.match(result.stdout, /Signing in at \/contexa\/admin takes the password and then a code by mail or a passkey/);
+  assert.doesNotMatch(result.stdout, /HOST_OWNED|CONTEXA_OWNED|--ownership/);
   // F-50: Spring Boot's default user stays (the starter's OAuth2 classes and Contexa's password
   // encoder would leave the application without it), with a password kept outside the project.
   assert.deepEqual(readConfig(project).spring.security, { user: { name: 'user' } });
@@ -512,8 +555,8 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.ok(kept, 'the password is kept with the {noop} prefix');
   assert.match(result.stdout, /keep Spring Boot's default user user, which the starter would turn off, with a password kept in /);
   assert.match(result.stdout, new RegExp(`Sign in with your application's account: user user, password ${kept[1]} \\(kept in `));
-  // Ownership design S-3: Contexa's console keeps its own administrator under HOST_OWNED, apart from the application's
-  // accounts, so the account is made here as under FULL and the steps say where it signs in.
+  // Contexa's console keeps its own administrator under SANDBOX, apart from the application's accounts, so the account
+  // is made here as under FULL and the steps say where it signs in and that a code follows the password.
   const admin = (await fs.readFile(credentials, 'utf8')).match(/^contexa\.iam\.seed\.admin\.password=([A-Za-z0-9]{16})$/m);
   assert.ok(admin, 'the console administrator password is kept in the credentials file');
   assert.match(result.stdout, /- make a password for the admin-console account admin and keep it in /);
@@ -521,6 +564,7 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.match(steps.join('\n'), /\d\. Sign in with your application's account: user user/);
   assert.match(steps.join('\n'), /\d\. Open the admin console: http:\/\/localhost:8080\/contexa\/admin {2}\(http:\/\/localhost:8080 is the default address/);
   assert.match(steps.join('\n'), new RegExp(`\\d\\. Sign in to the console with Contexa's administrator, not an account of your application: user admin, password ${admin[1]} \\(kept in `));
+  assert.match(steps[steps.length - 1], /^\d\. Contexa then sends a one-time code to the local inbox http:\/\/127\.0\.0\.1:58025/);
   assert.equal(result.stdout.includes('{1}'), false, 'every placeholder is filled');
   const again = await init(project, sandbox);
   assert.equal(again.code, 0, again.output);
@@ -529,6 +573,36 @@ test('an application with its own SecurityFilterChain gets SANDBOX: bare annotat
   assert.equal((await fs.readFile(credentials, 'utf8')).match(/spring\.security\.user\.password=/g).length, 1);
   assert.equal((await fs.readFile(credentials, 'utf8')).match(/contexa\.iam\.seed\.admin\.password=/g).length, 1);
   assert.equal((await loadManifest(project)).metadata.securityMode, 'sandbox');
+});
+
+test('--ownership is the former name of --mode: contexa installs FULL, and the CLI says to use --mode full', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-alias-');
+  const project = await createGradleProject(sandbox.root, 'alias-app');
+  const result = await init(project, sandbox, ['--ownership', 'contexa']);
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.stdout, /--ownership contexa is the former name of --mode full; use --mode full from now on/);
+  assert.match(await fs.readFile(path.join(project, MAIN_CLASS), 'utf8'),
+    /@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication/);
+  assert.match(result.stdout, /FULL: Contexa is your application's main security/);
+  assert.equal((await loadManifest(project)).metadata.securityMode, 'full');
+});
+
+test('--mode and --ownership that disagree: MODE_CONFLICT before any folder is looked at, nothing changed', async t => {
+  const sandbox = await sandboxFor(t, 'ctxa-flow-conflict-');
+  const project = await createGradleProject(sandbox.root, 'conflict-app');
+  const before = await snapshotDirectory(project);
+  const result = await init(project, sandbox, ['--mode', 'sandbox', '--ownership', 'contexa']);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.stderr, /MODE_CONFLICT/);
+  assert.match(result.stderr, /--mode sandbox and --ownership contexa \(= --mode full\) disagree/);
+  assert.deepEqual(await snapshotDirectory(project), before);
+  const empty = path.join(sandbox.root, 'empty');
+  await fs.ensureDir(empty);
+  const inEmpty = await init(empty, sandbox, ['--mode', 'full', '--ownership', 'host']);
+  assert.equal(inEmpty.code, 1, inEmpty.output);
+  assert.match(inEmpty.stderr, /MODE_CONFLICT/);
+  assert.deepEqual(await fs.readdir(empty), [], 'no sample application was made');
+  assert.equal(await fs.pathExists(localStatePath(sandbox)), false, 'nothing was prepared on the computer either');
 });
 
 test('--provider openai with OPENAI_API_KEY: OpenAI starter and settings, key left to the environment', async t => {
@@ -797,8 +871,13 @@ test('FULL in an existing application: an admin-console password kept outside th
   const sandbox = await sandboxFor(t, 'ctxa-flow-admin-');
   const credentials = path.join(sandbox.home, '.contexa', 'credentials.properties');
   const project = await createGradleProject(sandbox.root, 'admin-app');
-  const first = await init(project, sandbox);
+  const first = await init(project, sandbox, ['--mode', 'full']);
   assert.equal(first.code, 0, first.output);
+  assert.match(await fs.readFile(path.join(project, MAIN_CLASS), 'utf8'),
+    /@EnableAISecurity\(mode = SecurityMode\.FULL\)\n@SpringBootApplication/);
+  assert.match(first.stdout, /FULL: Contexa is your application's main security/);
+  assert.match(first.stdout, /Why: you chose it \(--mode\)\./);
+  assert.match(first.stdout, /contexa init --mode sandbox/);
   assert.match(first.stdout, /- make a password for the admin-console account admin and keep it in .*credentials\.properties \(outside the project\)/);
   const kept = (await fs.readFile(credentials, 'utf8')).match(/^contexa\.iam\.seed\.admin\.password=([A-Za-z0-9]{16})$/m);
   assert.ok(kept, 'a 16-character password is kept in the credentials file');
@@ -812,17 +891,22 @@ test('FULL in an existing application: an admin-console password kept outside th
   }
   if (process.platform !== 'win32') assert.equal((await fs.stat(credentials)).mode & 0o777, 0o600);
 
+  // A run without --mode keeps the FULL that the annotation already says and reports it as such.
   const again = await init(project, sandbox);
   assert.equal(again.code, 0, again.output);
+  assert.match(again.stdout, /FULL: Contexa is your application's main security/);
+  assert.match(again.stdout, /Why: the @EnableAISecurity of your application class already sets it/);
+  assert.doesNotMatch(again.stdout, /SANDBOX \(default\)/);
   assert.match(again.stdout, /- use the admin-console password kept in /);
   assert.match(again.stdout, new RegExp(`password ${password} `));
   assert.equal((await fs.readFile(credentials, 'utf8')).match(/contexa\.iam\.seed\.admin\.password=/g).length, 1);
+  assert.equal((await loadManifest(project)).metadata.securityMode, 'full');
 
   // An application that configures Contexa's seed accounts itself keeps its own settings.
   const own = await createGradleProject(sandbox.root, 'own-accounts', {
     yml: 'contexa:\n  iam:\n    seed:\n      accounts:\n        enabled: false\n',
   });
-  const owned = await init(own, sandbox);
+  const owned = await init(own, sandbox, ['--mode', 'full']);
   assert.equal(owned.code, 0, owned.output);
   assert.doesNotMatch(owned.stdout, /admin-console|Admin console/);
   assert.equal((readConfig(own).spring || {}).config, undefined);

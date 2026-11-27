@@ -53,16 +53,18 @@ In your project:
   model starter and the PgVector starter to the build file (Maven, Gradle Groovy or Kotlin DSL, also
   inside multi-module builds). The Contexa starter alone changes nothing in an application:
   `@EnableAISecurity` is the decision to apply security, and Spring Security is what applies it.
-- Adds `@EnableAISecurity` to the `@SpringBootApplication` class, after showing who will own
-  sign-in (see [Who owns sign-in](#who-owns-sign-in)):
-  - your application declares a `SecurityFilterChain` → `@EnableAISecurity` (existing system,
-    HOST_OWNED: your sign-in stays; if it signs in with Spring Boot's default user, which the
-    starter would turn off, that user `user` is kept with a password made once and kept in
+- Adds `@EnableAISecurity` to the `@SpringBootApplication` class, after showing the security mode
+  and what it means (see [Security mode](#security-mode)):
+  - without an option → `@EnableAISecurity` (SANDBOX, the default: Contexa is kept apart from your
+    application, whose sign-in, authorization and security settings stay as they are; if your
+    `SecurityFilterChain` signs in with Spring Boot's default user, which the starter would turn
+    off, that user `user` is kept with a password made once and kept in
     `~/.contexa/credentials.properties`);
-  - otherwise → `@EnableAISecurity(mode = SecurityMode.FULL)` (new system, CONTEXA_OWNED: Contexa
-    provides the sign-in);
-  - `--ownership host|contexa` decides instead, for example for an application that signs users in
-    on its own without Spring Security.
+  - `--mode full` → `@EnableAISecurity(mode = SecurityMode.FULL)` (Contexa is your application's
+    main security: sign-in, authorization and security settings);
+  - the sample application created in an empty folder → FULL without an option, since it has no
+    sign-in of its own (`--mode sandbox` keeps it apart instead);
+  - an `@EnableAISecurity` already in your application is left as it is, with its mode.
 - Writes Contexa's settings to `src/main/resources/config/application.yml`. Spring Boot reads that
   file by itself, so your own `application.yml` / `application.properties` stay unchanged. Keys you
   already set yourself are never written there.
@@ -73,14 +75,14 @@ On this computer (shared by all your projects):
   with a database of its own for each project.
 - Ollama: the one already running on your computer, or one started in Docker. The models are
   downloaded once.
-- A local mail inbox (Mailpit) that receives Contexa's one-time codes (the second sign-in step when
-  Contexa provides the sign-in, the additional verification of a CHALLENGE when your application
-  keeps it), so they work without a mail server.
+- A local mail inbox (Mailpit) that receives Contexa's one-time codes (the second sign-in step of
+  the admin console in both modes and of Contexa's sign-in with FULL, the additional verification of
+  a CHALLENGE with SANDBOX), so they work without a mail server.
 - A password for the admin-console account `admin`, kept in `~/.contexa/credentials.properties`
   (outside the project) and shown at the end. Contexa creates the account when the application
-  first starts. When your application keeps sign-in, this is Contexa's own administrator for the
-  console, apart from your application's accounts. The example application created in an empty
-  folder uses the sample accounts (`admin` / `1111`).
+  first starts. With SANDBOX, this is Contexa's own administrator for the console, apart from your
+  application's accounts. The example application created in an empty folder uses the sample
+  accounts (`admin` / `1111`).
 
 Contexa starts in **SHADOW** mode: it analyses and records requests but blocks nothing yet. Change
 `contexa.security.zerotrust.mode` to `ENFORCE` (or switch it in the admin console) once you have
@@ -88,21 +90,39 @@ reviewed its decisions.
 
 Running `contexa init` again is safe; it checks what is in place and adds only what is missing.
 
-### Who owns sign-in
+### Security mode
 
-Before it changes anything, `contexa init` shows which of the two ownerships it chose and why:
+Before it changes anything, `contexa init` shows the security mode and what it means. Both modes run
+every feature of Contexa; they differ in what Contexa's security settings do to your application:
 
-| | Existing system (SANDBOX, HOST_OWNED) | New system (FULL, CONTEXA_OWNED) |
+| | SANDBOX (default) | FULL |
 |---|---|---|
-| Chosen when | your application declares a `SecurityFilterChain` | it declares none |
-| Sign-in, sessions, cookies, URL rules | your application, as now (Contexa only reads who signed in) | Contexa (sign-in page, passkey, one-time code) |
+| Chosen when | no option is given | `--mode full`, or no option for the sample application created in an empty folder |
+| Sign-in, sessions, cookies, security settings | your application, as now (Contexa does not change them; it reads who signed in and decides) | Contexa (sign-in page, passkey, one-time code) |
 | Risk decisions and their enforcement on every path (block screen, additional verification, agent gate) | Contexa | Contexa, the same |
-| Contexa console `/contexa/admin` | Contexa's own administrator account, apart from your users | Contexa's administrator account |
+| Contexa console `/contexa/admin` | Contexa's own administrator account, apart from your users: the password, then a code by mail or a passkey | Contexa's administrator account, on Contexa's sign-in page: the password, then a code by mail or a passkey |
 
-With your application keeping sign-in, a CHALLENGE sends the user to Contexa's additional
-verification (`/contexa/step-up`: a passkey, or a one-time code by mail); your application's sign-in
-and session stay as they were. Choosing the new system for an application that declares its own
-chain stops that chain from being used, and the CLI says so.
+With SANDBOX, a CHALLENGE sends the user to Contexa's additional verification (`/contexa/step-up`:
+a passkey, or a one-time code by mail); your application's sign-in and session stay as they were.
+An application with neither a `SecurityFilterChain` nor users of its own gets Contexa's isolation
+chain, which lets every request through, so its access stays as it is (one that relied on Spring
+Boot's default security and its `user` no longer asks for that sign-in: declare a chain to keep it);
+one with users of its own
+but no chain keeps Spring Boot's default security, which asks every request to sign in, and Contexa
+warns about it at the start.
+An application that signs its users in without Spring Security tells Contexa who signed in with one
+`ContexaSubjectResolver` bean, or puts a `ContexaSubject` in the request attribute `ctxa.subject`
+from its own filter.
+
+With FULL, Contexa's main chain takes every request. An application chain narrowed to its own paths
+with `http.securityMatcher(...)` takes those paths first and runs alongside; an application chain
+that takes every request cannot run with it, and the application does not start. The CLI says so
+before it changes anything.
+
+The CLI writes no authentication ownership (`contexa.bridge.ownership`). Left out, it follows the
+mode (SANDBOX → `HOST_OWNED`, FULL → `CONTEXA_OWNED`); it only settles whose component the
+application gets where your application and Contexa bring one of the same kind (a
+`UserDetailsService`, a `JwtDecoder`), and it turns no feature off.
 
 ### Options
 
@@ -111,7 +131,8 @@ Everything is asked interactively; options are for scripts and CI.
 | Option | Meaning |
 |---|---|
 | `--provider <ollama\|openai\|anthropic>` | AI model provider (default `ollama`) |
-| `--ownership <host\|contexa>` | Who owns sign-in: `host` (your application keeps it) or `contexa` (Contexa provides it). Without it the CLI decides from your `SecurityFilterChain` |
+| `--mode <sandbox\|full>` | Security mode: `sandbox` (default, Contexa kept apart from your application) or `full` (Contexa is your application's main security). Without it the CLI uses `sandbox`, except `full` for the sample application it creates in an empty folder |
+| `--ownership <host\|contexa>` | Former name of `--mode`, still accepted: `host` = `sandbox`, `contexa` = `full`. Given together with `--mode`, the two must agree |
 | `--yes` | Do not ask; use the defaults |
 | `--dir <path>` | Project folder (default: current folder) |
 | `--db-url <jdbc-url>` | Use your own PostgreSQL (with pgvector) instead of the local one; the password comes from `CONTEXA_DB_PASSWORD` |

@@ -67,7 +67,7 @@ const { checkDependencies, runCommandText } = require('./build-tool');
 const { hasCredential, readCredential, saveCredential, credentialsPath } = require('./credentials');
 const { sampleTarget, createSampleProject } = require('./sample-project');
 const { runApplication } = require('./app-runner');
-const { resolveOwnership, ownershipLines } = require('./ownership');
+const { chooseSecurityMode, resolveSecurityMode, securityModeLines, warningArgs } = require('./ownership');
 
 const MODE = INSTALL_MODES.NORMAL;
 
@@ -288,8 +288,9 @@ async function chooseProvider(opts, previous, interactive) {
 // The admin-console account (the example application has the sample accounts). Contexa creates it
 // at the first start from contexa.iam.seed.admin.password; the password is made once and kept with
 // the API keys, outside the project, so a deployment without that file never gets this account.
-// Under FULL it signs in to Contexa; under HOST_OWNED the console signs in Contexa's administrators
-// only, apart from the application's accounts. An application that configures Contexa's seed
+// Under FULL it signs in on Contexa's sign-in page; under SANDBOX the console at /contexa/admin signs
+// in Contexa's administrators only, apart from the application's accounts. Either way the password
+// is followed by a code by mail or a passkey. An application that configures Contexa's seed
 // accounts itself is left to its own settings.
 async function planAdministrator(project) {
   if (project.createdSample) return null;
@@ -300,15 +301,18 @@ async function planAdministrator(project) {
   return { username: 'admin', password: saved || generatePassword(), saved: !!saved };
 }
 
-// An application that keeps its own sign-in and relies on Spring Boot's default user (the
-// password Spring Boot logs at the start) would lose it with Contexa: Spring Boot does not create
-// the user once the OAuth2 classes of the starter are on the classpath, and with Contexa's
-// delegating password encoder it would store a generated password that no sign-in can match
-// (F-50). So the user is kept with a password made once and kept outside the project, like the
-// admin-console password. Applications with users of their own, with OAuth2 or SAML of their own,
-// or with spring.security.user.* set are left alone.
+// An application that keeps its own sign-in (SANDBOX) with a SecurityFilterChain of its own and
+// relies on Spring Boot's default user (the password Spring Boot logs at the start) would lose it
+// with Contexa: Spring Boot does not create the user once the OAuth2 classes of the starter are on
+// the classpath, and with Contexa's delegating password encoder it would store a generated password
+// that no sign-in can match (F-50). So the user is kept with a password made once and kept outside
+// the project, like the admin-console password. Applications with users of their own, with OAuth2
+// or SAML of their own, or with spring.security.user.* set are left alone, and so is an application
+// without a chain of its own: in SANDBOX Contexa then puts its isolation chain in place, which lets
+// every request through, so nobody signs in with that user.
 async function planBootDefaultUser(project, securityMode) {
-  if (securityMode !== 'sandbox' || project.hostDefinesUsers || project.hostSecurityAlternative) return null;
+  if (securityMode !== 'sandbox' || !project.hasHostSecurityFilterChain) return null;
+  if (project.hostDefinesUsers || project.hostSecurityAlternative) return null;
   if ([...project.hostConfigKeys].some(key => key.startsWith('spring.security.user.'))) return null;
   const saved = await readCredential(APP_USER_PASSWORD_PROPERTY);
   const password = saved ? saved.replace(/^\{noop\}/, '') : generatePassword();
@@ -358,7 +362,8 @@ async function resolveLocalServices(opts, provider, interactive, securityMode) {
     const plan = await local.planLocalServices({
       needOllama: usesOllama(provider),
       needPostgres: !external,
-      // Contexa's one-time codes need a mailbox: its sign-in under FULL, the step-up of a CHALLENGE under HOST_OWNED.
+      // Contexa's one-time codes need a mailbox: the second sign-in step of its console in both modes and of its
+      // sign-in under FULL, the step-up of a CHALLENGE under SANDBOX.
       wantMail: true,
     });
     if (plan.problems.length === 0) return { plan, external };
@@ -451,11 +456,14 @@ function printPlan(context) {
     out(t(securityMode === 'full' ? 'init.plan.annotationFull' : 'init.plan.annotationSandbox',
       relative(installRoot, mainClass)));
   }
-  if (context.ownership) {
-    // Who owns sign-in, why, and who does what, before anything changes.
+  if (context.securityModeChoice) {
+    // The security mode, why, and who does what, before anything changes.
+    const resolved = context.securityModeChoice;
     console.log(chalk.white(`  ${t('ownership.title')}`));
-    for (const line of ownershipLines(context.ownership)) out(line);
-    for (const warning of context.ownership.warnings) console.log(chalk.yellow(`    ! ${t(warning)}`));
+    for (const line of securityModeLines(resolved)) out(line);
+    for (const warning of resolved.warnings) {
+      console.log(chalk.yellow(`    ! ${t(warning, ...warningArgs(resolved, warning))}`));
+    }
   }
   const configKey = editedSinceLastInit(context.existing, installRoot, configPlan.filePath) ? 'init.plan.configKept'
     : fs.existsSync(configPlan.filePath) ? 'init.plan.configUpdate' : 'init.plan.config';
@@ -730,12 +738,17 @@ function printDone(context) {
   } else {
     if (bootDefaultUser) {
       step(t('init.done.step.signInBoot', bootDefaultUser.username, bootDefaultUser.password, credentialsPath()));
-    } else {
+    } else if (!project.createdSample) {
       step(t('init.done.step.signInOwn'));
     }
-    if (administrator) {
+    if (project.createdSample || administrator) {
       step(t('init.done.step.console', `${address}/contexa/admin`, address));
-      step(t('init.done.step.signInAdminHost', administrator.username, administrator.password, credentialsPath()));
+      if (project.createdSample) {
+        step(t('init.done.step.signInSample'));
+      } else {
+        step(t('init.done.step.signInAdminHost', administrator.username, administrator.password, credentialsPath()));
+      }
+      step(mailUi ? t('init.done.step.code', mailUi) : t('init.done.step.codeMail'));
     }
   }
 
@@ -786,9 +799,7 @@ async function offerRun(context) {
   const result = await runApplication(project, {
     onStarted: ({ port }) => {
       console.log(chalk.green(`\n  v ${t('init.run.started', `http://localhost:${port}`)}`));
-      if (context.securityMode === 'full') {
-        console.log(chalk.gray(`    ${t('init.run.console', `http://localhost:${port}/contexa/admin`)}`));
-      }
+      console.log(chalk.gray(`    ${t('init.run.console', `http://localhost:${port}/contexa/admin`)}`));
       console.log(chalk.gray(`    ${t('init.run.stop')}\n`));
     },
   });
@@ -805,6 +816,11 @@ async function offerRun(context) {
 async function executeInit(opts) {
   const interactive = isInteractive(opts);
   console.log(chalk.cyan(`\n  Contexa ${releaseManifest.cliVersion} - ${t('init.title')}\n`));
+  // The mode options are checked before any folder is looked at, so a contradiction changes nothing.
+  const modeChoice = chooseSecurityMode({ mode: opts.mode, ownership: opts.ownership });
+  if (modeChoice.alias) {
+    console.log(chalk.yellow(`  ! ${t('ownership.alias', modeChoice.alias.from, modeChoice.alias.to)}`));
+  }
 
   const { installRoot, project } = await findApplication(opts, interactive);
   const { warnings } = checkProject(project);
@@ -817,10 +833,10 @@ async function executeInit(opts) {
   if (existing && project.hasContexta) console.log(chalk.gray(`  ${t('init.again')}`));
 
   const mainClass = await chooseMainClass(project, installRoot, interactive);
-  // The application keeps sign-in when it declares its own SecurityFilterChain (Contexa's
-  // SANDBOX default); otherwise Contexa provides sign-in (FULL). --ownership decides instead.
-  const ownership = resolveOwnership(project, opts.ownership);
-  const securityMode = ownership.securityMode;
+  // SANDBOX unless --mode full (or its former name --ownership contexa) is given; the sample application made in an
+  // empty folder gets FULL without an option, and an annotation already there keeps its mode.
+  const securityModeChoice = resolveSecurityMode(project, modeChoice);
+  const securityMode = securityModeChoice.securityMode;
 
   let provider = await chooseProvider(opts, existing && existing.metadata && existing.metadata.provider, interactive);
   let resolved = await resolveLocalServices(opts, provider, interactive, securityMode);
@@ -850,7 +866,7 @@ async function executeInit(opts) {
   }
 
   const context = {
-    installRoot, project, mainClass, securityMode, ownership, configPlan, provider,
+    installRoot, project, mainClass, securityMode, securityModeChoice, configPlan, provider,
     services: plan, external, models, apiKey, missingModels, existing, administrator, bootDefaultUser,
   };
   printPlan(context);

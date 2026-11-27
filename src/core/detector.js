@@ -22,7 +22,7 @@ async function detectSpringProject(dir = process.cwd(), opts = {}) {
     hasSpringSecurityCore: false, hasContexta: false, contextaVersion: null, projectName: null,
     projectDir: rootDir, appYmlPath: null, appPropertiesPath: null,
     applicationConfigPaths: [], configDirPaths: [], mainApplicationCandidates: [], hasDocker: false,
-    gradleRootDir: null, hasEnableAiSecurity: false, hasHostSecurityFilterChain: false,
+    gradleRootDir: null, hasEnableAiSecurity: false, enableAiSecurityMode: null, hasHostSecurityFilterChain: false,
     hostDefinesUsers: false, hostSecurityAlternative: null,
     ambiguousModules: [], noApplication: null, contexaSource: false, springBootVersion: null, springBootVersionSource: null,
     hostOwnsDatabase: false, hostDatabaseReason: null, hostConfigKeys: new Set(),
@@ -512,6 +512,7 @@ async function inventoryApplicationSources(result, projectDir) {
       if (/@EnableAISecurity\b/.test(code)
           || /@io\.contexa\.[\w.]*EnableAISecurity\b/.test(code)) {
         result.hasEnableAiSecurity = true;
+        result.enableAiSecurityMode = annotatedSecurityMode(code, result.enableAiSecurityMode);
       }
       const javaSecurityChain = /@Bean(?:\s*\([^)]*\))?[\s\S]{0,500}?\bSecurityFilterChain\s+\w+\s*\(/.test(code);
       const kotlinSecurityChain = /@Bean(?:\s*\([^)]*\))?[\s\S]{0,500}?\bfun\s+\w+\s*\([^)]*\)\s*:\s*SecurityFilterChain\b/.test(code);
@@ -525,6 +526,14 @@ async function inventoryApplicationSources(result, projectDir) {
       }
     }
   }
+}
+
+// The security mode an @EnableAISecurity already in the application names: FULL when its attributes say so, otherwise
+// SANDBOX, the annotation's default. The CLI never changes an annotation that is there, so this is the mode in effect.
+function annotatedSecurityMode(code, previous) {
+  const annotation = /@(?:io\.contexa\.[\w.]*)?EnableAISecurity\b\s*(?:\(([^)]*)\))?/.exec(code);
+  const full = Boolean(annotation && annotation[1] && /\bFULL\b/.test(annotation[1]));
+  return previous === 'full' || full ? 'full' : 'sandbox';
 }
 
 async function listSourceFiles(rootDir, extension) {
